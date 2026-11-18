@@ -2,6 +2,8 @@
 #include "MainToolbar.h"
 
 #include <cmath>
+#include <cstdio>
+#include <optional>
 
 namespace sc::toolbar
 {
@@ -104,15 +106,20 @@ void drawIcon (juce::Graphics& g, Icon icon, juce::Rectangle<float> area, juce::
             arrowHead (fill, 15.0f, 8.0f, 8.0f, 8.0f, 3.0f, 2.5f);
             break;
         case Icon::toggleViews:
-            // A waveform above, a spectrogram's bars below.
-            stroke.addRectangle (1.5f, 1.5f, 13.0f, 5.5f);
-            stroke.startNewSubPath (3.0f, 4.25f);
-            for (int i = 0; i < 10; ++i)
-                stroke.lineTo (3.0f + (float) (i + 1), 4.25f + ((i % 2 == 0) ? -1.6f : 1.6f));
-            stroke.addRectangle (1.5f, 9.0f, 13.0f, 5.5f);
-            for (int i = 0; i < 5; ++i)
-                fill.addRectangle (3.0f + 2.2f * (float) i, 13.0f - (float) (1 + (i * 3) % 4), 1.4f, (float) (1 + (i * 3) % 4));
+        {
+            // A plain waveform (issue #50): a thin oscillation whose
+            // amplitude swells and fades, like a sound's envelope.
+            width = 1.1f;
+            stroke.startNewSubPath (1.0f, 8.0f);
+            for (int i = 1; i <= 56; ++i)
+            {
+                const float x = 1.0f + 14.0f * (float) i / 56.0f;
+                const float u = (x - 1.0f) / 14.0f;
+                const float env = 6.0f * std::sin (juce::MathConstants<float>::pi * u) * (0.55f + 0.45f * std::sin (9.0f * u));
+                stroke.lineTo (x, 8.0f - env * std::sin (juce::MathConstants<float>::twoPi * 4.5f * u));
+            }
             break;
+        }
         case Icon::addMarker:
             fill.startNewSubPath (4.5f, 1.5f);
             fill.lineTo (11.5f, 1.5f);
@@ -475,6 +482,7 @@ juce::String serialise (const CustomSet& set)
             if (s.label.isNotEmpty()) o->setProperty ("label", s.label);
             if (s.icon.isNotEmpty())  o->setProperty ("icon", s.icon);
             if (s.key.isNotEmpty())   o->setProperty ("key", s.key);
+            if (s.tooltip.isNotEmpty()) o->setProperty ("tooltip", s.tooltip);
         }
         arr.add (juce::var (o));
     }
@@ -499,6 +507,7 @@ CustomSet parse (const juce::String& json)
                 s.icon   = iconFromId (p.getWithDefault ("icon", {}).toString()) != Icon::none
                                ? p.getWithDefault ("icon", {}).toString() : juce::String();
                 s.key    = p.getWithDefault ("key", {}).toString();
+                s.tooltip = p.getWithDefault ("tooltip", {}).toString();
                 if (s.kind == CustomShortcut::Kind::keyPress && ! keyFromCanonical (s.target).isValid()) continue;
                 if (s.key.isNotEmpty() && ! keyFromCanonical (s.key).isValid()) s.key.clear();
                 if (s.defined()) set[(size_t) i] = s;
@@ -634,6 +643,7 @@ Toolbar::Toolbar()
             b->setTooltip (spec.name);
             const juce::String id = spec.id;
             b->onClick = [this, id] { if (onCommand) onCommand (id); };
+            b->onRightClick = [this, id] { if (onContextMenu) onContextMenu (id); };
             addAndMakeVisible (*b);
             buttons_.push_back (std::move (b));
             groupOf_.push_back (gi);
@@ -643,7 +653,7 @@ Toolbar::Toolbar()
         const juce::String id = "custom." + juce::String (i + 1);
         auto b = std::make_unique<IconButton> (id);
         b->onClick = [this, id] { if (onCommand) onCommand (id); };
-        b->onRightClick = [this, i] { if (onCustomMenu) onCustomMenu (i); };
+        b->onRightClick = [this, id] { if (onContextMenu) onContextMenu (id); };
         addAndMakeVisible (*b);
         buttons_.push_back (std::move (b));
         groupOf_.push_back ((int) gs.size());
@@ -667,6 +677,47 @@ void Toolbar::setCustom (const CustomSet& set)
 {
     custom_ = set;
     refresh();
+    resized();   // the defined slots show, the others do not
+}
+
+int Toolbar::firstFreeCustomSlot() const
+{
+    for (int i = 0; i < kNumCustom; ++i)
+        if (! custom_[(size_t) i].defined()) return i;
+    return -1;
+}
+
+void Toolbar::setHiddenIds (const juce::StringArray& ids)
+{
+    hidden_ = ids;
+    resized();
+}
+
+bool Toolbar::isShown (const juce::String& id) const
+{
+    if (hidden_.contains (id)) return false;
+    if (id.startsWith ("custom."))
+    {
+        const int n = id.fromFirstOccurrenceOf (".", false, false).getIntValue();
+        return n >= 1 && n <= kNumCustom && custom_[(size_t) n - 1].defined();
+    }
+    return button (id) != nullptr;
+}
+
+juce::String Toolbar::nameOf (const juce::String& id)
+{
+    for (const auto& g : groups())
+        for (const auto& spec : g)
+            if (spec.id == id) return spec.name;
+    return {};
+}
+
+Icon Toolbar::iconOf (const juce::String& id)
+{
+    for (const auto& g : groups())
+        for (const auto& spec : g)
+            if (spec.id == id) return spec.icon;
+    return Icon::none;
 }
 
 void Toolbar::refresh()
@@ -682,22 +733,24 @@ void Toolbar::refresh()
             const auto oldIcon = b->icon;
             const auto oldLabel = b->label;
             juce::String tip;
+            const auto keyText = s.key.isNotEmpty() ? " (" + displayText (s.key) + ")" : juce::String();
             if (s.defined())
             {
                 b->placeholder = false;
                 b->icon = iconFromId (s.icon);
                 b->label = s.label.isNotEmpty() ? s.label : juce::String (n);
-                tip = "Shortcut " + juce::String (n) + ": " + s.describe()
-                    + (s.key.isNotEmpty() ? " (" + displayText (s.key) + ")" : juce::String())
-                    + ". Right-click to change it.";
+                // The user's own text when there is one (issue #50).
+                tip = s.tooltip.isNotEmpty() ? s.tooltip + keyText
+                                             : "Custom button " + juce::String (n) + ": " + s.describe() + keyText
+                                                   + ". Right-click to change it.";
             }
             else
             {
+                // Not shown (issue #50): Add Custom Button fills it.
                 b->placeholder = true;
                 b->icon = Icon::none;
                 b->label = juce::String (n);
-                tip = "Shortcut " + juce::String (n) + ": not defined yet. Click or right-click to "
-                      "define it: a menu command or effect, a recorded action, a Python script or keys to send.";
+                tip = "Custom button " + juce::String (n) + ": not defined yet.";
             }
             if (b->getTooltip() != tip) b->setTooltip (tip);
             if (wasPlaceholder != b->placeholder || oldIcon != b->icon || oldLabel != b->label)
@@ -720,22 +773,34 @@ void Toolbar::refresh()
 
 int Toolbar::idealWidth() const
 {
-    return (int) buttons_.size() * kButtonW + (numGroups() - 1) * kGapW + 6;
+    int w = 6, groupsShown = 0;
+    for (int gi = 0; gi < numGroups(); ++gi)
+    {
+        int n = 0;
+        for (size_t i = 0; i < buttons_.size(); ++i)
+            if (groupOf_[i] == gi && isShown (buttons_[i]->getComponentID())) ++n;
+        if (n == 0) continue;
+        w += n * kButtonW + (groupsShown > 0 ? kGapW : 0);
+        ++groupsShown;
+    }
+    return groupsShown > 0 ? w : 0;
 }
 
 void Toolbar::resized()
 {
     // Groups left to right; the groups that do not fit are hidden, the
     // custom shortcuts first.
+    // Hidden buttons and empty custom slots take no room (issue #50).
     separatorsX_.clear();
-    int x = 3;
+    int x = 3, groupsShown = 0;
     for (int gi = 0; gi < numGroups(); ++gi)
     {
         int n = 0;
-        for (int g : groupOf_) if (g == gi) ++n;
-        const int need = n * kButtonW + (gi > 0 ? kGapW : 0);
-        const bool fits = x + need <= getWidth() - 3;
-        if (fits && gi > 0)
+        for (size_t i = 0; i < buttons_.size(); ++i)
+            if (groupOf_[i] == gi && isShown (buttons_[i]->getComponentID())) ++n;
+        const int need = n * kButtonW + (groupsShown > 0 ? kGapW : 0);
+        const bool fits = n > 0 && x + need <= getWidth() - 3;
+        if (fits && groupsShown > 0)
         {
             separatorsX_.push_back (x + kGapW / 2);
             x += kGapW;
@@ -743,16 +808,24 @@ void Toolbar::resized()
         for (size_t i = 0; i < buttons_.size(); ++i)
             if (groupOf_[i] == gi)
             {
-                buttons_[i]->setVisible (fits);
-                if (fits)
+                const bool show = fits && isShown (buttons_[i]->getComponentID());
+                buttons_[i]->setVisible (show);
+                if (show)
                 {
                     buttons_[i]->setBounds (x, 0, kButtonW, getHeight());
                     x += kButtonW;
                 }
             }
-        if (! fits) x = getWidth();   // keep the order: nothing after a group that did not fit
+        if (fits) ++groupsShown;
+        else if (n > 0) x = getWidth();   // keep the order: nothing after a group that did not fit
     }
     repaint();
+}
+
+void Toolbar::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu() && onContextMenu)
+        onContextMenu ({});   // between the buttons
 }
 
 void Toolbar::paint (juce::Graphics& g)
@@ -760,5 +833,583 @@ void Toolbar::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xff3a3a3a));
     for (int sx : separatorsX_)
         g.fillRect (sx, getHeight() / 2 - 7, 1, 14);
+}
+
+// ============================================================== icon picker
+
+IconPicker::IconPicker()
+{
+    setSize (kCell * cellIds().size() + 2, kCell + 2);
+    setTooltip ("The button's icon. Text shows the text instead. A darker icon is already on another "
+                "custom button; it can still be used.");
+}
+
+juce::StringArray IconPicker::cellIds()
+{
+    juce::StringArray ids { "" };
+    for (auto i : libraryIcons())
+        ids.add (iconId (i));
+    return ids;
+}
+
+juce::Rectangle<int> IconPicker::cellBounds (int i) const
+{
+    return { 1 + i * kCell, 1, kCell, kCell };
+}
+
+void IconPicker::paint (juce::Graphics& g)
+{
+    const auto ids = cellIds();
+    for (int i = 0; i < ids.size(); ++i)
+    {
+        const auto r = cellBounds (i).toFloat();
+        const bool sel = ids[i] == selected;
+        const bool used = ids[i].isNotEmpty() && usedElsewhere.contains (ids[i]);
+        const auto ink = juce::Colour (0xffd8d8d8).withMultipliedAlpha (used && ! sel ? 0.35f : 1.0f);
+        if (ids[i].isEmpty())
+        {
+            g.setColour (ink);
+            g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+            g.drawText ("Text", r, juce::Justification::centred, false);
+        }
+        else
+            drawIcon (g, iconFromId (ids[i]), r.reduced (4.0f), ink);
+        if (sel)
+        {
+            g.setColour (juce::Colours::white);
+            g.drawRoundedRectangle (r.reduced (1.0f), 3.0f, 1.5f);
+        }
+    }
+}
+
+void IconPicker::mouseDown (const juce::MouseEvent& e)
+{
+    const auto ids = cellIds();
+    for (int i = 0; i < ids.size(); ++i)
+        if (cellBounds (i).contains (e.getPosition()))
+        {
+            if (selected != ids[i])
+            {
+                selected = ids[i];
+                repaint();
+                if (onChange) onChange();
+            }
+            return;
+        }
+}
+
+// ============================================================== calculator
+
+namespace calc
+{
+namespace
+{
+using Vec = std::vector<double>;
+
+struct Tok
+{
+    enum Type { num, op, open, close, comma, log, end };
+    Type type = end;
+    double value = 0.0;
+    char c = 0;
+};
+
+// Reads the text into tokens; false on a character the calculator does not know.
+bool tokenise (const juce::String& text, std::vector<Tok>& out)
+{
+    const auto t = text.toLowerCase();
+    const int n = t.length();
+    for (int i = 0; i < n;)
+    {
+        const auto ch = t[i];
+        if (juce::CharacterFunctions::isWhitespace (ch)) { ++i; continue; }
+        if (juce::CharacterFunctions::isDigit (ch) || ch == '.')
+        {
+            int j = i, dots = 0, digits = 0;
+            while (j < n && (juce::CharacterFunctions::isDigit (t[j]) || t[j] == '.'))
+            {
+                if (t[j] == '.') ++dots; else ++digits;
+                ++j;
+            }
+            if (dots > 1 || digits == 0) return false;
+            // An exponent only when digits follow ("2e3", "1.5e-4").
+            if (j < n && t[j] == 'e')
+            {
+                int k = j + 1;
+                if (k < n && (t[k] == '+' || t[k] == '-')) ++k;
+                if (k < n && juce::CharacterFunctions::isDigit (t[k]))
+                {
+                    while (k < n && juce::CharacterFunctions::isDigit (t[k])) ++k;
+                    j = k;
+                }
+            }
+            Tok tok;
+            tok.type = Tok::num;
+            tok.value = t.substring (i, j).getDoubleValue();
+            out.push_back (tok);
+            i = j;
+            continue;
+        }
+        if (juce::CharacterFunctions::isLetter (ch))
+        {
+            int j = i;
+            while (j < n && juce::CharacterFunctions::isLetter (t[j])) ++j;
+            if (t.substring (i, j) != "log") return false;
+            Tok tok;
+            tok.type = Tok::log;
+            out.push_back (tok);
+            i = j;
+            continue;
+        }
+        Tok tok;
+        switch (ch)
+        {
+            case '+': case '-': case '*': case '/': case '^': tok.type = Tok::op; tok.c = (char) ch; break;
+            case '(': tok.type = Tok::open; break;
+            case ')': tok.type = Tok::close; break;
+            case ',': tok.type = Tok::comma; break;
+            default: return false;
+        }
+        out.push_back (tok);
+        ++i;
+    }
+    return true;
+}
+
+// Unmatched ')' open at the start, unmatched '(' close at the end.
+void balance (std::vector<Tok>& toks)
+{
+    int depth = 0, missingOpen = 0;
+    for (const auto& t : toks)
+    {
+        if (t.type == Tok::open) ++depth;
+        else if (t.type == Tok::close) { if (depth > 0) --depth; else ++missingOpen; }
+    }
+    Tok o; o.type = Tok::open;
+    Tok c; c.type = Tok::close;
+    toks.insert (toks.begin(), (size_t) missingOpen, o);
+    toks.insert (toks.end(), (size_t) depth, c);
+}
+
+class Parser
+{
+public:
+    explicit Parser (std::vector<Tok> t) : toks (std::move (t)) { toks.push_back ({}); }
+    bool failed = false;
+
+    std::optional<Vec> all()
+    {
+        auto v = list();
+        if (peek().type != Tok::end) failed = true;
+        return v;
+    }
+
+private:
+    std::vector<Tok> toks;
+    size_t at = 0;
+
+    const Tok& peek() const { return toks[std::min (at, toks.size() - 1)]; }
+    bool isOp (char c) const { return peek().type == Tok::op && peek().c == c; }
+    static bool startsOperand (const Tok& t) { return t.type == Tok::num || t.type == Tok::open || t.type == Tok::log; }
+
+    Vec combine (const Vec& a, const Vec& b, char op)
+    {
+        if (a.size() != b.size() && a.size() != 1 && b.size() != 1) { failed = true; return { 0.0 }; }
+        const size_t n = std::max (a.size(), b.size());
+        Vec r (n);
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double x = a[a.size() == 1 ? 0 : i], y = b[b.size() == 1 ? 0 : i];
+            switch (op)
+            {
+                case '+': r[i] = x + y; break;
+                case '-': r[i] = x - y; break;
+                case '*': r[i] = x * y; break;
+                case '/': if (y == 0.0) failed = true; r[i] = y != 0.0 ? x / y : 0.0; break;
+                case '^': r[i] = std::pow (x, y); break;
+                default: failed = true; break;
+            }
+            if (! std::isfinite (r[i])) failed = true;
+        }
+        return r;
+    }
+
+    // list := expr (',' expr)*
+    std::optional<Vec> list()
+    {
+        auto a = expr();
+        if (peek().type != Tok::comma) return a;
+        Vec out = a.value_or (Vec { 0.0 });
+        while (peek().type == Tok::comma)
+        {
+            ++at;
+            const auto b = expr().value_or (Vec { 0.0 });
+            out.insert (out.end(), b.begin(), b.end());
+        }
+        return out;
+    }
+
+    // expr := term (('+' | '-') term)*; a missing term is 0.
+    std::optional<Vec> expr()
+    {
+        auto a = term();
+        while (isOp ('+') || isOp ('-'))
+        {
+            const char c = peek().c;
+            ++at;
+            const auto b = term();
+            a = combine (a.value_or (Vec { 0.0 }), b.value_or (Vec { 0.0 }), c);
+        }
+        return a;
+    }
+
+    // term := unary (('*' | '/' | nothing) unary)*; a missing factor is 1.
+    std::optional<Vec> term()
+    {
+        auto a = unary();
+        for (;;)
+        {
+            char c = 0;
+            if (isOp ('*') || isOp ('/')) { c = peek().c; ++at; }
+            else if (a.has_value() && startsOperand (peek())) c = '*';   // "2(3)", "2log(100)"
+            else break;
+            const auto b = unary();
+            a = combine (a.value_or (Vec { 1.0 }), b.value_or (Vec { 1.0 }), c);
+        }
+        return a;
+    }
+
+    // unary := ('-' | '+') unary | power; a sign with nothing after it is dropped.
+    std::optional<Vec> unary()
+    {
+        if (isOp ('-') || isOp ('+'))
+        {
+            const bool neg = peek().c == '-';
+            ++at;
+            auto a = unary();
+            if (a.has_value() && neg)
+                for (auto& x : *a) x = -x;
+            return a;
+        }
+        return power();
+    }
+
+    // power := primary ('^' unary)?  (right-associative); a missing exponent is 1.
+    std::optional<Vec> power()
+    {
+        auto base = primary();
+        if (! isOp ('^')) return base;
+        ++at;
+        const auto e = unary();
+        return combine (base.value_or (Vec { 1.0 }), e.value_or (Vec { 1.0 }), '^');
+    }
+
+    std::optional<Vec> primary()
+    {
+        const auto t = peek();
+        if (t.type == Tok::num) { ++at; return Vec { t.value }; }
+        if (t.type == Tok::open)
+        {
+            ++at;
+            auto v = list();
+            if (peek().type == Tok::close) ++at;
+            return v;
+        }
+        if (t.type == Tok::log)
+        {
+            ++at;
+            auto x = power().value_or (Vec { 1.0 });
+            for (auto& v : x)
+            {
+                if (v <= 0.0) { failed = true; v = 0.0; }
+                else v = std::log10 (v);
+            }
+            return x;
+        }
+        return std::nullopt;
+    }
+};
+} // namespace
+
+juce::String format (double v)
+{
+    if (v == 0.0) return "0";   // and -0
+    char buf[64];
+    std::snprintf (buf, sizeof (buf), "%.10g", v);
+    return juce::String (buf);
+}
+
+Result evaluate (const juce::String& text)
+{
+    Result r;
+    std::vector<Tok> toks;
+    if (! tokenise (text, toks))
+    {
+        r.empty = false;
+        r.text = "Error";
+        return r;
+    }
+    if (toks.empty()) return r;
+    balance (toks);
+    Parser p (toks);
+    const auto v = p.all();
+    if (p.failed)
+    {
+        r.empty = false;
+        r.text = "Error";
+        return r;
+    }
+    if (! v.has_value()) return r;   // only signs or "()": nothing to show yet
+    r.empty = false;
+    r.ok = true;
+    r.values = *v;
+    juce::StringArray parts;
+    for (double x : r.values) parts.add (format (x));
+    r.text = parts.joinIntoString (", ");
+    return r;
+}
+} // namespace calc
+
+Calculator::Calculator()
+{
+    setComponentID ("calculator");
+    const juce::String tip ("Calculator: + - * / ^ ( ) log, '.' for decimals, a comma for a list: "
+                            "(1,2,3)+1 = 2, 3, 4. The result follows as you type; Enter keeps it, Esc clears.");
+    setTooltip (tip);
+    field_.setTooltip (tip);
+    field_.setComponentID ("calculator-field");
+    field_.setMultiLine (false);
+    field_.setFont (juce::FontOptions (12.5f));
+    field_.setIndents (4, 1);
+    field_.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff232327));
+    field_.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xff3a3a3a));
+    field_.setColour (juce::TextEditor::focusedOutlineColourId, juce::Colour (0xff4ea1f5));
+    field_.setColour (juce::TextEditor::textColourId, juce::Colour (0xffe0e0e0));
+    field_.setTextToShowWhenEmpty ("calc", juce::Colour (0xff6a6a6a));
+    field_.onTextChange = [this] { update(); };
+    field_.onReturnKey = [this] { commit(); };
+    field_.onEscapeKey = [this]
+    {
+        field_.clear();
+        update();
+        field_.giveAwayKeyboardFocus();
+    };
+    addAndMakeVisible (field_);
+}
+
+void Calculator::setExpression (const juce::String& text)
+{
+    field_.setText (text, false);
+    update();
+}
+
+void Calculator::commit()
+{
+    const auto r = calc::evaluate (field_.getText());
+    if (r.ok)
+        setExpression (r.text.removeCharacters (" "));
+}
+
+void Calculator::update()
+{
+    const auto r = calc::evaluate (field_.getText());
+    error_ = ! r.empty && ! r.ok;
+    const auto shown = r.empty ? juce::String() : "= " + r.text;
+    if (shown != result_)
+    {
+        result_ = shown;
+        repaint();
+    }
+}
+
+void Calculator::resized()
+{
+    field_.setBounds (getLocalBounds().withWidth (getWidth() * 11 / 20).reduced (0, 3));
+}
+
+void Calculator::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu() && onContextMenu)
+        onContextMenu();
+}
+
+void Calculator::paint (juce::Graphics& g)
+{
+    if (result_.isEmpty()) return;
+    const auto r = getLocalBounds().withTrimmedLeft (field_.getRight() + 5);
+    g.setColour (error_ ? juce::Colour (0xffe8806a) : juce::Colour (0xffd8d8d8));
+    g.setFont (juce::FontOptions (12.5f));
+    g.drawFittedText (result_, r, juce::Justification::centredLeft, 1, 0.8f);
+}
+
+// ============================================================== manage buttons
+
+namespace
+{
+// The icon (or the text) of a row of the Manage Visible Buttons list.
+class IconCell : public juce::Component
+{
+public:
+    IconCell (Icon i, juce::String t) : icon (i), text (std::move (t)) { setInterceptsMouseClicks (false, false); }
+    void paint (juce::Graphics& g) override
+    {
+        const auto ink = juce::Colour (0xffd8d8d8);
+        if (icon != Icon::none)
+            drawIcon (g, icon, getLocalBounds().toFloat().reduced (4.0f), ink);
+        else
+        {
+            g.setColour (ink);
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawFittedText (text, getLocalBounds(), juce::Justification::centred, 1, 0.7f);
+        }
+    }
+private:
+    Icon icon;
+    juce::String text;
+};
+} // namespace
+
+ManageButtons::ManageButtons (const Toolbar& bar) : bar_ (bar)
+{
+    setComponentID ("manage-buttons");
+    view_.setViewedComponent (&content_, false);
+    view_.setScrollBarsShown (true, false);
+    addAndMakeVisible (view_);
+    add_ = std::make_unique<juce::TextButton> ("Add Custom Button...");
+    add_->onClick = [this] { if (onAdd) onAdd(); };
+    addAndMakeVisible (*add_);
+    showAll_ = std::make_unique<juce::TextButton> ("Show All Buttons");
+    showAll_->setTooltip ("Shows every predetermined button and the calculator again.");
+    showAll_->onClick = [this] { if (onShowAll) onShowAll(); };
+    addAndMakeVisible (*showAll_);
+    setSize (460, 480);
+}
+
+void ManageButtons::rebuild()
+{
+    rows_.clear();
+    customHeader_.reset();
+    auto addPredetermined = [this] (const juce::String& id, Icon icon, const juce::String& name, const juce::String& text)
+    {
+        auto row = std::make_unique<Row>();
+        row->id = id;
+        row->icon = std::make_unique<IconCell> (icon, text);
+        row->toggle = std::make_unique<juce::ToggleButton> (name);
+        row->toggle->setComponentID ("show-" + id);
+        row->toggle->setToggleState (isShown ? isShown (id) : true, juce::dontSendNotification);
+        row->toggle->onClick = [this, id, t = row->toggle.get()] { if (onShow) onShow (id, t->getToggleState()); };
+        content_.addAndMakeVisible (*row->icon);
+        content_.addAndMakeVisible (*row->toggle);
+        rows_.push_back (std::move (row));
+    };
+    for (const auto& g : Toolbar::groups())
+        for (const auto& spec : g)
+            addPredetermined (spec.id, spec.icon, spec.name, {});
+    addPredetermined ("calculator", Icon::none, "Calculator", "=");
+
+    customHeader_ = std::make_unique<juce::Label> (juce::String(), "Custom buttons");
+    customHeader_->setFont (juce::FontOptions (13.0f, juce::Font::bold));
+    content_.addAndMakeVisible (*customHeader_);
+    bool any = false;
+    for (int slot = 0; slot < kNumCustom; ++slot)
+    {
+        const auto& s = bar_.custom()[(size_t) slot];
+        if (! s.defined()) continue;
+        any = true;
+        auto row = std::make_unique<Row>();
+        row->id = "custom." + juce::String (slot + 1);
+        row->icon = std::make_unique<IconCell> (iconFromId (s.icon), s.label.isNotEmpty() ? s.label : juce::String (slot + 1));
+        row->label = std::make_unique<juce::Label> (juce::String(), juce::String (slot + 1) + ": "
+                                                        + (s.tooltip.isNotEmpty() ? s.tooltip : s.describe()));
+        row->edit = std::make_unique<juce::TextButton> ("Edit...");
+        row->edit->setComponentID ("edit-" + row->id);
+        row->edit->onClick = [this, slot] { if (onEdit) onEdit (slot); };
+        row->remove = std::make_unique<juce::TextButton> ("Remove");
+        row->remove->setComponentID ("remove-" + row->id);
+        row->remove->onClick = [this, slot] { if (onRemove) onRemove (slot); };
+        for (juce::Component* c : { (juce::Component*) row->icon.get(), (juce::Component*) row->label.get(),
+                                    (juce::Component*) row->edit.get(), (juce::Component*) row->remove.get() })
+            content_.addAndMakeVisible (*c);
+        rows_.push_back (std::move (row));
+    }
+    if (! any)
+        customHeader_->setText ("Custom buttons: none yet (Add Custom Button)", juce::dontSendNotification);
+    add_->setEnabled (bar_.firstFreeCustomSlot() >= 0);
+    add_->setTooltip (add_->isEnabled() ? "A new button: the form opens for custom button "
+                                              + juce::String (bar_.firstFreeCustomSlot() + 1) + "."
+                                        : "All nine custom buttons are in use.");
+    layoutContent();
+}
+
+void ManageButtons::layoutContent()
+{
+    const int w = std::max (300, view_.getWidth() - view_.getScrollBarThickness());
+    constexpr int rowH = 26;
+    int y = 4;
+    bool headerPlaced = false;
+    for (auto& row : rows_)
+    {
+        const bool custom = row->id.startsWith ("custom.");
+        if (custom && ! headerPlaced)
+        {
+            customHeader_->setBounds (4, y + 6, w - 8, 20);
+            y += 30;
+            headerPlaced = true;
+        }
+        auto r = juce::Rectangle<int> (4, y, w - 8, rowH);
+        row->icon->setBounds (r.removeFromLeft (rowH));
+        r.removeFromLeft (6);
+        if (custom)
+        {
+            row->remove->setBounds (r.removeFromRight (72).reduced (0, 2));
+            r.removeFromRight (4);
+            row->edit->setBounds (r.removeFromRight (64).reduced (0, 2));
+            row->label->setBounds (r);
+        }
+        else
+            row->toggle->setBounds (r);
+        y += rowH;
+    }
+    if (! headerPlaced && customHeader_ != nullptr)
+    {
+        customHeader_->setBounds (4, y + 6, w - 8, 20);
+        y += 30;
+    }
+    content_.setSize (w, y + 4);
+}
+
+void ManageButtons::resized()
+{
+    auto r = getLocalBounds().reduced (6);
+    auto bottom = r.removeFromBottom (28);
+    showAll_->setBounds (bottom.removeFromRight (150));
+    bottom.removeFromRight (8);
+    add_->setBounds (bottom.removeFromRight (170));
+    r.removeFromBottom (6);
+    view_.setBounds (r);
+    layoutContent();
+}
+
+juce::ToggleButton* ManageButtons::toggleFor (const juce::String& id) const
+{
+    for (const auto& row : rows_)
+        if (row->id == id && row->toggle != nullptr) return row->toggle.get();
+    return nullptr;
+}
+
+juce::Button* ManageButtons::editButton (int slot) const
+{
+    const auto id = "custom." + juce::String (slot + 1);
+    for (const auto& row : rows_)
+        if (row->id == id) return row->edit.get();
+    return nullptr;
+}
+
+juce::Button* ManageButtons::removeButton (int slot) const
+{
+    const auto id = "custom." + juce::String (slot + 1);
+    for (const auto& row : rows_)
+        if (row->id == id) return row->remove.get();
+    return nullptr;
 }
 } // namespace sc::toolbar

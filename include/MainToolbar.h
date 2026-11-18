@@ -1,10 +1,15 @@
 #pragma once
-// SpectroCraft - the toolbar in the menu bar row, left of the workspace
-// presets (issue #43):
+// SpectroCraft - the toolbar in the menu bar row, right after the menus
+// (issues #43, #50):
 //
 //   Undo, Redo | Time Range, Marquee, Lasso, Paintbrush, Move |
 //   Waveform / Spectrogram (F9), Add Marker (F8) |
-//   Free Drawing, Text, Arrow, Rectangle, Oval | Shortcuts 1..9
+//   Free Drawing, Text, Arrow, Rectangle, Oval | custom buttons | calculator
+//
+// Issue #50: only the custom buttons that are defined show; a right-click on
+// the toolbar offers Add Custom Button and Manage Visible Buttons (any
+// predetermined button, and the calculator, can be hidden and restored). The
+// one-line calculator evaluates as the user types (sc::toolbar::calc).
 //
 // The icons are drawn here with vector paths (original artwork, no
 // third-party icon set). The nine shortcuts are the user's own: a right-click
@@ -71,6 +76,7 @@ struct CustomShortcut
     juce::String label;   // short text on the button (used when there is no icon)
     juce::String icon;    // iconId() of a library icon, "" = the label
     juce::String key;     // the shortcut's own key (canonical), "" = none
+    juce::String tooltip; // the user's tooltip text, "" = what it does (issue #50)
 
     bool defined() const noexcept { return kind != Kind::none && target.isNotEmpty(); }
     /** "Effects > Normalize", "Python script denoise.py", "keys Ctrl+H",
@@ -78,7 +84,8 @@ struct CustomShortcut
     juce::String describe() const;
     bool operator== (const CustomShortcut& o) const
     {
-        return kind == o.kind && target == o.target && label == o.label && icon == o.icon && key == o.key;
+        return kind == o.kind && target == o.target && label == o.label && icon == o.icon && key == o.key
+               && tooltip == o.tooltip;
     }
 };
 
@@ -130,6 +137,77 @@ private:
     juce::Rectangle<int> clearBox() const { return getLocalBounds().removeFromRight (getHeight()); }
 };
 
+/** The icon row of the custom button form (issue #50): "Text" (no icon)
+    then every library icon, on one line like the toolbar. The selected one
+    has a white border; icons other custom buttons use are drawn darker, and
+    can still be picked. */
+class IconPicker : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    IconPicker();
+    juce::String selected;          // iconId(), "" = the text
+    juce::StringArray usedElsewhere; // iconId()s of the other custom buttons
+    std::function<void()> onChange;
+    /** The cells: "" (text) then the library's iconId()s. */
+    static juce::StringArray cellIds();
+    juce::Rectangle<int> cellBounds (int i) const;
+    void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent& e) override;
+    static constexpr int kCell = 24;
+};
+
+// ---------------------------------------------------------------- calculator
+
+namespace calc
+{
+/** What the one-line calculator shows for `text` (issue #50).
+    - Operators ( ) + - * / ^ and log (base 10); '.' is the decimal point.
+    - A comma makes a list, and the expression repeats for each value:
+      "(1,2,3)+1" gives 2, 3, 4. Two lists combine element by element.
+    - The input is completed rather than refused: a missing operand of * /
+      or ^ is 1 ("1/" = 1), of + - is 0 ("1+" = 1); unmatched parentheses
+      close at the end or open at the start ("(1+2/2" = 2); "2(3)" is 2*3.
+    - Division by zero, log of a value <= 0, lists of different lengths or
+      a character it does not know give an error.
+    Empty input: `empty`, no value. */
+struct Result
+{
+    bool empty = true;
+    bool ok = false;
+    std::vector<double> values;
+    juce::String text;   // "2", "2, 3, 4", "Error", "" when empty
+};
+Result evaluate (const juce::String& text);
+/** A value as the calculator shows it: up to 10 significant digits. */
+juce::String format (double v);
+} // namespace calc
+
+/** The calculator field right of the toolbar: type, the result follows. Enter
+    keeps the result as the new expression, Esc clears it. */
+class Calculator : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    Calculator();
+    juce::TextEditor& field() noexcept { return field_; }
+    /** The shown result ("= 2", "= Error", "" when empty). */
+    juce::String resultText() const { return result_; }
+    void setExpression (const juce::String& text);   // as if typed
+    /** Enter: the result becomes the expression (when there is one). */
+    void commit();
+    /** A right-click beside the field: the toolbar menu. */
+    std::function<void()> onContextMenu;
+    void resized() override;
+    void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent& e) override;
+    static constexpr int kWidth = 210;
+
+private:
+    juce::TextEditor field_;
+    juce::String result_;
+    bool error_ = false;
+    void update();
+};
+
 class Toolbar : public juce::Component
 {
 public:
@@ -145,8 +223,9 @@ public:
 
     /** A click: the id of the button. */
     std::function<void (const juce::String& id)> onCommand;
-    /** A right-click on custom slot `slot` (0-based). */
-    std::function<void (int slot)> onCustomMenu;
+    /** A right-click on a button (its id) or on the toolbar between them
+        (""): MainWindow shows the toolbar menu (issue #50). */
+    std::function<void (const juce::String& id)> onContextMenu;
     /** Asked by refresh(): is the button's tool on / is it usable / which
         keyboard shortcut does the same ("" = none). */
     std::function<bool (const juce::String& id)> isOn, isEnabled;
@@ -154,6 +233,17 @@ public:
 
     void setCustom (const CustomSet& set);
     const CustomSet& custom() const noexcept { return custom_; }
+    /** The first custom slot with nothing in it (0-based), -1 when all nine
+        are used: where Add Custom Button goes. */
+    int firstFreeCustomSlot() const;
+    /** The predetermined buttons the user hid (Manage Visible Buttons). */
+    void setHiddenIds (const juce::StringArray& ids);
+    const juce::StringArray& hiddenIds() const noexcept { return hidden_; }
+    /** A button shows when it is not hidden and, for a custom slot, defined. */
+    bool isShown (const juce::String& id) const;
+    /** The name of a predetermined button ("Lasso"), "" for another id. */
+    static juce::String nameOf (const juce::String& id);
+    static Icon iconOf (const juce::String& id);
     /** Re-reads the state of every button (tools on, enabled, tooltips). */
     void refresh();
 
@@ -161,6 +251,7 @@ public:
     int idealWidth() const;
     void resized() override;
     void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent& e) override;
 
     IconButton* button (const juce::String& id) const;
     int numButtons() const noexcept { return (int) buttons_.size(); }
@@ -174,6 +265,47 @@ private:
     std::vector<int> groupOf_;   // group index of each button (the custom slots: the last group)
     std::vector<int> separatorsX_;
     CustomSet custom_;
+    juce::StringArray hidden_;
     int numGroups() const;
+};
+
+/** The Manage Visible Buttons list (issue #50): a check box per
+    predetermined button and for the calculator, then the custom buttons with
+    Edit and Remove, and Add Custom Button / Show All at the bottom. The
+    owner (MainWindow) applies each change at once; rebuild() re-reads. */
+class ManageButtons : public juce::Component
+{
+public:
+    explicit ManageButtons (const Toolbar& bar);
+    std::function<bool (const juce::String& id)> isShown;            // "calculator" included
+    std::function<void (const juce::String& id, bool shown)> onShow;
+    std::function<void (int slot)> onEdit, onRemove;
+    std::function<void()> onAdd, onShowAll;
+    void rebuild();
+    void resized() override;
+    /** For the tests: the check box of a predetermined id, the Edit / Remove
+        buttons of a slot, the bottom buttons. */
+    juce::ToggleButton* toggleFor (const juce::String& id) const;
+    juce::Button* editButton (int slot) const;
+    juce::Button* removeButton (int slot) const;
+    juce::Button* addButton() const { return add_.get(); }
+    juce::Button* showAllButton() const { return showAll_.get(); }
+
+private:
+    const Toolbar& bar_;
+    struct Row
+    {
+        juce::String id;   // a predetermined id, "calculator", or "custom.N"
+        std::unique_ptr<juce::Component> icon;
+        std::unique_ptr<juce::ToggleButton> toggle;
+        std::unique_ptr<juce::Label> label;
+        std::unique_ptr<juce::TextButton> edit, remove;
+    };
+    juce::Viewport view_;
+    juce::Component content_;
+    std::unique_ptr<juce::Label> customHeader_;
+    std::vector<std::unique_ptr<Row>> rows_;
+    std::unique_ptr<juce::TextButton> add_, showAll_;
+    void layoutContent();
 };
 } // namespace sc::toolbar

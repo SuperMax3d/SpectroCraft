@@ -679,10 +679,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     workspaceBar_->onMenuResult = [this] (int id) { handleWorkspaceCommand (id, workspaceMenuTarget_); };
     juce::Component::addAndMakeVisible (workspaceBar_.get ());
 
-    // Toolbar (issue #43): in the menu bar row, left of the workspace bar.
+    // Toolbar (issues #43, #50): in the menu bar row, right after the menus.
     toolbar_ = std::make_unique<sc::toolbar::Toolbar> ();
     toolbar_->onCommand = [this] (const juce::String& id) { runToolbarCommand (id); };
-    toolbar_->onCustomMenu = [this] (int slot) { showCustomShortcutMenu (slot); };
+    toolbar_->onContextMenu = [this] (const juce::String& id) { showToolbarMenu (id); };
     toolbar_->isOn = [this] (const juce::String& id)
     {
         const bool moving = app.moveTool;
@@ -722,6 +722,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     toolbarVisible_ = app.recentStore->getIntValue ("toolbar_visible", 1) != 0;
     juce::Component::addChildComponent (toolbar_.get ());
     toolbar_->setVisible (toolbarVisible_);
+    // Issue #50: the buttons the user hid, and the calculator right of them.
+    toolbar_->setHiddenIds (juce::StringArray::fromTokens (app.recentStore->getValue ("toolbar_hidden"), ",", ""));
+    calculator_ = std::make_unique<sc::toolbar::Calculator> ();
+    calculator_->onContextMenu = [this] { showToolbarMenu ("calculator"); };
+    juce::Component::addChildComponent (calculator_.get ());
 
     // View > Hide Title Bar (issue #52): the icon and the window buttons of
     // the merged row, hidden until the title bar is.
@@ -1337,13 +1342,26 @@ void MainWindow::resized()
         const int w = std::min (workspaceBar_->idealWidth (), std::max (0, menuRow.getWidth () / 2));
         workspaceBar_->setBounds (menuRow.removeFromRight (w));
     }
-    // The toolbar (issue #43) fills what the menu names leave free, left of
-    // the workspace bar; the groups that do not fit are hidden.
+    // The toolbar (issues #43, #50) starts right after the menu names; the
+    // groups that do not fit before the workspace bar are hidden. The
+    // calculator follows it when there is room.
     if (toolbar_ != nullptr && toolbarVisible_)
     {
-        const int w = std::min (toolbar_->idealWidth (), std::max (0, menuRow.getRight () - menuNamesRight_));
-        toolbar_->setBounds (menuRow.removeFromRight (w));
+        const int room = std::max (0, menuRow.getRight () - menuNamesRight_);
+        const int w = std::min (toolbar_->idealWidth (), room);
+        toolbar_->setBounds (menuNamesRight_, menuRow.getY (), w, menuRow.getHeight ());
+        if (calculator_ != nullptr)
+        {
+            const int calcX = toolbar_->getRight () + (w > 0 ? 6 : 0);
+            const int calcW = std::min (sc::toolbar::Calculator::kWidth, menuRow.getRight () - 4 - calcX);
+            const bool fits = isToolbarButtonShown ("calculator") && calcW >= 120;
+            calculator_->setVisible (fits);
+            if (fits)
+                calculator_->setBounds (calcX, menuRow.getY (), calcW, menuRow.getHeight ());
+        }
     }
+    else if (calculator_ != nullptr)
+        calculator_->setVisible (false);
 
     // Status bar at the very bottom, full window width. (resized() can run
     // from setUsingNativeTitleBar() during construction, before these members
@@ -10977,6 +10995,8 @@ juce::Component::WindowControlKind MainWindow::findControlAtPoint (juce::Point<f
         for (int i = 0; i < toolbar_->numButtons (); ++i)
             if (auto* b = toolbar_->buttonAt (i); b != nullptr && b->isVisible () && overChild (toolbar_.get (), b->getBounds ()))
                 return Kind::client;
+    if (calculator_ != nullptr && calculator_->isVisible () && calculator_->getBounds ().toFloat ().contains (pt))
+        return Kind::client;
     if (workspaceBar_ != nullptr && workspaceBar_->isVisible () && workspaceBar_->getBounds ().toFloat ().contains (pt))
     {
         for (const auto& slot : workspaceBar_->layoutSlots ())
@@ -11165,7 +11185,7 @@ juce::String MainWindow::shortcutUsedBy (const juce::String& key, int ignoreSlot
     if (toolbar_ != nullptr)
         for (int i = 0; i < sc::toolbar::kNumCustom; ++i)
             if (i != ignoreSlot && toolbar_->custom ()[(size_t) i].defined () && toolbar_->custom ()[(size_t) i].key == key)
-                return "Shortcut " + juce::String (i + 1) + " of the toolbar";
+                return "Custom button " + juce::String (i + 1) + " of the toolbar";
     return {};
 }
 
@@ -11180,6 +11200,7 @@ juce::String MainWindow::setCustomShortcut (int slot, const sc::toolbar::CustomS
     set[(size_t) slot] = s.defined () ? s : sc::toolbar::CustomShortcut {};
     toolbar_->setCustom (set);
     app.recentStore->setValue ("toolbar_shortcuts", sc::toolbar::serialise (set));
+    resized ();   // the toolbar's width follows its defined buttons (issue #50)
     refreshToolbar ();
     return {};
 }
@@ -11189,7 +11210,7 @@ bool MainWindow::runCustomShortcut (int slot)
     if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return false;
     const auto s = toolbar_->custom ()[(size_t) slot];   // a copy: the command may change the set
     if (! s.defined ()) return false;
-    const juce::String title ("Shortcut " + juce::String (slot + 1));
+    const juce::String title ("Custom button " + juce::String (slot + 1));
     using Kind = sc::toolbar::CustomShortcut::Kind;
     if (s.kind == Kind::menuCommand)
     {
@@ -11235,22 +11256,122 @@ bool MainWindow::runCustomShortcut (int slot)
     return false;
 }
 
-void MainWindow::showCustomShortcutMenu (int slot)
+void MainWindow::fillToolbarMenu (const juce::String& id, juce::PopupMenu& m)
 {
-    if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return;
-    const bool defined = toolbar_->custom ()[(size_t) slot].defined ();
-    const juce::String n (slot + 1);
-    juce::PopupMenu m;
-    m.addItem (1, (defined ? "Change Shortcut " : "Define Shortcut ") + n + "...");
-    m.addItem (2, "Run Shortcut " + n, defined);
-    m.addItem (3, "Clear Shortcut " + n, defined);
+    if (toolbar_ == nullptr) return;
+    if (id.startsWith ("custom."))
+    {
+        const juce::String n = id.fromFirstOccurrenceOf (".", false, false);
+        m.addItem (TbEditCustom, "Edit Custom Button " + n + "...");
+        m.addItem (TbRemoveCustom, "Remove Custom Button " + n);
+        m.addSeparator ();
+    }
+    const int free = toolbar_->firstFreeCustomSlot ();
+    m.addItem (TbAddCustom, "Add Custom Button...", free >= 0);
+    m.addItem (TbManage, "Manage Visible Buttons...");
+    const auto name = id == "calculator" ? juce::String ("Calculator") : sc::toolbar::Toolbar::nameOf (id);
+    if (name.isNotEmpty ())
+        m.addItem (TbHideButton, "Hide " + name);
     m.addSeparator ();
-    m.addItem (4, "Hide Toolbar");
+    m.addItem (TbHideToolbar, "Hide Toolbar");
+}
+
+void MainWindow::runToolbarMenuItem (const juce::String& id, int item)
+{
+    const int slot = id.startsWith ("custom.") ? id.fromFirstOccurrenceOf (".", false, false).getIntValue () - 1 : -1;
+    switch (item)
+    {
+        case TbEditCustom:   if (slot >= 0) showCustomShortcutDialog (slot); break;
+        case TbRemoveCustom: if (slot >= 0) setCustomShortcut (slot, {}); break;
+        case TbAddCustom:    addCustomButton (); break;
+        case TbManage:       showManageButtonsDialog (); break;
+        case TbHideButton:   setToolbarButtonShown (id, false); break;
+        case TbHideToolbar:  setToolbarVisible (false); break;
+        default: break;
+    }
+}
+
+void MainWindow::showToolbarMenu (const juce::String& id)
+{
+    juce::PopupMenu m;
+    fillToolbarMenu (id, m);
     const int r = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
-    if (r == 1) showCustomShortcutDialog (slot);
-    else if (r == 2) runCustomShortcut (slot);
-    else if (r == 3) setCustomShortcut (slot, {});
-    else if (r == 4) setToolbarVisible (false);
+    runToolbarMenuItem (id, r);
+}
+
+int MainWindow::addCustomButton ()
+{
+    if (toolbar_ == nullptr) return -1;
+    const int slot = toolbar_->firstFreeCustomSlot ();
+    if (slot < 0)
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon, "Add Custom Button",
+                                   "All nine custom buttons are in use. Remove one first (Manage Visible Buttons).",
+                                   "OK", this);
+        return -1;
+    }
+    showCustomShortcutDialog (slot);
+    return slot;
+}
+
+bool MainWindow::isToolbarButtonShown (const juce::String& id) const
+{
+    return toolbar_ == nullptr || ! toolbar_->hiddenIds ().contains (id);
+}
+
+void MainWindow::saveToolbarHidden ()
+{
+    if (toolbar_ != nullptr)
+        app.recentStore->setValue ("toolbar_hidden", toolbar_->hiddenIds ().joinIntoString (","));
+}
+
+void MainWindow::setToolbarButtonShown (const juce::String& id, bool shown)
+{
+    if (toolbar_ == nullptr || id.isEmpty () || id.startsWith ("custom.")) return;
+    auto hidden = toolbar_->hiddenIds ();
+    if (shown) hidden.removeString (id);
+    else hidden.addIfNotAlreadyThere (id);
+    toolbar_->setHiddenIds (hidden);
+    saveToolbarHidden ();
+    resized ();
+}
+
+std::unique_ptr<sc::toolbar::ManageButtons> MainWindow::createManageButtons ()
+{
+    jassert (toolbar_ != nullptr);
+    auto list = std::make_unique<sc::toolbar::ManageButtons> (*toolbar_);
+    auto* raw = list.get ();
+    list->isShown = [this] (const juce::String& id) { return isToolbarButtonShown (id); };
+    list->onShow = [this] (const juce::String& id, bool on) { setToolbarButtonShown (id, on); };
+    // An edit opens the form over the list; the list re-reads afterwards.
+    // (Deferred: the click must finish before its row is rebuilt.)
+    juce::Component::SafePointer<sc::toolbar::ManageButtons> safe (raw);
+    auto later = [safe] { juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->rebuild (); }); };
+    list->onEdit = [this, later] (int slot) { showCustomShortcutDialog (slot); later (); };
+    list->onRemove = [this, later] (int slot) { setCustomShortcut (slot, {}); later (); };
+    list->onAdd = [this, later] { addCustomButton (); later (); };
+    list->onShowAll = [this, later]
+    {
+        if (toolbar_ != nullptr) toolbar_->setHiddenIds ({});
+        saveToolbarHidden ();
+        resized ();
+        later ();
+    };
+    list->rebuild ();
+    return list;
+}
+
+void MainWindow::showManageButtonsDialog ()
+{
+    if (toolbar_ == nullptr) return;
+    OwningAlertWindow w ("Manage Visible Buttons",
+                         "Tick the buttons to show on the toolbar. The custom buttons can be edited or removed.",
+                         juce::AlertWindow::NoIcon, this);
+    w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+    auto list = createManageButtons ();
+    w.addCustomComponent (list.release ());   // the window owns it (OwningAlertWindow)
+    w.addButton ("Close", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w.runModalLoop ();
 }
 
 void MainWindow::showCustomShortcutDialog (int slot)
@@ -11262,14 +11383,16 @@ void MainWindow::showCustomShortcutDialog (int slot)
     juce::StringArray actionNames;
     for (int i = 0; i < app.actions.size (); ++i)
         if (const auto* a = app.actions.get (i)) actionNames.add (a->name);
-    juce::StringArray iconNames { "(none: show the text)" };
-    for (auto i : sc::toolbar::libraryIcons ())
-        iconNames.add (sc::toolbar::iconId (i));
+    // The icons the other custom buttons use: drawn darker in the picker.
+    juce::StringArray usedIcons;
+    for (int i = 0; i < sc::toolbar::kNumCustom; ++i)
+        if (i != slot && toolbar_->custom ()[(size_t) i].defined ())
+            usedIcons.addIfNotAlreadyThere (toolbar_->custom ()[(size_t) i].icon);
     juce::String problem;
 
     for (;;)
     {
-        OwningAlertWindow w ("Shortcut " + juce::String (slot + 1),
+        OwningAlertWindow w ("Custom Button " + juce::String (slot + 1),
             (problem.isNotEmpty () ? problem + "\n\n" : juce::String ())
             + "What this toolbar button does: a menu command (the effects included), a recorded action "
               "(Actions panel), a Python script, or keys to send (Ctrl+H shows the harmonics...). It shows "
@@ -11307,9 +11430,12 @@ void MainWindow::showCustomShortcutDialog (int slot)
         send->key = cur.kind == CustomShortcut::Kind::keyPress ? cur.target : juce::String ();
         w.addCustomComponent (send);
         w.addTextEditor ("label", cur.label, "Text on the button (up to 4 characters)");
-        w.addComboBox ("icon", iconNames, "Icon (instead of the text)");
-        if (auto* c = w.getComboBoxComponent ("icon"))
-            c->setSelectedItemIndex (std::max (0, iconNames.indexOf (cur.icon)));
+        // Issue #50: the icons on one line, like the toolbar.
+        auto* picker = new sc::toolbar::IconPicker ();
+        picker->selected = cur.icon;
+        picker->usedElsewhere = usedIcons;
+        w.addCustomComponent (picker);
+        w.addTextEditor ("tooltip", cur.tooltip, "Tooltip (empty: what the button does)");
         auto* own = new sc::toolbar::KeyCapture ("Keyboard shortcut of this button");
         own->key = cur.key;
         w.addCustomComponent (own);
@@ -11341,8 +11467,8 @@ void MainWindow::showCustomShortcutDialog (int slot)
             ns.target = w.getComboBoxComponent ("command") != nullptr ? w.getComboBoxComponent ("command")->getText () : juce::String ();
         }
         ns.label = w.getTextEditorContents ("label").trim ().substring (0, 4);
-        const int iconIdx = w.getComboBoxComponent ("icon") != nullptr ? w.getComboBoxComponent ("icon")->getSelectedItemIndex () : 0;
-        ns.icon = iconIdx > 0 ? iconNames[iconIdx] : juce::String ();
+        ns.icon = picker->selected;
+        ns.tooltip = w.getTextEditorContents ("tooltip").trim ();
         ns.key = own->key;
         cur = ns;
 

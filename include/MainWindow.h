@@ -381,8 +381,9 @@ public:
     juce::Component* editorPanelComp() const noexcept { return editorPanel_.get(); }
     sc::dock::WorkspaceBar* workspaceBarComp() const noexcept { return workspaceBar_.get(); }
 
-    // ---- Toolbar (issue #43): the menu bar row, left of the workspace bar --
+    // ---- Toolbar (issues #43, #50): the menu bar row, right after the menus --
     sc::toolbar::Toolbar* toolbarComp() const noexcept { return toolbar_.get(); }
+    sc::toolbar::Calculator* calculatorComp() const noexcept { return calculator_.get(); }
     /** A toolbar button: "undo", "redo", "tool.timeRange" ... "tool.move",
         "view.toggle", "marker.add", "draw.freehand" ... "draw.oval",
         "custom.1" .. "custom.9" (an empty one asks what it should do). */
@@ -390,8 +391,23 @@ public:
     /** Runs custom shortcut `slot` (0-based); false when it is not defined
         or its command / script is gone (the user is told). */
     bool runCustomShortcut (int slot);
-    /** Right-click on a custom shortcut: Define / Change..., Clear, Hide Toolbar. */
-    void showCustomShortcutMenu (int slot);
+    /** Right-click on the toolbar (issue #50): on a custom button Edit /
+        Remove it; on any button Hide it; always Add Custom Button, Manage
+        Visible Buttons and Hide Toolbar. `id` = the button ("" = between). */
+    void showToolbarMenu (const juce::String& id);
+    void fillToolbarMenu (const juce::String& id, juce::PopupMenu& m);
+    void runToolbarMenuItem (const juce::String& id, int item);
+    enum ToolbarMenuItems { TbEditCustom = 1, TbRemoveCustom, TbAddCustom, TbManage, TbHideButton, TbHideToolbar };
+    /** Add Custom Button: the form for the first free slot (1, then 2...);
+        returns that slot, -1 when all nine are used. */
+    int addCustomButton();
+    /** Manage Visible Buttons: predetermined buttons and "calculator". */
+    bool isToolbarButtonShown (const juce::String& id) const;
+    void setToolbarButtonShown (const juce::String& id, bool shown);
+    /** The Manage Visible Buttons list, wired to this window (the dialog
+        shows it; the tests drive it directly). */
+    std::unique_ptr<sc::toolbar::ManageButtons> createManageButtons();
+    void showManageButtonsDialog();
     /** The dialog that defines custom shortcut `slot`. */
     void showCustomShortcutDialog (int slot);
     /** Stores custom shortcut `slot` (an undefined one clears it), saved in
@@ -930,6 +946,8 @@ private:
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
     std::unique_ptr<sc::toolbar::Toolbar> toolbar_;           // left of the workspace bar (issue #43)
     bool toolbarVisible_ = true;
+    std::unique_ptr<sc::toolbar::Calculator> calculator_;   // right of the toolbar (issue #50)
+    void saveToolbarHidden();                 // "toolbar_hidden": the hidden buttons, "calculator" included
     bool titleBarHidden_ = false;             // View > Hide Title Bar (issue #52)
     static constexpr int kCaptionButtonW = 46;   // the window buttons of the merged row
     class CaptionPart;                        // the icon and the window buttons of the merged row
