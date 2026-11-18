@@ -4378,7 +4378,10 @@ void MainWindow::toggleHarmonicMarkers()
 void MainWindow::repeatLastEffect()
 {
     if (lastEffectId == 0) return;   // no effect has been run yet this session
-    handleContextMenuAction (lastEffectId);
+    // lastEffectId holds an Effects menu id (ToolsFadeIn, ToolsChangeGain...),
+    // so it goes through the menu's own dispatch. handleContextMenuAction only
+    // knows the context-menu ids, which made Ctrl+Shift+F do nothing.
+    menuItemSelected (lastEffectId, juce::jmax (0, getMenuBarNames().indexOf ("Effects")));
 }
 
 // Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one power

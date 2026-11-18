@@ -69,7 +69,8 @@ no `session.hello`, jobs awaited inline). In a terminal, without the `mcp` packa
 # Debug, Ninja (macOS / Linux); Windows: same thing in an "x64 Native Tools Command Prompt"
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSPECTRO_ENABLE_AI=ON
 cmake --build build --target SpectroCraft
-ctest --test-dir build -j 8 --output-on-failure          # Linux: under xvfb-run -a
+ctest --test-dir build -j 8 --output-on-failure          # Linux: under xvfb-run -a, or configure
+                                                         # with -DSC_TEST_XVFB_PER_SHARD=ON (one X server per shard, as CI)
 
 # a subset of the embedded suite (substrings of the test name, comma-separated)
 SC_TEST_FILTER=control build/src/SpectroCraft_artefacts/Debug/SpectroCraft --run-unit-tests
@@ -85,6 +86,13 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
 - `-DSPECTRO_ENABLE_AI=OFF` for a light build (no OpenVINO / whisper.cpp).
 - The C++ tests are in `tests/UnitTests.cpp` and `tests/regression/*.inc` (AI control:
   `tests/regression/control.inc`), run by `--run-unit-tests`; ctest splits them into shards.
+- Debug builds route JUCE assertions through `juce::Logger` (`JUCE_LOG_ASSERTIONS`, src/CMakeLists.txt):
+  the runner counts them per test (`ScAssertCounter` in tests/UnitTests.cpp) and lists the tests that
+  triggered any at the end of the run. A test can require none: compare `scAssertCounter().count`
+  before and after the step (the control fuzz and `testAppRegPasteMixAtEnd` do).
+- Waits in tests: `scPumpUntil` / `scDeliverPostedMessages` default to 10 s and return as soon as the
+  condition holds. To drive a `TextEditor`'s link to another field, prefer `setText (t, false)` plus a
+  direct `onTextChange()` call over waiting for the posted change message (flaky on loaded runners).
 - Scale form (per-file axes: units, offset, scale, order, visibility): the model is
   `include/AxisScale.h` + `src/AxisScale.cpp`, the dialog `include/ScaleForm.h` +
   `src/ScaleForm.cpp`, applied through `Application::setAxisEntries`; behaviour and

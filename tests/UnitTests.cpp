@@ -106,6 +106,66 @@ static void scMissingFixture (const juce::String& name)
         scSkip ("test fixture tests/data/" + name + " not found");
 }
 
+// JUCE assertions. Debug builds define JUCE_LOG_ASSERTIONS (src/CMakeLists.txt),
+// so a failed jassert goes through juce::Logger instead of a bare stderr line
+// that no test could see. This logger counts them and passes every message on
+// to the logger it replaced (the diagnostic log's, when a session runs), so
+// nothing else changes. The runner lists the tests that triggered any at the
+// end of the run; a test can also CHECK that a step triggered none
+// (scAssertCounter().count before and after). Release builds compile
+// assertions out, so the count stays 0 there.
+// juce::Logger::logMessage is protected: a pointer to it, formed through a
+// derived class (which the language allows), forwards to another logger.
+struct ScLoggerAccess : juce::Logger
+{
+    static void forward (juce::Logger& target, const juce::String& message)
+    {
+        void (juce::Logger::*fn) (const juce::String&) = &ScLoggerAccess::logMessage;
+        (target.*fn) (message);
+    }
+};
+
+class ScAssertCounter : public juce::Logger
+{
+public:
+    std::atomic<int> count { 0 };
+    juce::Logger* next = nullptr;
+
+    void logMessage (const juce::String& message) override
+    {
+        if (message.startsWith ("JUCE Assertion failure"))
+            ++count;
+        if (next != nullptr && next != this) ScLoggerAccess::forward (*next, message);
+        else juce::Logger::outputDebugString (message);
+    }
+};
+
+static ScAssertCounter& scAssertCounter()
+{
+    static auto* counter = new ScAssertCounter();   // never destroyed: JUCE may log during shutdown
+    return *counter;
+}
+
+// Before each test: the counter is the current logger, chained to whatever
+// was current (a test may have started or stopped a diagnostic session).
+static void scInstallAssertCounter()
+{
+    auto& c = scAssertCounter();
+    auto* cur = juce::Logger::getCurrentLogger();
+    if (cur == &c) return;
+    c.next = cur;
+    juce::Logger::setCurrentLogger (&c);
+}
+
+// The diagnostics test checks the logger the diagnostic session installs and
+// removes, so it runs with the previous logger in place.
+static void scRemoveAssertCounter()
+{
+    auto& c = scAssertCounter();
+    if (juce::Logger::getCurrentLogger() == &c)
+        juce::Logger::setCurrentLogger (c.next);
+}
+
 // Extra recorder-plugin folder for the fake test plugin. CMake copies it next
 // to the console test binary (<SpectroCraftTests dir>/recorders); when the
 // suite runs from the app (--run-unit-tests) ctest points SC_TEST_RECORDER_DIR
@@ -223,7 +283,12 @@ static bool scRecomputeUntil (FFTAnalysisView& view, const std::function<bool()>
 // final value of `cond`. Use instead of fixed sleeps / fixed pump counts:
 // fast when the event arrives early, robust on a loaded machine (parallel
 // shards, CI) where a fixed 5-50 ms wait is a coin flip.
-static bool scPumpUntil (const std::function<bool()>& cond, int timeoutMs = 2000)
+// The default is 10 s: a wait returns as soon as its condition holds, so the
+// margin costs nothing when a check passes, and 2 s was not enough for a
+// message posted right after a MainWindow was built on a loaded macOS runner.
+// Pass a short timeout explicitly where the test means "nothing happens
+// within X".
+static bool scPumpUntil (const std::function<bool()>& cond, int timeoutMs = 10000)
 {
     const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
     for (;;)
@@ -237,7 +302,7 @@ static bool scPumpUntil (const std::function<bool()>& cond, int timeoutMs = 2000
 // Deliver every message posted so far: posts a marker message and pumps until
 // it ran (the queue is FIFO). False if it did not run within timeoutMs.
 // (Same as scFlushMessageQueue, defined later in the file by another range.)
-static bool scDeliverPostedMessages (int timeoutMs = 2000)
+static bool scDeliverPostedMessages (int timeoutMs = 10000)
 {
     auto done = std::make_shared<bool> (false);
     juce::MessageManager::callAsync ([done] { *done = true; });
@@ -5416,12 +5481,40 @@ static void testChangeGainDialog()
             w->enterModalState (false);
             if (ed != nullptr) ed->grabKeyboardFocus ();
 
-            ScModalDriver driver ([w, ed, haveFocus] (juce::Component&)
+            // As in the first block, the OS must have focused THIS dialog's
+            // window: being the foreground process is not enough. On Linux
+            // that flag is sticky (any earlier window of the process sets it),
+            // and under Xvfb without a window manager the grab can be lost;
+            // the Linux CI failed here with the 3 s timeout (runs 43422720567,
+            // 43952397694, 44203358624).
+            const bool wFocused = haveFocus
+                && scPumpUntil ([w] { auto* p = w->getPeer(); return p != nullptr && p->isFocused(); }, 1000);
+            if (haveFocus && !wFocused)
+                scSkip ("change gain dialog: the OS did not focus the full-flow dialog window"
+                        " (no window manager?), typed into the field directly");
+
+            bool focusStolen = false;
+            ScModalDriver driver ([w, ed, wFocused, &focusStolen] (juce::Component&)
             {
-                // Wait until the field actually has keyboard focus...
-                auto* e2 = haveFocus ? dynamic_cast<juce::TextEditor*> (
-                                           juce::Component::getCurrentlyFocusedComponent ())
-                                     : ed;
+                juce::TextEditor* e2 = ed;
+                if (wFocused)
+                {
+                    // Wait until the field actually has keyboard focus...
+                    e2 = dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent ());
+                    if (e2 == nullptr)
+                    {
+                        // ...while the dialog keeps the OS focus (if it holds
+                        // it and the field never gets the keyboard, that is a
+                        // real regression: the 3 s timeout fails the CHECKs).
+                        // If another window took the OS focus meanwhile, it
+                        // will not come back by itself: type directly.
+                        auto* p = w->getPeer ();
+                        if (p != nullptr && p->isFocused ())
+                            return false;
+                        focusStolen = true;
+                        e2 = ed;
+                    }
+                }
                 if (e2 == nullptr)
                     return false;
 
@@ -5438,8 +5531,12 @@ static void testChangeGainDialog()
             const juce::String text = w->getTextEditorContents ("gainDb");
             delete w;
 
-            CHECK (driver.acted (), juce::String (haveFocus ? "the dialog's field received keyboard focus"
-                                                            : "the driver typed into the dialog's field"));
+            if (focusStolen)
+                scSkip ("change gain dialog: another window took the OS focus during the full flow,"
+                        " typed into the field directly");
+            CHECK (driver.acted (), juce::String (wFocused && !focusStolen
+                                                      ? "the dialog's field received keyboard focus"
+                                                      : "the driver typed into the dialog's field"));
             CHECK (result == 1, "Enter submits the dialog via OK");
             CHECK (text.trim() == "6",
                    "typing replaced the pre-selected value instead of appending");
@@ -9731,6 +9828,32 @@ static void testEffectShortcutsAndRepeat()
         CHECK (win->getLastEffectId() == MainWindow::MenuIDs::ToolsFadeIn, "fade-in recorded");
         CHECK (std::abs (readOneSample (eng, 0, 24001)) < 0.05f,
                "fade-in zeroed the selection start");
+
+        // Ctrl+Shift+F must really run the fade-in again: one more undo step,
+        // and the level a quarter of the way into the selection (where the
+        // linear fade-in gain is ~0.25) drops by that factor once more. It
+        // used to be dispatched to the context-menu handler, which does not
+        // know the Effects menu ids, so the key did nothing.
+        const auto peakNear = [&eng] (int64_t centre)
+        {
+            float pk = 0.0f;
+            for (int64_t p = centre - 150; p <= centre + 150; ++p)   // ~3 periods of 440 Hz
+                pk = std::max (pk, std::abs (readOneSample (eng, 0, p)));
+            return pk;
+        };
+        const int64_t quarter = 24000 + 12000;   // 25 % into [0.5 s, 1.5 s]
+        const float before = peakNear (quarter);
+        const auto undoBefore = app.undo().undoSize();
+        app.setSelection ({ 0.5, 1.5 });
+        CHECK (press ('f'), "Ctrl+Shift+F consumed after the fade-in");
+        const float after = peakNear (quarter);
+        CHECK (app.undo().undoSize() == undoBefore + 1,
+               "Ctrl+Shift+F repeated the fade-in (one more undo step)");
+        CHECK (before > 0.2f && after > before * 0.2f && after < before * 0.3f,
+               "Ctrl+Shift+F faded in again (" + juce::String (before, 3) + " -> "
+               + juce::String (after, 3) + " at 25 % of the selection)");
+        CHECK (win->getLastEffectId() == MainWindow::MenuIDs::ToolsFadeIn,
+               "the repeated effect stays the last effect");
 
         app.setSelection ({ 0.5, 1.5 });
         CHECK (press ('o'), "Ctrl+Shift+O consumed");
@@ -16112,6 +16235,63 @@ static void testSplitSpectralSelectionEdgeFade()
         resTailErr = std::max (resTailErr, (double) std::abs (getR (s) - orig[(size_t) s]));
     CHECK (resTailErr < 0.3, "residual crossfades back to the original in the tail");
 
+    // Out-of-band content must come back unchanged in the residual over the
+    // whole extent, edges included. The noise checks above tolerate errors up
+    // to the signal's own level; a 1 kHz sine against the 8-12 kHz band leaves
+    // nothing to extract, so the residual must equal the original within
+    // 1e-3. The pass-through frames (context before the extent, tail after the
+    // selection) used to accumulate w*x where the masked frames accumulate
+    // w*w*x, which gave a 4/3 gain at the extent start and 7/6 over its last
+    // hop: a step in the original channel at both ends of every mid-file split.
+    {
+        auto sineGen = [] (int, int64_t f, double r) {
+            return (float) (0.5 * std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0
+                                            * (double) f / r));
+        };
+        const juce::File sineWav = makeTempFile ("split_edge_sine.wav");
+        CHECK (writeWav (sineWav, 1, rate, nSamples, sineGen), "wrote 1 kHz sine wav");
+        AudioEngine seng;
+        CHECK (seng.loadFile (sineWav), "loaded 1 kHz sine wav");
+
+        std::vector<std::vector<float>> sExt, sRes;
+        juce::Range<int64_t> sExtent;
+        CHECK (SpectralMask::splitSpectralSelection (seng, { 9600, 38400 }, sel,
+                                                     nullptr, sExt, sRes, sExtent),
+               "sine split ran");
+        std::vector<float> sOrig ((size_t) nSamples);
+        CHECK (seng.readSamples (0, 0, (int) nSamples, sOrig.data()), "read sine original");
+
+        if (sRes.size() == 1 && sExt.size() == 1
+            && sRes[0].size() == (size_t) sExtent.getLength ()
+            && sExt[0].size() == (size_t) sExtent.getLength ())
+        {
+            const int64_t s0 = sExtent.getStart (), s1 = sExtent.getEnd ();
+            auto maxResErr = [&] (int64_t a, int64_t b) {
+                double m = 0.0;
+                for (int64_t s = a; s < b; ++s)
+                    m = std::max (m, (double) std::abs (sRes[0][(size_t) (s - s0)]
+                                                        - sOrig[(size_t) s]));
+                return m;
+            };
+            double extMax = 0.0;
+            for (float v : sExt[0]) extMax = std::max (extMax, (double) std::abs (v));
+
+            const double headErr = maxResErr (s0, s0 + 3 * H);
+            const double tailErr = maxResErr (s1 - 2 * H, s1);
+            const double allErr  = maxResErr (s0, s1);
+            CHECK (headErr < 1e-3, "residual equals the original at the extent start (max error "
+                                   + juce::String (headErr, 4) + ")");
+            CHECK (tailErr < 1e-3, "residual equals the original over the extent's last hops (max error "
+                                   + juce::String (tailErr, 4) + ")");
+            CHECK (allErr < 1e-3, "an out-of-band sine comes back unchanged over the whole extent (max error "
+                                  + juce::String (allErr, 4) + ")");
+            CHECK (extMax < 1e-3, "nothing is extracted from an out-of-band sine (max "
+                                  + juce::String (extMax, 4) + ")");
+        }
+        else
+            CHECK (false, "sine split returned one channel as long as its extent");
+    }
+
     // Selection starting at file start: no spike where coverage is partial.
     SpectralSelection sel2;
     sel2.addRect (0.0, 0.8, 8000.0, 12000.0, false);
@@ -16518,7 +16698,7 @@ static void collectSplitConfigWidgets (juce::Component& root,
 // once a sentinel posted now has run, all earlier ones have too. Unlike a
 // fixed number of short pumps, a "nothing happened" check after this cannot
 // pass just because the message had not been delivered yet.
-static bool scFlushMessageQueue (int timeoutMs = 2000)
+static bool scFlushMessageQueue (int timeoutMs = 10000)
 {
     auto done = std::make_shared<bool> (false);
     juce::MessageManager::callAsync ([done] { *done = true; });
@@ -19175,29 +19355,37 @@ static void testTimeStretchDialogSync()
           "duration initialised to the reference length");
     CHECK (facEd->getText ().trim () == "1", "factor initialised to 1");
 
-    // TextEditor::setText notifies its listeners asynchronously (a posted
-    // command message): wait for the linked field instead of a 5 ms pump,
-    // which on macOS often returned before the message was delivered.
+    // Drive the link synchronously: set the text without the posted
+    // notification and run the dialog's own onTextChange handler at once.
+    // Waiting for TextEditor's asynchronous change message was flaky right
+    // after a MainWindow was built: on a loaded macOS runner the message for
+    // "2" arrived after the factor had been set to "4" and reset it to 2,
+    // which failed three checks in a row (CI run 43666099169). The handlers
+    // read the current text of their field, so this still tests them.
+    const auto typeInto = [] (juce::TextEditor* ed, const juce::String& text)
+    {
+        ed->setText (text, false);
+        CHECK (ed->onTextChange != nullptr, "the field reacts to typing (onTextChange)");
+        if (ed->onTextChange) ed->onTextChange ();   // an empty std::function would end the shard
+    };
+
     // Duration -> factor: 2 s of a 4 s file is twice as fast.
-    durEd->setText ("2");
-    CHECK (scPumpUntil ([&] { return std::abs (facEd->getText ().getDoubleValue () - 2.0) < 1e-6; }),
+    typeInto (durEd, "2");
+    CHECK (std::abs (facEd->getText ().getDoubleValue () - 2.0) < 1e-6,
           "factor follows the duration field");
 
     // Factor -> duration: factor 4 of a 4 s file is 1 s.
-    facEd->setText ("4");
-    CHECK (scPumpUntil ([&] { return std::abs (durEd->getText ().getDoubleValue () - 1.0) < 1e-6; }),
+    typeInto (facEd, "4");
+    CHECK (std::abs (durEd->getText ().getDoubleValue () - 1.0) < 1e-6,
           "duration follows the factor field");
 
-    // Invalid input leaves the other field untouched. Flush the queue so the
-    // listener has really seen "abc" (otherwise the factor would still be 4
-    // simply because nothing ran yet).
-    durEd->setText ("abc");
-    CHECK (scFlushMessageQueue (), "text-change message delivered");
+    // Invalid input leaves the other field untouched.
+    typeInto (durEd, "abc");
     CHECK (std::abs (facEd->getText ().getDoubleValue () - 4.0) < 1e-6,
           "invalid duration text is ignored");
     // ...and the link still works afterwards: 4 s of a 4 s file is factor 1.
-    durEd->setText ("4");
-    CHECK (scPumpUntil ([&] { return std::abs (facEd->getText ().getDoubleValue () - 1.0) < 1e-6; }),
+    typeInto (durEd, "4");
+    CHECK (std::abs (facEd->getText ().getDoubleValue () - 1.0) < 1e-6,
           "a valid duration after invalid text updates the factor again");
 
     delete w;
@@ -20204,11 +20392,15 @@ static void testCatDialog()
     CHECK (std::abs (durEd->getText ().getDoubleValue () - 2.0) < 1e-6,
           "duration initialised to the reference length");
 
-    // Linked fields, like Time Stretch. TextEditor notifies asynchronously:
-    // wait for the effect instead of a 5 ms pump (failed on macOS even when
-    // the test ran alone).
-    durEd->setText ("1");
-    CHECK (scPumpUntil ([&] { return std::abs (panel->getSpeedFactor () - 2.0) < 1e-6; }),
+    // Linked fields, like Time Stretch: set the text without the posted
+    // notification and run the panel's own onTextChange at once. Waiting for
+    // TextEditor's asynchronous message right after a MainWindow was built
+    // is the margin that failed for the Time Stretch dialog on a loaded
+    // macOS runner (see testTimeStretchDialogSync).
+    durEd->setText ("1", false);
+    CHECK (durEd->onTextChange != nullptr, "the duration field reacts to typing (onTextChange)");
+    if (durEd->onTextChange) durEd->onTextChange ();
+    CHECK (std::abs (panel->getSpeedFactor () - 2.0) < 1e-6,
           "halving the duration doubles the speed factor");
 
     // Wait for the background analysis to deliver its result (bounded: 10 s).
@@ -20236,13 +20428,13 @@ static void testCatDialog()
     }, 10000);
     CHECK (hasPreview, "reduce-gaps mode shows the resulting duration");
 
-    // Percentile parsing + clamping (async text-change notification).
+    // Percentile parsing + clamping: getPercentile parses the field's text
+    // itself, so the value is there at once (the change message only
+    // refreshes the preview).
     pctEd->setText ("75");
-    CHECK (scPumpUntil ([&] { return std::abs (panel->getPercentile () - 75.0) < 1e-9; }),
-          "percentile parsed");
+    CHECK (std::abs (panel->getPercentile () - 75.0) < 1e-9, "percentile parsed");
     pctEd->setText ("250");
-    CHECK (scPumpUntil ([&] { return std::abs (panel->getPercentile () - 100.0) < 1e-9; }),
-          "percentile clamped to 100");
+    CHECK (std::abs (panel->getPercentile () - 100.0) < 1e-9, "percentile clamped to 100");
 
     // Export Variation hides every input row and previews the export.
     combo->setSelectedId (3, juce::sendNotificationSync);
@@ -30696,6 +30888,7 @@ static bool scIsSerialTest (const char* name)
     static const char* const serial[] = {
         "marker panel details", "curve analysis modes", "harmonic ratio + clear all",
         "copy curve alt scales", "transcription clipboard", "tables panel", "paste live repro",
+        "tables paste auto select",   // writes and pastes the system clipboard too
         "change gain dialog", "drawing key shortcuts",
         "playback chain", "lazy audio init",
         "regression: panels", "regression: app_from_tests",
@@ -30740,6 +30933,10 @@ static bool scClaimTest (int index, const char* name)
 struct ScTestTiming { std::string name; double seconds; int failed; };
 static std::vector<ScTestTiming> scTestTimings;
 
+
+struct ScAssertingTest { std::string name; int count; };
+static std::vector<ScAssertingTest> scAssertingTests;
+
 static void scRunOneTest (const char* name, void (*fn)())
 {
     static int selectedIndex = 0;
@@ -30750,12 +30947,23 @@ static void scRunOneTest (const char* name, void (*fn)())
     // (in this process) may change its outcome, whatever the shard layout.
     Application::resetIsolatedSettingsStore();
 
+    const bool countAsserts = std::string (name) != "regression: diagnostics";
+    if (countAsserts) scInstallAssertCounter();
+    else              scRemoveAssertCounter();
+    const int assertsBefore = scAssertCounter().count.load();
+
     progress (name);
     auto* const mmBefore = juce::MessageManager::getInstanceWithoutCreating();
     const int failuresBefore = failures;
     const auto t0 = std::chrono::steady_clock::now();
     fn();
     const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+    const int asserts = scAssertCounter().count.load() - assertsBefore;
+    if (asserts > 0)
+    {
+        scAssertingTests.push_back ({ name, asserts });
+        std::cerr << "[assert] " << name << ": " << asserts << " JUCE assertion(s)\n";
+    }
     if (juce::MessageManager::getInstanceWithoutCreating() != mmBefore)
     {
         // Later tests would silently run without a message loop (lost async
@@ -30836,6 +31044,20 @@ static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
     std::setvbuf (stdout, nullptr, _IONBF, 0);
+    // The CPU and its vector extensions, first thing in every shard's output:
+    // the AI tests crashed with an illegal instruction on some CI hosts only
+    // (.github/workflows/build.yml, Windows unit tests), so a crash must be
+    // traceable to the machine it ran on.
+    {
+        using SS = juce::SystemStats;
+        const auto yn = [] (bool b) { return b ? "yes" : "no"; };
+        const auto isaCap = SS::getEnvironmentVariable ("ONEDNN_MAX_CPU_ISA", {});
+        std::cout << "[cpu] " << SS::getCpuModel() << ", " << SS::getNumCpus() << " cores"
+                  << ", AVX " << yn (SS::hasAVX()) << ", AVX2 " << yn (SS::hasAVX2())
+                  << ", AVX-512F " << yn (SS::hasAVX512F())
+                  << (isaCap.isNotEmpty() ? ", ONEDNN_MAX_CPU_ISA=" + isaCap : juce::String())
+                  << "\n";
+    }
     // Application warnings are logged ("[alert] ...") instead of shown: no
     // message box may wait for a click while the suite runs.
     sc::alert::setHeadless (true);
@@ -31193,6 +31415,12 @@ static int scRunUnitTestsImpl()
         std::cerr << skippedTests.size() << " test(s) or test part(s) skipped:\n";
         for (auto& sk : skippedTests)
             std::cerr << "  - " << sk << "\n";
+    }
+    if (!scAssertingTests.empty())
+    {
+        std::cerr << scAssertingTests.size() << " test(s) triggered JUCE assertions:\n";
+        for (auto& a : scAssertingTests)
+            std::cerr << "  - " << a.name << ": " << a.count << "\n";
     }
     return failures == 0 ? 0 : 1;
 }

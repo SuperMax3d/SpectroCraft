@@ -1265,7 +1265,11 @@ bool AudioEngine::pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>&
         {
             const int64_t oldLen = totalSamples - samplePos;
             newData[ch].resize ((size_t) (oldLen + tail), 0.0f);
-            const float* old = buffer->getReadPointer (ch, (int) samplePos);
+            // Pasting at EOF leaves nothing to mix (oldLen == 0): take the
+            // pointer only when there are old samples, because getReadPointer
+            // asserts on start == size even for an empty range (as in
+            // readSamples above).
+            const float* old = oldLen > 0 ? buffer->getReadPointer (ch, (int) samplePos) : nullptr;
             for (int64_t i = 0; i < oldLen; ++i)
             {
                 float v = old[i];

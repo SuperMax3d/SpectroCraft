@@ -132,6 +132,7 @@ target_compile_definitions (SpectroCraftTests
         SC_TESTS_EXE=1
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
         SC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<$<CONFIG:Debug>:JUCE_LOG_ASSERTIONS=1>   # same as the app (src/CMakeLists.txt)
 )
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,16 @@ set_tests_properties (unit_tests_claims_mkdir PROPERTIES FIXTURES_SETUP sc_claim
 # it with the other test logs when a shard fails.
 set (SC_TEST_DIAG_DIR "${CMAKE_BINARY_DIR}/Testing/Temporary/diag")
 
+# Linux CI: one X server per shard. With a single display for every shard,
+# a window another shard shows takes the X focus, and the serial keyboard-focus
+# tests of shard 0 (change gain dialog) failed (.github/workflows/build.yml).
+# Fixed server numbers 99+k avoid the race of xvfb-run -a when the shards start
+# together.
+option (SC_TEST_XVFB_PER_SHARD "Run each unit-test shard under its own xvfb-run (Linux CI)" OFF)
+if (SC_TEST_XVFB_PER_SHARD)
+    find_program (SC_XVFB_RUN xvfb-run REQUIRED)
+endif()
+
 math (EXPR SC_LAST_SHARD "${SC_TEST_SHARDS} - 1")
 foreach (k RANGE 0 ${SC_LAST_SHARD})
     set (env ${SC_TEST_ENV_COMMON}
@@ -273,8 +284,13 @@ foreach (k RANGE 0 ${SC_LAST_SHARD})
                              "SC_OPENVINO_CACHE_DIR=${home}/openvino-cache")
         endif()
     endif()
+    set (launcher "")
+    if (SC_TEST_XVFB_PER_SHARD)
+        math (EXPR display "99 + ${k}")
+        set (launcher "${SC_XVFB_RUN}" -n ${display} -s "-screen 0 1920x1080x24")
+    endif()
     add_test (NAME unit_tests_shard${k}
-              COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
+              COMMAND ${launcher} $<TARGET_FILE:SpectroCraft> --run-unit-tests)
     set_tests_properties (unit_tests_shard${k} PROPERTIES
         PASS_REGULAR_EXPRESSION "all unit tests passed"
         FAIL_REGULAR_EXPRESSION "unit tests FAILED"

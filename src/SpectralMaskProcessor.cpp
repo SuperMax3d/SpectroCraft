@@ -446,14 +446,19 @@ namespace SpectralMask
                 const size_t off = (size_t) (s_k - xStart);
 
                 // Nothing selected at this frame time? Pure pass-through for the
-                // residual (no FFT needed: ifft(fft(y)) == y).
+                // residual (no FFT needed: ifft(fft(y)) == y). A masked frame
+                // analyses x*w and overlap-adds its synthesis with w again, so an
+                // unchanged bin contributes w*w*x; the pass-through must add the
+                // same, or the context frames before the extent and the tail
+                // frames after the selection put a 4/3 gain at the extent start
+                // and 7/6 over its last hop (the sum is divided by sum(w*w)).
                 const double tSecs = (double) s_k / rate;
                 if (!frameWeights (sel, tSecs, N, rate, w, noiseBins))
                 {
                     for (int i = 0; i < N; ++i)
                     {
                         const float wv = win[(size_t) i];
-                        accRes[off + (size_t) i] += wv * x[off + (size_t) i];
+                        accRes[off + (size_t) i] += wv * wv * x[off + (size_t) i];
                         winSum[off + (size_t) i]  += wv * wv;
                     }
                     continue;

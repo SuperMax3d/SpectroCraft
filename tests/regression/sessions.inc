@@ -112,7 +112,7 @@ static void regrSessions_model()
     }
 
     {
-        const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_session_json");
+        const juce::File dir = makeTempFile ("sc_session_json");
         dir.getChildFile ("sub").createDirectory ();
         const juce::File mainF = dir.getChildFile ("main.wav");
         const juce::File other = dir.getChildFile ("sub").getChildFile ("b.wav");
@@ -135,7 +135,7 @@ static void regrSessions_documents()
     progress ("regression sessions: add, move, remove, undo, save, reopen");
     using namespace scsessiontest;
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_doc");
+    const juce::File dir = makeTempFile ("sc_sessions_doc");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"),
@@ -327,7 +327,7 @@ static void regrSessions_window()
 {
     progress ("regression sessions: Selection > Move (V), View > Show File Borders, rows bar");
     using namespace scsessiontest;
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_ui");
+    const juce::File dir = makeTempFile ("sc_sessions_ui");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fc = dir.getChildFile ("c.wav");
@@ -428,7 +428,7 @@ static void regrSessions_reviewBatch1()
 {
     progress ("regression sessions: PR #24 review batch 1");
     using namespace scsessiontest;
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b1");
+    const juce::File dir = makeTempFile ("sc_sessions_b1");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"),
@@ -625,7 +625,7 @@ static void regrSessions_reviewBatch2()
 {
     progress ("regression sessions: PR #24 review batch 2 (main file moves, insert in front)");
     using namespace scsessiontest;
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b2");
+    const juce::File dir = makeTempFile ("sc_sessions_b2");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"), fx = dir.getChildFile ("x.wav");
@@ -732,7 +732,7 @@ static void regrSessions_trim()
         CHECK (! splitTrimmed (whole, 4, 2, vis, h, t), "sessions trim: trims cannot hide the whole file");
     }
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_trim");
+    const juce::File dir = makeTempFile ("sc_sessions_trim");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav");
@@ -828,7 +828,7 @@ static void regrSessions_copies()
 {
     progress ("regression sessions: the same file several times (linked copies)");
     using namespace scsessiontest;
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_copies");
+    const juce::File dir = makeTempFile ("sc_sessions_copies");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav");
@@ -894,7 +894,7 @@ static void regrSessions_reviewBatch3()
 {
     progress ("regression sessions: PR #24 review batch 3 (conversions, copies or originals)");
     using namespace scsessiontest;
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b3");
+    const juce::File dir = makeTempFile ("sc_sessions_b3");
     dir.deleteRecursively ();
     dir.createDirectory ();
     const juce::File fm = dir.getChildFile ("main.wav"), f16 = dir.getChildFile ("hi16k.wav"),

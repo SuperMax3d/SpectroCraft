@@ -148,7 +148,14 @@ static void testControlFuzz()
     if (dump.isNotEmpty()) juce::File (dump).replaceWithText (lines.joinIntoString ("\n") + "\n");
     juce::StringArray out;
     const double t0 = juce::Time::getMillisecondCounterHiRes();
+    const int assertsBefore = scAssertCounter().count.load();
     const int rc = ctlRunLines (app, lines, out);
+    // A failed jassert used to go unnoticed here (Debug builds print it and
+    // carry on): edit.pasteMix at EOF asserted 42-46 times per run. Debug
+    // builds now count JUCE assertions (UnitTests.cpp, ScAssertCounter).
+    const int asserts = scAssertCounter().count.load() - assertsBefore;
+    CHECK (asserts == 0, "fuzz: no JUCE assertion (" + juce::String (asserts)
+                             + "; rerun with SC_FUZZ_DUMP=<file> to get the lines)");
     CHECK (rc == 1 || rc == 2, "fuzz: session ends with an error code (some lines are invalid)");
     int expected = 0;   // blank lines get no response, the option line neither
     for (const auto& l : lines) if (l.trim().isNotEmpty() && !l.contains ("continueOnError")) ++expected;
