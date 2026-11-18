@@ -760,6 +760,11 @@ void ModelPanel::moveSelected (int delta)
     refresh();
 }
 
+void ModelPanel::deleteKeyPressed (int)
+{
+    deleteSelected();
+}
+
 void ModelPanel::deleteSelected()
 {
     auto* m = model();

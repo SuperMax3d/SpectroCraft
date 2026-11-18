@@ -62,6 +62,7 @@ private:
     void cellClicked (int row, int col, const juce::MouseEvent&) override;
     void selectedRowsChanged (int lastRow) override;
     void backgroundClicked (const juce::MouseEvent&) override;
+    void deleteKeyPressed (int lastRow) override;   // DEL in the list removes the component (#53)
 
     sc::model::Model* model() const;
     sc::model::Component* current() const;

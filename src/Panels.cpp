@@ -5731,8 +5731,11 @@ void MarkerListPanel::Model::selectedRowsChanged (int)
 
 void MarkerListPanel::Model::deleteKeyPressed (int)
 {
-    // DEL deletes the audio data of the active selection - not list rows.
-    owner->deleteAudioData ();
+    // DEL with the list focused removes the selected markers (issue #53);
+    // with no row selected it deletes the audio of the active selection, as
+    // DEL on the tracks does.
+    if (owner->table.getNumSelectedRows() > 0) owner->deleteSelected ();
+    else                                       owner->deleteAudioData ();
 }
 
 void MarkerListPanel::deleteAudioData ()
@@ -7930,8 +7933,11 @@ void SelectionPanel::Model::selectedRowsChanged (int)
 
 void SelectionPanel::Model::deleteKeyPressed (int)
 {
-    // DEL deletes the audio data of the active selection - not list rows.
-    owner->deleteAudioData ();
+    // DEL with the list focused removes the selected stored selections (issue
+    // #53); with no row selected it deletes the audio of the active
+    // selection, as DEL on the tracks does.
+    if (owner->table.getNumSelectedRows() > 0) owner->deleteSelected ();
+    else                                       owner->deleteAudioData ();
 }
 
 SelectionPanel::SelectionPanel (Application& appIn)
@@ -9387,6 +9393,11 @@ void DrawingPanel::deleteSelected ()
     if (items.empty()) return;
 
     app.deleteSelectedDrawings (items);   // fires onDrawingsChanged -> refresh + repaint
+}
+
+void DrawingPanel::Model::deleteKeyPressed (int)
+{
+    owner->deleteSelected ();
 }
 
 void DrawingPanel::doDelete()
@@ -10971,6 +10982,11 @@ std::vector<std::pair<int, int>> TablesPanel::selectedParamRows() const
         }
     }
     return out;
+}
+
+void TablesPanel::Model::deleteKeyPressed (int)
+{
+    owner->removeSelected ();
 }
 
 void TablesPanel::removeSelected()
