@@ -63,7 +63,7 @@ using List = std::vector<Entry>;
 // ------------------------------------------------------------------ vocabulary
 
 const char* kindName (Kind k);              // "Time" / "Amplitude" / "Frequency"
-const char* typeName (Type t);              // "Add Axis" / "Footer Only"
+const char* typeName (Type t);              // "Axis and Footer" / "Footer Only"
 
 /** The unit choices of a kind, in combo order.
     Time:      "hh:mm:ss.xxxx", "ss.xxxx", "samples"
@@ -113,6 +113,12 @@ int countAddAxis (const List& entries, Kind k);       // visible Add Axis entrie
 int countKind (const List& entries, Kind k);          // entries of that kind at all
 List extras (const List& entries, Kind k);            // visible Add Axis after the primary
 List footerOnly (const List& entries, Kind k);        // visible "Footer Only" entries
+/** Every visible entry of a kind except its main axis, in list order: the
+    "Axis and Footer" extras and the "Footer Only" entries. These are the
+    footer readouts, the Go to Time fields and the extra table columns. */
+List secondary (const List& entries, Kind k);
+/** True when entries[index] is one of secondary (entries, its kind). */
+bool isSecondary (const List& entries, int index);
 
 /** Suggested name for a new axis of that kind ("Frequency Hz 2"). */
 juce::String defaultName (Kind k, int unitsIndex);
@@ -130,6 +136,16 @@ juce::String formatFrequency (const Entry& e, double fHz, double nyq);
     main frequency axis labels itself ("500 Hz", "1.5 kHz", "12 %"). Extra
     frequency axes use this so they read like the axis they belong to. */
 juce::String formatFrequencyAxis (const Entry& e, double fHz, double nyq);
+
+/** A tick value with every digit it carries, up to maxDecimals, without
+    trailing zeros: 1550 -> "1550", 1.25 -> "1.25", 12.5 -> "12.5". Axis ticks
+    are nice values, so this is exact; rounding them to one decimal put
+    "1.6 kHz" next to a line at 1550 Hz (issue #54). */
+juce::String formatTickNumber (double v, int maxDecimals = 3);
+
+/** An extra frequency axis' tick label for a DISPLAYED value of its unit
+    (not Hz): "1.25 kHz" / "500 Hz", "12.5 %", or the plain number. */
+juce::String formatFrequencyTick (const Entry& e, double displayed);
 
 /* --------------------------------------------------------------------------
    The inverse of the formatters: what an entry's offset / scale must be for a

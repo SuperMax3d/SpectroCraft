@@ -96,7 +96,7 @@ axes as a vertical stack:
 | `scale` | amplitude / frequency multiplier (and time, for the plain-seconds unit) |
 | `chanScale` | amplitude axes: one multiplier per channel (empty = `scale`) |
 | `visible` | drawn at all |
-| `type` | **Add Axis** (a strip on the tracks) or **Footer Only** (a readout only — the old alternative scale) |
+| `type` | **Axis and Footer** (a strip on the tracks and a footer readout; called "Add Axis" before issue #54) or **Footer Only** (a readout only — the old alternative scale) |
 
 Unit vocabularies:
 
@@ -104,12 +104,12 @@ Unit vocabularies:
 - **Amplitude**: `dB`, `None`, `Volt`, `Pascal`, `g` (a physical unit calibrates the file, as the old "Set Unit and Scale" did)
 - **Frequency**: `Hz`, `%` (of Nyquist), `None`
 
-The **first visible Add Axis entry of each kind is the main axis**: it drives the
-grid, the ruler, the level readouts and the existing session state
+The **first visible Axis and Footer entry of each kind is the main axis**: it
+drives the grid, the ruler, the level readouts and the existing session state
 (`timeAxisMode`, `timeOffsetSecs`, `waveVScaleMode`, the file's
-`ScaleCalibration`, `specFreqScaleMode`/`specFreqFactor`). The remaining Add
-Axis entries label the *same* tick positions in their own units — they never
-move the grid that is actually drawn. A frequency axis is always shared by all
+`ScaleCalibration`, `specFreqScaleMode`/`specFreqFactor`). The remaining Axis
+and Footer entries draw extra strips in their own units — they never move the
+grid that is actually drawn. A frequency axis is always shared by all
 channel rows: the engine renders one frequency window for the whole spectrogram,
 so a per-row frequency scale would not be a rendering, only a label.
 
@@ -163,12 +163,19 @@ empty list is rejected — every kind keeps at least its main axis.
   extra strips and the vertical bar went past the rows. The tables strip below a
   top ruler uses the same stack height.
 
-## Footer Only
+## Ticks, strips and the footer
 
-Extra axis strips label the **same tick positions** as the main axis, in their
-own units, and spell the unit out: `sc::axes::formatFrequencyAxis` gives
-`500 Hz` / `1.5 kHz` / `50.00 %` — the way the main frequency axis labels
-itself, so a secondary axis set to Hz reads as Hz.
+**Every frequency axis ticks at nice values of its own unit** (displayed =
+k × Hz), and draws each tick at the exact frequency it stands for, so a label
+reads exactly what its line points at (issue #54). The main axis' grid lines
+follow its own unit (a scaled main axis gets nice scaled values); an extra axis
+draws a short tick in its strip for each of its labels. Labels carry every
+digit of the tick value (`sc::axes::formatTickNumber`): the main axis used to
+round to one decimal of kHz and an extra axis labelled the main axis' positions
+in its own unit, rounded, so a line at 1605 Hz read "1.6 kHz". Extra strips
+spell the unit out (`sc::axes::formatFrequencyTick`: `1.25 kHz`, `12.5 %`).
+The time rulers already tick at nice displayed values, and the amplitude axes
+label fixed dB levels with their exact converted value.
 
 A Footer Only axis adds no strip.
 
@@ -210,14 +217,36 @@ labels the minor ticks too, not only the decades, so it shows as many values
 as the main one (issue #27).
 
 **Secondary axes read as secondary**: their labels use the same 8.5 pt type as
-the extra time axes, and their strips are narrower (38 px against the main 60). It appears:
+the extra time axes, and their strips are narrower (38 px against the main 60).
 
-- in the status bar / cursor readouts (`FFTAnalysisView::altFreqSuffix`),
-- as an extra field in **Go to Time** (parsed in its own units),
-- as an extra column in the table data exports.
+Every **secondary** axis of a kind (`sc::axes::secondary`: the Axis and Footer
+extras and the Footer Only entries) appears, in its own unit:
+
+- in the cursor readouts of the spectrogram and the Frequency Analysis panel
+  (`FFTAnalysisView::altFreqSuffix`). They used the derived references, a bare
+  factor, so a `%` axis read `f × scale` in the footer and
+  `f × scale / Nyquist × 100` on its strip;
+- as an extra field in **Go to Time** (parsed in its own units);
+- as an extra column in the Frequency Analysis panel's Copy and in **Tables >
+  Table from Spectral Selection**, which also gets one level column per
+  secondary amplitude axis.
 
 `Application::applyEntries` derives the legacy `altTimeRefs`/`altFreqRefs` from
 them, so the code that consumed those lists keeps working.
+
+The Frequency Analysis panel's right-click **Unit > Frequency / Amplitude**
+chooses which axis labels its graphs: Hz or any frequency axis (ticks at nice
+values of that unit, as above; the 1/3-octave mode keeps its band centres), and
+the file's calibration or any amplitude axis.
+
+## The window
+
+**Close** and **Cancel** sit at the bottom right. Every change applies live, so
+Close only closes; Cancel puts back the axes the file had when the form was
+opened (one undoable step) and closes. Typing in a name, offset or scale field
+applies live without rebuilding the form, so the field keeps the keyboard focus
+(it was rebuilt after every character). The window opens 690 px wide (it was
+980), is resizable down to 600 px, and can be minimised and maximised.
 
 ## Tests
 

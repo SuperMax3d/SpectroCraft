@@ -441,6 +441,15 @@ public:
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
     juce::AlertWindow* createGainDialog();
+    /** The "a new version is available" dialog (Help > Check for Updates):
+        the release notes in a read-only, scrollable field of fixed size, so
+        long notes never make the window taller than the screen. The caller
+        owns it (runModalLoop, then delete). */
+    juce::AlertWindow* createUpdateOfferDialog (const sc::update::ReleaseInfo& rel,
+                                                const juce::String& current,
+                                                const juce::String& assetName,
+                                                juce::int64 assetSize);
+    static constexpr int kUpdateNotesW = 560, kUpdateNotesH = 280;
 
     // ---- Effects > Generate ... dialogs ----------------------------------
     void showGenerateSilenceDialog(std::function<void(bool)> onApplied = nullptr);

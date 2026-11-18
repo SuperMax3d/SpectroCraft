@@ -25,6 +25,15 @@ public:
 
     void closeButtonPressed() override { setVisible (false); }
     void resized() override;
+    void visibilityChanged() override;
+
+    /** The buttons at the bottom of the form. Close: changes apply live, so
+        it only closes. Cancel: put back the axes the file had when the form
+        was opened (one undoable step), then close. */
+    void closeForm();
+    void cancelChanges();
+    /** Test hook: where Close (false) / Cancel (true) sit in the form body. */
+    juce::Rectangle<int> bottomButtonBounds (bool cancel) const;
 
     /** Which kind a New button adds (the track the menu was opened from). */
     void setKindForNewAxis (sc::axes::Kind k) { newKind = k; }
@@ -81,7 +90,10 @@ private:
     struct Block;
 
     void rebuild();
-    void commit();
+    /** Applies the blocks' values to the document (one undoable step).
+        rebuildAfter = false for typing in a text field: the blocks are kept,
+        so the field keeps the keyboard focus. */
+    void commit (bool rebuildAfter = true);
     void addAxis (sc::axes::Kind kind);
     void removeAxis (int entryIndex);
     void copyFromMain (int entryIndex);
@@ -100,6 +112,8 @@ private:
     std::vector<int> columnOfKind;            // kind -> column index (0..2)
     std::vector<int> layoutOrder;             // entry indexes, in the order drawn
     sc::axes::List shown;                     // what the blocks currently mirror
+    sc::axes::List openedWith;                // the file's axes when the form was opened (Cancel)
+    const void* openedDoc = nullptr;          // the document they belong to
 
     // drag state
     Block* dragBlock = nullptr;

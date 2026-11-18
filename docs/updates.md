@@ -15,7 +15,7 @@ Tests: `tests/regression/updates.inc` (`SC_TEST_FILTER=updates`).
 
 | | |
 |---|---|
-| *Help > Check for Updates…* | Looks up the latest release. Up to date → a short confirmation. Newer → a dialog with the version, the release notes (first lines of the release body), the asset name and size, and **[Update Now] / [Later] / Open releases page**. |
+| *Help > Check for Updates…* | Looks up the latest release. Up to date → a short confirmation. Newer → a dialog with the version, the asset name and size, the release notes in a read-only scrollable field of fixed size (so long notes never push the buttons off the window), and **[Update Now] / [Later]**. |
 | *Help > Check for Updates at Startup* | Toggle, saved (`check_updates_startup`, off by default). When on, the same lookup runs a few seconds after start, **at most once a day**, and stays silent unless a newer release exists. |
 | Progress | A small dialog with a progress bar: manifest → signature → download → unpack and hash. **[Cancel]** at any point; nothing in the install folder was touched. |
 | Install | After everything is verified the app asks to close (only if documents have unsaved changes, listing them), then quits. The updater replaces the files and starts the new version. |
@@ -236,7 +236,7 @@ removes the leftovers). `spectrocraft-updater --help` lists its modes (`--sign`,
 | Archive top folder (`root`) | none | `SpectroCraft.app` | `Debug` |
 | Updater (`updaterPath()`) | `SpectroCraft/spectrocraft-updater.exe` | `Contents/MacOS/spectrocraft-updater` | `spectrocraft-updater` |
 | Started by | `CreateProcessW`, own console | `posix_spawn`, output in `<temp>/SpectroCraft/update-log.txt` | same as macOS |
-| Relaunch | the exe | `/usr/bin/open -n <bundle> --args --finish-update` | the executable |
+| Relaunch | the exe, without a console (`DETACHED_PROCESS`); the app also leaves the console JUCE attaches it to, when it sees `--finish-update` (#49: closing the updater's console window used to end the updated app) | `/usr/bin/open -n <bundle> --args --finish-update` | the executable |
 | `.old` backups | removed by the app on the next start | removed by the updater once every file is in place | same as macOS |
 
 macOS and Linux details:

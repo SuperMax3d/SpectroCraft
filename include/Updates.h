@@ -250,6 +250,15 @@ struct UpdateResult
     juce::Array<juce::String> replaced;      // manifest-relative paths
 };
 
+/** Windows: leave the console this process was attached to at startup.
+    JUCE attaches every GUI app to its parent's console (AttachConsole
+    (ATTACH_PARENT_PROCESS) in juce_ApplicationBase.cpp). After an update the
+    parent is spectrocraft-updater: its console window then stays open as long
+    as SpectroCraft is attached, and closing it ends every attached process,
+    so the updated app closed again (issue #49). Called for --finish-update.
+    Does nothing elsewhere. */
+void detachFromLaunchConsole();
+
 /** Read <installDir>/update-result.json (written by the updater). Removes the
     file so a restart never reports the same update twice. */
 bool readUpdateResult (const juce::File& installDir, UpdateResult& out);

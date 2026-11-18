@@ -314,6 +314,11 @@ public:
     /** Frequency-axis label for a real frequency: plain Hz/kHz when `factor`
         is 1, otherwise the scaled value (custom units are unitless). */
     static juce::String formatFreqAxisLabel (double fHz, double factor);
+    /** A frequency-axis tick label for a DISPLAYED value (a nice value of the
+        axis' unit): every digit it carries is shown, so the label reads what
+        its line points at (issue #54). plainHz: "1.25 kHz" / "500 Hz";
+        otherwise the plain number of the custom unit. */
+    static juce::String formatFreqTickLabel (double displayed, bool plainHz);
 
     // The preferred 1/3 octave centre frequencies inside [fMin, fMax] Hz,
     // ascending: {1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8} x 10^m.

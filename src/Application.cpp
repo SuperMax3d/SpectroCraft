@@ -2088,10 +2088,10 @@ juce::String Application::freqVsTimeCsv (std::string* errOut) const
             sc::measures::smoothSeries (cd.freqHz, settings.fftSmooth);
         }
 
-    // Same columns and number formats as the panel's Copy in Freq vs Time
-    // mode with Absolute time: time_s, then per channel the tracked
-    // frequency, one column per enabled alternative frequency scale, and the
-    // level (calibrated when a scale is set).
+    // The panel's Copy in Freq vs Time mode with Absolute time: time_s, then
+    // per channel the tracked frequency, one column per other frequency unit,
+    // and the level (calibrated when a scale is set) - plus here one column
+    // per other amplitude unit.
     const ScaleCalibration& sc = d->scale;
     auto fmtLevel = [&] (double relDb, int ch) -> juce::String
     {
@@ -2099,10 +2099,25 @@ juce::String Application::freqVsTimeCsv (std::string* errOut) const
             return ScaleCalibration::formatLevelValue (sc.fullScaleFor (ch) * std::pow (10.0, relDb / 20.0), 6);
         return juce::String (relDb + sc.levelOffsetDb (ch), 2);
     };
+    // One more column per secondary axis of the Scale form (issue #54): every
+    // other frequency unit after the tracked Hz, every other amplitude unit
+    // after the level, each value in that axis' own unit. Without entries,
+    // the derived alternative references (a bare factor) are used.
+    const double nyq = std::max (1.0, eng.sampleRate () * 0.5);
+    const auto freqSec = sc::axes::secondary (axisEntries, sc::axes::Kind::Frequency);
+    const auto ampSec  = sc::axes::secondary (axisEntries, sc::axes::Kind::Amplitude);
     std::vector<const AltScaleRef*> altRefs;
-    for (const auto& r : altFreqRefs)
-        if (r.enabled && std::abs (r.refMain) > 1e-9)
-            altRefs.push_back (&r);
+    if (freqSec.empty ())
+        for (const auto& r : altFreqRefs)
+            if (r.enabled && std::abs (r.refMain) > 1e-9)
+                altRefs.push_back (&r);
+    auto fmtAmpEntry = [] (const sc::axes::Entry& e, double relDb, int ch) -> juce::String
+    {
+        const double v = std::pow (10.0, relDb / 20.0) * e.scaleFor (ch);
+        if (e.units == 0)   // dB relative to this axis' full scale
+            return v > 0.0 ? juce::String (20.0 * std::log10 (v), 2) : juce::String ("-inf");
+        return ScaleCalibration::formatLevelValue (v, 6);
+    };
 
     const juce::String sep = "\t";
     juce::String header = "time_s";
@@ -2110,9 +2125,13 @@ juce::String Application::freqVsTimeCsv (std::string* errOut) const
     {
         const juce::String chName = "ch" + juce::String (chans[c] + 1) + "_";
         header += sep + chName + "Hz";
+        for (const auto& e : freqSec)
+            header += sep + chName + e.name;
         for (const auto* r : altRefs)
             header += sep + chName + r->name;
         header += sep + chName + sc.spectralUnitLabel ();
+        for (const auto& e : ampSec)
+            header += sep + chName + e.name;
     }
     juce::MemoryOutputStream out;
     out << header;
@@ -2123,11 +2142,21 @@ juce::String Application::freqVsTimeCsv (std::string* errOut) const
         for (size_t c = 0; c < curves.size () && c < chans.size (); ++c)
         {
             const auto& cd = curves[c];
-            if (i >= cd.x.size ()) { out << sep << sep; continue; }
+            if (i >= cd.x.size ())
+            {
+                // Keep the columns aligned: one empty cell per column of this channel.
+                const size_t perChan = 2 + freqSec.size () + altRefs.size () + ampSec.size ();
+                for (size_t k = 0; k < perChan; ++k) out << sep;
+                continue;
+            }
             out << sep << juce::String (cd.freqHz[i], 2);
+            for (const auto& e : freqSec)
+                out << sep << juce::String (sc::axes::displayValueFrequency (e, cd.freqHz[i], nyq), 3);
             for (const auto* r : altRefs)
                 out << sep << juce::String (altScaleValue (*r, cd.freqHz[i]), 3);
             out << sep << fmtLevel (cd.ampDb[i], chans[c]);
+            for (const auto& e : ampSec)
+                out << sep << fmtAmpEntry (e, cd.ampDb[i], chans[c]);
         }
     }
     return out.toString ();

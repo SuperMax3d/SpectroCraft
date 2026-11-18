@@ -1114,6 +1114,13 @@ bool launchUpdater (const juce::File& updater, const juce::File& install,
 // update-result.json (written by the updater, read on the next start)
 // ==========================================================================
 
+void detachFromLaunchConsole()
+{
+#if JUCE_WINDOWS
+    FreeConsole();
+#endif
+}
+
 juce::File updateResultFile (const juce::File& install)
 {
     return install.getChildFile ("update-result.json");

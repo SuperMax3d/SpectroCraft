@@ -5207,7 +5207,7 @@ namespace {
 /** The release notes as plain text: an AlertWindow has no clickable links and
     no markdown, so emphasis and link targets are removed and long notes are
     cut. The full notes stay on the release page. */
-juce::String updateNotesPreview (const juce::String& notes)
+juce::String updateNotesPreview (const juce::String& notes, int maxChars)
 {
     juce::String s = notes.replace ("\r\n", "\n").replace ("\r", "\n");
     s = s.replace ("*", "");
@@ -5229,7 +5229,7 @@ juce::String updateNotesPreview (const juce::String& notes)
     }
 
     s = s.trim();
-    if (s.length() > 1400) s = s.substring (0, 1400) + "\n...";
+    if (s.length() > maxChars) s = s.substring (0, maxChars) + "\n...";
     return s;
 }
 
@@ -5314,6 +5314,44 @@ void MainWindow::checkForUpdates (bool automatic)
     }).detach();
 }
 
+// The "a new version is available" dialog. The release notes go into a
+// read-only, scrollable field of fixed size: written into the message they made
+// the window as tall as the notes, past the screen, with the buttons drawn over
+// the text (issue #49).
+juce::AlertWindow* MainWindow::createUpdateOfferDialog (const sc::update::ReleaseInfo& rel,
+                                                        const juce::String& current,
+                                                        const juce::String& assetName,
+                                                        juce::int64 assetSize)
+{
+    const juce::String title = rel.title.isNotEmpty() ? rel.title : ("SpectroCraft " + rel.version);
+    juce::String text = title + " is available (you are using " + current + ").\n\n";
+    text += "Download: " + assetName + " (" + megabytes (assetSize) + ").\n";
+    text += "SpectroCraft closes while the files are replaced, then starts again.\n";
+    text += "Unsaved files are not saved by the update - save them first.";
+
+    auto* dlg = new OwningAlertWindow ("A new version is available", text,
+                                       juce::MessageBoxIconType::InfoIcon, this);
+
+    const juce::String notes = updateNotesPreview (rel.notes, 60000);
+    if (notes.isNotEmpty())
+    {
+        auto* ed = new juce::TextEditor ("releaseNotes");
+        ed->setMultiLine (true, true);
+        ed->setReadOnly (true);
+        ed->setScrollbarsShown (true);
+        ed->setCaretVisible (false);
+        ed->setPopupMenuEnabled (true);   // Copy / Select All
+        ed->setText (notes, false);
+        ed->setSize (kUpdateNotesW, kUpdateNotesH);
+        ed->setTooltip ("Release notes. The full notes are on the release page: " + rel.pageUrl);
+        dlg->addCustomComponent (ed);
+    }
+
+    dlg->addButton ("Update Now", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg->addButton ("Later", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    return dlg;
+}
+
 void MainWindow::offerUpdate (const sc::update::ReleaseInfo& rel, const juce::String& current,
                               bool automatic)
 {
@@ -5345,20 +5383,9 @@ void MainWindow::offerUpdate (const sc::update::ReleaseInfo& rel, const juce::St
         return;
     }
 
-    const juce::String title = rel.title.isNotEmpty() ? rel.title : ("SpectroCraft " + rel.version);
-    juce::String text = title + " is available (you are using " + current + ").\n\n";
-    const juce::String notes = updateNotesPreview (rel.notes);
-    if (notes.isNotEmpty()) text += notes + "\n\n";
-    text += "Download: " + asset->name + " (" + megabytes (asset->size) + ").\n";
-    text += "SpectroCraft closes while the files are replaced, then starts again.\n";
-    text += "Unsaved files are not saved by the update - save them first.";
-
-    juce::AlertWindow dlg ("A new version is available", text,
-                           juce::MessageBoxIconType::InfoIcon, this);
-    dlg.addButton ("Update Now", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    dlg.addButton ("Later", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    dlg.toFront (true);
-    if (dlg.runModalLoop () != 1)
+    std::unique_ptr<juce::AlertWindow> dlg (createUpdateOfferDialog (rel, current, asset->name, asset->size));
+    dlg->toFront (true);
+    if (dlg->runModalLoop () != 1)
     {
         // Remember the refusal: the startup check must not offer the same
         // version again (a newer one will be offered as usual).
@@ -6301,20 +6328,21 @@ MainWindow::GoToTimeFields MainWindow::computeGoToTimeFields (Application& app)
         default:                        f.mainId = "Time (s)";    break;
     }
 
-    // One field per visible "Footer Only" time axis. Duplicate names are
-    // skipped (editor ids must stay unique). A caller that filled the derived
-    // alternative-reference list directly (without axis entries) still gets its
-    // fields: those are encoded with a negative index.
+    // One field per secondary time axis ("Axis and Footer" extras and
+    // "Footer Only"). Duplicate names are skipped (editor ids must stay
+    // unique). A caller that filled the derived alternative-reference list
+    // directly (without axis entries) still gets its fields: those are encoded
+    // with a negative index.
     juce::StringArray used;
     used.add (f.mainId);
-    const auto footer = sc::axes::footerOnly (app.axisEntries, sc::axes::Kind::Time);
+    const auto footer = sc::axes::secondary (app.axisEntries, sc::axes::Kind::Time);
     if (! footer.empty())
     {
         for (int i = 0; i < (int) app.axisEntries.size(); ++i)
         {
             const auto& e = app.axisEntries[(size_t) i];
-            if (e.kind != sc::axes::Kind::Time || e.type != sc::axes::Type::FooterOnly
-                || ! e.visible) continue;
+            if (e.kind != sc::axes::Kind::Time || ! sc::axes::isSecondary (app.axisEntries, i))
+                continue;
             juce::String id = e.name.trim();
             if (id.isEmpty() || used.contains (id)) continue;
             used.add (id);

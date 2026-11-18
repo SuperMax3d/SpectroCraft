@@ -2223,7 +2223,7 @@ Mouse (waveform *and* spectral views):
 | Left-drag on the time ruler (top or bottom) | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | **Pan both axes at once**: the shared time window horizontally (both views stay in sync) and the amplitude window (waveform) or frequency window (spectral) vertically, from anywhere in the plot. The content follows the cursor at half speed on both axes; panning against a file edge or range limit pins that edge and keeps the span, and reversing direction responds immediately (no dead zone) |
 | Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. With several visible channels the box's vertical extent is clipped to the **channel row it started on**, and the vertical zoom factor is measured against that single row's data height (so a multi-channel file zooms exactly like a single channel would). Dragging that starts on an axis zooms only that axis: the amplitude/frequency axis strip (left or right) → vertical range, the time ruler strip (top or bottom of whichever view draws it) → time range. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus **Scale…** which opens the Scale form for this file (every time/amplitude/frequency axis: units, offset, scale, order, visibility, Add Axis vs Footer Only). On the **amplitude/frequency axis strip** (on either side), "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus **Scale…** which opens the Scale form for this file (every time/amplitude/frequency axis: units, offset, scale, order, visibility, Axis and Footer vs Footer Only). On the **amplitude/frequency axis strip** (on either side), "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the amplitude/frequency axis strip (left or right; or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |
@@ -2283,10 +2283,11 @@ across restarts.
   that lists every axis of the current file. It replaces the old **Scale**
   submenu (Time Axis / Vertical Axis) and the **Alternative Scale** submenu.
   Each row is one axis: **Name** (with a drag grip), **Units**, **Offset**,
-  **Scale**, **Type** (**Add Axis** draws a strip on the tracks, **Footer Only**
-  only adds a readout — the old alternative scale), a **visibility eye** (the
+  **Scale**, **Type** (**Axis and Footer** draws a strip on the tracks and adds
+  a footer readout, **Footer Only** only adds a readout — the old alternative
+  scale), a **visibility eye** (the
   same icon the tables use; its tooltip says **Hide Axis** / **Show Axis**) and
-  an **x** to remove the axis; **Add Axis** adds a row. The **x only appears
+  an **x** to remove the axis; **New** adds a row. The **x only appears
   when the column holds more than one axis**, and it is the same size as the
   eye, sitting right next to it and ending at the same margin as the text boxes
   below them. Units are
@@ -2304,10 +2305,10 @@ across restarts.
   value that belongs at that point, which sets the scale — the flow the old
   Alternative Scale used. A reference at zero, or a selection whose ends show the
   same value, gives no scale and says so in the status bar.
-- The **first visible Add Axis of each kind is the main axis**: it labels the
-  grid that is actually drawn and drives the level readouts. The other Add Axis
-  entries relabel the *same* tick positions in their own units, in strips placed
-  further out — they never move the grid. **The first row of a column is always
+- The **first visible Axis and Footer of each kind is the main axis**: it labels
+  the grid that is actually drawn and drives the level readouts. The other Axis
+  and Footer entries draw their own nice values, each at its exact position, in
+  strips placed further out — they never move the grid. **The first row of a column is always
   the axis closest to the track**: hugging the plot for an amplitude or frequency
   axis, and hugging the plot's edge for a time ruler whether it is above or
   below the track, with the extra strips on the far side. Each axis labels only
@@ -3118,7 +3119,7 @@ delays the window from appearing.
   - **Axis scale modes** (the Scale form): time-axis `hh:mm:ss.xxxx` /
     `ss.xxxx` / samples and amplitude-axis dB / None / Volt / Pascal / g
     (per-channel scale) / frequency-axis Hz / % / None, with offset, scale,
-    drawing order, visibility and Add Axis vs Footer Only per axis —
+    drawing order, visibility and Axis and Footer vs Footer Only per axis —
     verified in `tests/regression/axes.inc`: the default one-axis-per-kind
     state, the shared strip width and ruler stack growing with an added axis and
     shrinking again on undo, strip/ruler geometry, footer readouts, the main

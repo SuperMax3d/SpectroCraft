@@ -2025,7 +2025,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     const ScaleCalibration& sc = app.scale();
     const int axisCh = levelAxisChannel();
     for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
+        g.drawText (levelTickLabel (L, axisCh), plot.getRight() + 4,
                     (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
 
     // Harmonic reference lines: while active, the reference frequency is
@@ -2083,22 +2083,22 @@ void FFTAnalysisView::drawFreqXLabels (juce::Graphics& g, const juce::Rectangle<
             continue;   // avoid crowding
         const float x = (float) freqToX (f);
         juce::String label;
-        if (f >= 1000.0)
-            label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
+        if (axisMode_ == 2)
+        {
+            // 1/3-octave band centres keep their usual short names.
+            label = f >= 1000.0 ? sc::axes::formatTickNumber (f / 1000.0, 1) + "k"
+                                : juce::String ((int) std::lround (f));
+        }
         else
-            label = juce::String ((int) std::lround (f));
-        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
+            label = freqTickLabel (f);   // every digit of the tick: 1500 Hz read "2k"
+        g.drawText (label, (int) x - 15, plot.getBottom() + 2, 32, axisB - 4, juce::Justification::centred, false);
     }
     for (const auto& st : subTicks)
     {
         if (!st.second) continue;
         const float x = (float) freqToX (st.first);
-        juce::String label;
-        if (st.first >= 1000.0)
-            label = juce::String (st.first / 1000.0, std::abs (st.first - std::round (st.first)) < 1e-6 ? 0 : 1) + "k";
-        else
-            label = juce::String ((int) std::lround (st.first));
-        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
+        g.drawText (freqTickLabel (st.first), (int) x - 15, plot.getBottom() + 2, 32, axisB - 4,
+                    juce::Justification::centred, false);
     }
 }
 
@@ -2253,16 +2253,19 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
             }
             else
             {
-                for (double e = std::floor (std::log10 (spanF / 8.0));
-                     !done && e <= std::ceil (std::log10 (spanF / 3.0)) + 1.0; ++e)
+                // Nice values of the chosen frequency unit (displayed = k * Hz),
+                // each drawn at the frequency it stands for (issue #54).
+                const double k = freqUnitK();
+                const double dLo = fLo_ * k, spanD = spanF * k;
+                for (double e = std::floor (std::log10 (spanD / 8.0));
+                     !done && e <= std::ceil (std::log10 (spanD / 3.0)) + 1.0; ++e)
                     for (double m : { 1.0, 2.0, 5.0 })
                     {
                         const double step = m * std::pow (10.0, e);
-                        if (spanF / step >= 3.0 && spanF / step <= 8.0)
+                        if (spanD / step >= 3.0 && spanD / step <= 8.0)
                         {
-                            for (double f = std::ceil (fLo_ / step - 1e-9) * step;
-                                 f <= fHi_ + 1e-6; f += step)
-                                fTicks.push_back (f);
+                            for (double i = std::ceil (dLo / step - 1e-9); i * step <= dLo + spanD + step * 1e-6; ++i)
+                                fTicks.push_back (i * step / k);
                             done = true;
                             break;
                         }
@@ -2289,10 +2292,8 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
                     if (label.endsWith (".")) label = label.dropLastCharacters (1);
                     label += "x";
                 }
-                else if (f >= 1000.0)
-                    label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
                 else
-                    label = juce::String ((int) std::lround (f));
+                    label = freqTickLabel (f);
                 g.drawText (label, plot.getRight() + 4, (float) freqToY (f) - 7, axisR - 6, 14,
                             juce::Justification::centredLeft, false);
             }
@@ -2313,7 +2314,7 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
             g.setColour (juce::Colours::lightgrey);
             g.setFont (9.0f);
             for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-                g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
+                g.drawText (levelTickLabel (L, axisCh), plot.getRight() + 4,
                             (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
         }
 
@@ -2351,7 +2352,7 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
         g.setColour (juce::Colours::lightgrey);
         g.setFont (9.0f);
         for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-            g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
+            g.drawText (levelTickLabel (L, axisCh), plot.getRight() + 4,
                         (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
     }
 
@@ -2489,6 +2490,11 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
     thirdOctFallback = false;
     const double fLo = fLo_, fHi = fHi_;   // local display window
     const auto plot = plotBounds();
+    // Log / linear modes tick at nice values of the chosen frequency unit
+    // (Unit > Frequency; displayed = k * Hz), each drawn at the exact
+    // frequency it stands for (issue #54). 1/3 octave keeps its band centres.
+    const double k = freqUnitK();
+    const double dLo = fLo * k, dHi = fHi * k;
     if (axisMode_ == 2)
     {
         // One grid line per 1/3-octave band centre.
@@ -2510,10 +2516,10 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
         // every digit per decade at mid zooms (thinned to 1-2-5 when that
         // would crowd the labels), and a nice linear step inside sub-decade
         // ranges where no whole decades are visible.
-        const double spanDec = std::log10 (std::max (1e-9, fHi / fLo));
+        const double spanDec = std::log10 (std::max (1e-9, dHi / dLo));
         if (spanDec < 0.7)
         {
-            const double span = std::max (1e-9, fHi - fLo);
+            const double span = std::max (1e-9, dHi - dLo);
             bool done = false;
             for (double e = std::floor (std::log10 (span / 8.0));
                  !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
@@ -2522,27 +2528,26 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
                     const double step = m * std::pow (10.0, e);
                     if (span / step >= 3.0 && span / step <= 8.0)
                     {
-                        for (double f = std::ceil (fLo / step - 1e-9) * step;
-                             f <= fHi + 1e-6; f += step)
-                            freqTicks.push_back (f);
+                        for (double i = std::ceil (dLo / step - 1e-9); i * step <= dHi + step * 1e-6; ++i)
+                            freqTicks.push_back (i * step / k);
                         done = true;
                         break;
                     }
                 }
             if (!done)
-                for (int i = 1; i <= 4; ++i) freqTicks.push_back (fLo + span * (double) i / 5.0);
+                for (int i = 1; i <= 4; ++i) freqTicks.push_back ((dLo + span * (double) i / 5.0) / k);
         }
         else
         {
             auto collect = [&](const int* digs, int n)
             {
                 std::vector<double> t;
-                for (double p = std::ceil (std::log10 (fLo)) - 1.0;
-                     p <= std::floor (std::log10 (fHi)); ++p)
+                for (double p = std::ceil (std::log10 (dLo)) - 1.0;
+                     p <= std::floor (std::log10 (dHi)); ++p)
                     for (int i = 0; i < n; ++i)
                     {
                         const double f = (double) digs[i] * std::pow (10.0, p);
-                        if (f >= fLo - 1e-6 && f <= fHi + 1e-6) t.push_back (f);
+                        if (f >= dLo * (1.0 - 1e-9) && f <= dHi * (1.0 + 1e-9)) t.push_back (f);
                     }
                 return t;
             };
@@ -2559,7 +2564,7 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
             auto fillGap = [&] (double a, double b)
             {
                 if (b <= a * 1.0001) return;
-                const double gapPx = std::abs ((double) freqToX (b) - (double) freqToX (a));
+                const double gapPx = std::abs ((double) freqToX (b / k) - (double) freqToX (a / k));
                 if (gapPx < gapThresh) return;
                 const double span = b - a;
                 bool done = false;
@@ -2572,26 +2577,25 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
                         {
                             const int nDiv = (int) std::lround (span / step);
                             const bool label = gapPx / (nDiv + 1) >= 16.0;
-                            for (double f = std::ceil (a / step - 1e-9) * step;
-                                 f < b - step * 1e-3; f += step)
-                                if (f > a + step * 1e-3) subTicks.emplace_back (f, label);
+                            for (double i = std::ceil (a / step - 1e-9); i * step < b - step * 1e-3; ++i)
+                                if (i * step > a + step * 1e-3) subTicks.emplace_back (i * step / k, label);
                             done = true;
                             break;
                         }
                     }
             };
-            double prev = fLo;
-            for (double f : ticks) { fillGap (prev, f); prev = f; }
-            fillGap (prev, fHi);
+            double prev = dLo;
+            for (double d : ticks) { fillGap (prev, d); prev = d; }
+            fillGap (prev, dHi);
 
-            freqTicks.insert (freqTicks.end(), ticks.begin(), ticks.end());
+            for (double d : ticks) freqTicks.push_back (d / k);
         }
     }
     else
     {
         // Linear mode: a nice step giving 3..9 ticks, starting at the first
         // grid point at or above fLo so every tick lands inside the plot.
-        const double span = std::max (1e-9, fHi - fLo);
+        const double span = std::max (1e-9, dHi - dLo);
         bool done = false;
         for (double e = std::floor (std::log10 (span / 9.0));
              !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
@@ -2600,15 +2604,14 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
                 const double step = m * std::pow (10.0, e);
                 if (span / step >= 3.0 && span / step <= 9.0)
                 {
-                    for (double f = std::ceil (fLo / step - 1e-9) * step;
-                         f <= fHi + 1e-6; f += step)
-                        freqTicks.push_back (f);
+                    for (double i = std::ceil (dLo / step - 1e-9); i * step <= dHi + step * 1e-6; ++i)
+                        freqTicks.push_back (i * step / k);
                     done = true;
                     break;
                 }
             }
         if (!done)
-            for (int i = 1; i <= 4; ++i) freqTicks.push_back (fLo + span * (double) i / 5.0);
+            for (int i = 1; i <= 4; ++i) freqTicks.push_back ((dLo + span * (double) i / 5.0) / k);
     }
 
 }
@@ -2729,15 +2732,62 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
     return info;
 }
 
+// ---------------------------------------------------- Unit > Frequency / Amplitude
+const sc::axes::Entry* FFTAnalysisView::freqUnitEntry() const
+{
+    const auto& es = app.axisEntries;
+    if (freqUnitEntry_ < 0 || freqUnitEntry_ >= (int) es.size()) return nullptr;
+    const auto& e = es[(size_t) freqUnitEntry_];
+    return (e.kind == sc::axes::Kind::Frequency && e.visible) ? &e : nullptr;
+}
+
+const sc::axes::Entry* FFTAnalysisView::ampUnitEntry() const
+{
+    const auto& es = app.axisEntries;
+    if (ampUnitEntry_ < 0 || ampUnitEntry_ >= (int) es.size()) return nullptr;
+    const auto& e = es[(size_t) ampUnitEntry_];
+    return (e.kind == sc::axes::Kind::Amplitude && e.visible) ? &e : nullptr;
+}
+
+double FFTAnalysisView::freqUnitK() const
+{
+    const auto* e = freqUnitEntry();
+    if (e == nullptr || axisMode_ == 2) return 1.0;
+    const double nyq = std::max (1.0, app.audioEngine().sampleRate() * 0.5);
+    const double k = sc::axes::displayValueFrequency (*e, 1.0, nyq);
+    return k > 0.0 ? k : 1.0;
+}
+
+juce::String FFTAnalysisView::freqTickLabel (double fHz) const
+{
+    const double k = freqUnitK();
+    const double d = fHz * k;
+    if (freqUnitEntry() != nullptr && axisMode_ != 2)
+        return sc::axes::formatTickNumber (d);           // the unit's plain number
+    // Hz, compact: every digit of the tick ("1.25k", not "1.3k").
+    if (std::abs (d) >= 1000.0) return sc::axes::formatTickNumber (d / 1000.0) + "k";
+    return sc::axes::formatTickNumber (d);
+}
+
+juce::String FFTAnalysisView::levelTickLabel (double relDb, int ch) const
+{
+    const auto* e = ampUnitEntry();
+    if (e == nullptr) return ScaleCalibration::formatSpectralLevel (relDb, app.scale(), ch);
+    const double v = std::pow (10.0, relDb / 20.0) * e->scaleFor (ch);
+    if (e->units == 0) return v > 0.0 ? juce::String (20.0 * std::log10 (v), 1) : juce::String ("-inf");
+    return ScaleCalibration::formatLevelValue (v, 3);
+}
+
 // "| Name=value" suffixes for the frequency readouts. The Scale form's
-// "Footer Only" axes are the source; the alternative-reference list is the
-// derived view of them (Application::applyEntries), so a caller that filled
-// that list directly still gets its readouts.
+// secondary frequency axes ("Axis and Footer" and "Footer Only") are the
+// source, each in its own unit; the alternative-reference list is the derived
+// view of them (Application::applyEntries), so a caller that filled that list
+// directly still gets its readouts.
 juce::String FFTAnalysisView::altFreqSuffix (Application& appIn, double freqHz)
 {
     juce::String s;
     const double nyq = std::max (1.0, appIn.audioEngine().sampleRate() * 0.5);
-    const auto footer = sc::axes::footerOnly (appIn.axisEntries, sc::axes::Kind::Frequency);
+    const auto footer = sc::axes::secondary (appIn.axisEntries, sc::axes::Kind::Frequency);
     if (! footer.empty())
     {
         for (const auto& e : footer)
@@ -3538,7 +3588,45 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
         m.addItem (CtxCheckHarmonicRatio, "Check Harmonic Ratio",
                    haveCurveData, harmonicRatioActive_);
     }
+
+    // Unit (issue #54): which axis of the Scale form labels the graphs - the
+    // frequency labels and the level labels.
+    constexpr int kUnitFreqBase = 7000, kUnitAmpBase = 8000;
+    {
+        juce::PopupMenu freqM, ampM;
+        freqM.addItem (kUnitFreqBase, "Hz", true, freqUnitEntry() == nullptr);
+        ampM.addItem (kUnitAmpBase, "File calibration (" + app.scale().unitTitle() + ")",
+                      true, ampUnitEntry() == nullptr);
+        for (int i = 0; i < (int) app.axisEntries.size() && i < 900; ++i)
+        {
+            const auto& e = app.axisEntries[(size_t) i];
+            if (! e.visible) continue;
+            const auto& units = sc::axes::unitNames (e.kind);
+            const juce::String unit = (e.units >= 0 && e.units < units.size()) ? units[e.units] : juce::String();
+            const juce::String text = e.name + (unit.isNotEmpty() ? " (" + unit + ")" : juce::String());
+            if (e.kind == sc::axes::Kind::Frequency)
+                freqM.addItem (kUnitFreqBase + 1 + i, text, true, freqUnitEntry() == &e);
+            else if (e.kind == sc::axes::Kind::Amplitude)
+                ampM.addItem (kUnitAmpBase + 1 + i, text, true, ampUnitEntry() == &e);
+        }
+        juce::PopupMenu unitM;
+        unitM.addSubMenu ("Frequency", freqM, axisMode_ != 2);   // 1/3 octave: band centres in Hz
+        unitM.addSubMenu ("Amplitude", ampM);
+        m.addSeparator();
+        m.addSubMenu ("Unit", unitM);
+    }
+
     const int sel = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
+    if (sel >= kUnitFreqBase && sel < kUnitAmpBase)
+    {
+        setFrequencyUnitEntry (sel - kUnitFreqBase - 1);
+        return;
+    }
+    if (sel >= kUnitAmpBase && sel < kUnitAmpBase + 1000)
+    {
+        setAmplitudeUnitEntry (sel - kUnitAmpBase - 1);
+        return;
+    }
     switch (sel)
     {
         case CtxZoomOutFull:
@@ -4219,24 +4307,33 @@ void FFTAnalysisView::copySpectrumToClipboard()
         return c < chans.size() ? chans[c] : -1;
     };
 
-    // Alternative frequency scales: one extra column per enabled reference,
-    // converting every exported Hz value exactly like the axis overlay does
-    // (alt(x) = x * altValue / refMain). No columns are added when none is set.
+    // Other frequency units: one extra column per secondary frequency axis of
+    // the Scale form ("Axis and Footer" and "Footer Only"), each value in that
+    // axis' own unit, like its strip and the footer show it. Without entries,
+    // the derived alternative references are used (alt(x) = x * altValue /
+    // refMain). No columns are added when none is set.
+    const double nyq = std::max (1.0, rate * 0.5);
+    const auto freqSec = sc::axes::secondary (app.axisEntries, sc::axes::Kind::Frequency);
     std::vector<const Application::AltScaleRef*> altRefs;
-    for (const auto& r : app.altFreqRefs)
-        if (r.enabled && std::abs (r.refMain) > 1e-9)
-            altRefs.push_back (&r);
+    if (freqSec.empty())
+        for (const auto& r : app.altFreqRefs)
+            if (r.enabled && std::abs (r.refMain) > 1e-9)
+                altRefs.push_back (&r);
 
-    // Appends ",<value>" for every alternative reference to a data line.
+    // Appends ",<value>" for every other frequency unit to a data line.
     auto appendAlts = [&] (juce::String& line, double freqHz)
     {
+        for (const auto& e : freqSec)
+            line += sep + juce::String (sc::axes::displayValueFrequency (e, freqHz, nyq), 3);
         for (const auto* r : altRefs)
             line += sep + juce::String (Application::altScaleValue (*r, freqHz), 3);
     };
 
-    // Appends the alternative-reference column names to a header.
+    // Appends the other frequency units' column names to a header.
     auto appendAltHeaders = [&] (juce::String& header, const juce::String& prefix)
     {
+        for (const auto& e : freqSec)
+            header += sep + prefix + e.name;
         for (const auto* r : altRefs)
             header += sep + prefix + r->name;
     };
