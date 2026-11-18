@@ -160,6 +160,160 @@ static void applyWindowIcon (void* hwndPtr)
 // default bluish scheme colour so those areas blend with the tracks.
 static juce::Colour mainWindowBackground () { return juce::Colour::fromRGB (32, 32, 36); }
 
+// The app icon as an image, decoded from the 32-bit DIB entry of the .ico
+// whose size is nearest `want` (issue #52: the merged title row draws it).
+static juce::Image appIconImage (int want)
+{
+    const unsigned char* p = scapp::kAppIconIcoData;
+    const unsigned int total = scapp::kAppIconIcoSize;
+    auto rd32 = [p] (unsigned int at) { int v; std::memcpy (&v, p + at, 4); return v; };
+    if (total < 6u) return {};
+    unsigned short count = 0;
+    std::memcpy (&count, p + 4, sizeof (count));
+    int bestOff = -1, bestSize = 0, bestDiff = 1 << 30;
+    for (unsigned short i = 0; i < count && 6u + 16u * (i + 1u) <= total; ++i)
+    {
+        const unsigned int e = 6u + 16u * i;
+        const int w = p[e] == 0 ? 256 : p[e];
+        const int size = rd32 (e + 8), off = rd32 (e + 12);
+        if (off < 0 || size < 40 || (unsigned int) off + (unsigned int) size > total) continue;
+        if (std::abs (w - want) < bestDiff) { bestDiff = std::abs (w - want); bestOff = off; bestSize = size; }
+    }
+    if (bestOff < 0) return {};
+    const unsigned int o = (unsigned int) bestOff;
+    const int w = rd32 (o + 4), h2 = rd32 (o + 8);
+    unsigned short bpp = 0;
+    std::memcpy (&bpp, p + o + 14, 2);
+    const int h = h2 / 2;   // an icon DIB stacks the colour and the mask
+    const int hdr = rd32 (o);
+    if (bpp != 32 || w <= 0 || h <= 0 || hdr + w * h * 4 > bestSize) return {};
+    juce::Image img (juce::Image::ARGB, w, h, true);
+    juce::Image::BitmapData bd (img, juce::Image::BitmapData::writeOnly);
+    for (int y = 0; y < h; ++y)
+    {
+        const unsigned char* row = p + o + (unsigned int) hdr + (unsigned int) ((h - 1 - y) * w * 4);   // bottom-up
+        for (int x = 0; x < w; ++x)
+        {
+            const unsigned char* px = row + x * 4;   // B, G, R, A
+            bd.setPixelColour (x, y, juce::Colour (px[2], px[1], px[0], px[3]));
+        }
+    }
+    return img;
+}
+
+/** A part of the merged title row (issue #52): the app icon or one of the
+    window buttons. On Windows the window's hit test makes the buttons native
+    controls (the system draws no frame; Windows handles the click, the snap
+    layouts flyout on Maximise, ...), so they only paint their hover state;
+    elsewhere a click runs `onClick`. */
+class MainWindow::CaptionPart : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    enum Kind { icon, minimise, maximise, close };
+    CaptionPart (Kind k, juce::MenuBarComponent& bar) : kind (k), menuBar (bar)
+    {
+        if (kind == icon)
+            image = appIconImage (32);
+        static const char* const ids[] = { "caption-icon", "caption-minimise", "caption-maximise", "caption-close" };
+        setComponentID (ids[kind]);
+    }
+    const Kind kind;
+    std::function<void()> onClick;
+    std::function<bool()> isMaximised;
+    void paint (juce::Graphics& g) override
+    {
+        getLookAndFeel().drawMenuBarBackground (g, getWidth(), getHeight(), false, menuBar);
+        const auto r = getLocalBounds().toFloat();
+        if (kind == icon)
+        {
+            if (image.isValid())
+                g.drawImage (image, r.withSizeKeepingCentre (16.0f, 16.0f), juce::RectanglePlacement::centred);
+            return;
+        }
+        const bool over = isMouseOver (true);
+        if (over)
+        {
+            g.setColour (kind == close ? juce::Colour::fromRGB (232, 17, 35) : juce::Colours::white.withAlpha (0.12f));
+            g.fillRect (r);
+        }
+        g.setColour (juce::Colours::white.withAlpha (over ? 1.0f : 0.8f));
+        const auto c = r.getCentre();
+        const float a = 5.0f;   // half the glyph
+        if (kind == minimise)
+            g.fillRect (c.x - a, c.y, 2.0f * a, 1.0f);
+        else if (kind == close)
+        {
+            g.drawLine (c.x - a, c.y - a, c.x + a, c.y + a, 1.0f);
+            g.drawLine (c.x - a, c.y + a, c.x + a, c.y - a, 1.0f);
+        }
+        else if (isMaximised && isMaximised())   // restore: two overlapping squares
+        {
+            g.drawRect (juce::Rectangle<float> (c.x - a, c.y - a + 2.0f, 2.0f * a - 2.0f, 2.0f * a - 2.0f), 1.0f);
+            g.drawLine (c.x - a + 2.0f, c.y - a + 2.0f, c.x - a + 2.0f, c.y - a, 1.0f);
+            g.drawLine (c.x - a + 2.0f, c.y - a, c.x + a, c.y - a, 1.0f);
+            g.drawLine (c.x + a, c.y - a, c.x + a, c.y + a - 2.0f, 1.0f);
+            g.drawLine (c.x + a, c.y + a - 2.0f, c.x + a - 2.0f, c.y + a - 2.0f, 1.0f);
+        }
+        else
+            g.drawRect (juce::Rectangle<float> (c.x - a, c.y - a, 2.0f * a, 2.0f * a), 1.0f);
+    }
+    void mouseEnter (const juce::MouseEvent&) override { repaint(); }
+    void mouseExit (const juce::MouseEvent&) override { repaint(); }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        // The icon: Windows' window menu (Restore, Move, Size, Minimize,
+        // Maximize, Close), on a left or a right click like a title bar's icon.
+        if (kind == icon)
+        {
+            showWindowMenu();
+            return;
+        }
+        juce::ignoreUnused (e);
+    }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+#if JUCE_WINDOWS
+        juce::ignoreUnused (e);   // a native control there: Windows ran the click
+#else
+        if (kind != icon && onClick && getLocalBounds().contains (e.getPosition()))
+            onClick();
+#endif
+    }
+
+private:
+    juce::MenuBarComponent& menuBar;
+    juce::Image image;
+
+    void showWindowMenu()
+    {
+#if JUCE_WINDOWS
+        auto* peer = getPeer();
+        if (peer == nullptr) return;
+        HWND h = static_cast<HWND> (peer->getNativeHandle());
+        HMENU m = GetSystemMenu (h, FALSE);
+        if (m == nullptr) return;
+        const bool maxed = IsZoomed (h) != 0;
+        EnableMenuItem (m, SC_RESTORE,  MF_BYCOMMAND | (maxed ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem (m, SC_MOVE,     MF_BYCOMMAND | (maxed ? MF_GRAYED : MF_ENABLED));
+        EnableMenuItem (m, SC_SIZE,     MF_BYCOMMAND | (maxed ? MF_GRAYED : MF_ENABLED));
+        EnableMenuItem (m, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
+        EnableMenuItem (m, SC_MAXIMIZE, MF_BYCOMMAND | (maxed ? MF_GRAYED : MF_ENABLED));
+        EnableMenuItem (m, SC_CLOSE,    MF_BYCOMMAND | MF_ENABLED);
+        // Below the icon, like a title bar's window menu.
+        RECT wr {};
+        GetWindowRect (h, &wr);
+        const double scale = peer->getPlatformScaleFactor();
+        const auto pos = getBoundsInParent().getBottomLeft();
+        const int x = wr.left + juce::roundToInt (pos.x * scale);
+        const int y = wr.top + juce::roundToInt (pos.y * scale);
+        const int cmd = (int) TrackPopupMenu (m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                                              x, y, 0, h, nullptr);
+        if (cmd != 0)
+            PostMessage (h, WM_SYSCOMMAND, (WPARAM) cmd, 0);
+#endif
+    }
+};
+
 namespace
 {
 /** The Editor panel of the docking workspace: hosts the waveform and
@@ -568,6 +722,22 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     toolbarVisible_ = app.recentStore->getIntValue ("toolbar_visible", 1) != 0;
     juce::Component::addChildComponent (toolbar_.get ());
     toolbar_->setVisible (toolbarVisible_);
+
+    // View > Hide Title Bar (issue #52): the icon and the window buttons of
+    // the merged row, hidden until the title bar is.
+    captionIcon_  = std::make_unique<CaptionPart> (CaptionPart::icon, menuBar);
+    captionMin_   = std::make_unique<CaptionPart> (CaptionPart::minimise, menuBar);
+    captionMax_   = std::make_unique<CaptionPart> (CaptionPart::maximise, menuBar);
+    captionClose_ = std::make_unique<CaptionPart> (CaptionPart::close, menuBar);
+    captionMin_->onClick   = [this] { minimiseButtonPressed (); };
+    captionMax_->onClick   = [this] { maximiseButtonPressed (); };
+    captionClose_->onClick = [this] { closeButtonPressed (); };
+    captionMax_->isMaximised = [this] { return isFullScreen (); };
+    captionIcon_->setTooltip ("Window menu: Restore, Move, Size, Minimize, Maximize, Close");
+    for (auto* c : { captionIcon_.get (), captionMin_.get (), captionMax_.get (), captionClose_.get () })
+        juce::Component::addChildComponent (c);
+    if (titleBarHidingSupported () && app.recentStore->getIntValue ("title_bar_hidden", 0) != 0)
+        setTitleBarHidden (true);
 
     splitter = std::make_unique<ViewSplitter>();
     splitter->onDrag = [this] (const juce::MouseEvent& e) { handleSplitterDrag (e); };
@@ -1138,7 +1308,27 @@ void MainWindow::resized()
 {
     auto bounds = getLocalBounds();
     auto menuRow = bounds.removeFromTop (24);
+    menuRowBounds_ = menuRow;
+    // Title bar hidden (issue #52): the app icon first, the window buttons
+    // last, the menus, the toolbar and the workspaces in between.
+    const bool merged = titleBarHidden_ && captionIcon_ != nullptr;
+    for (auto* c : { captionIcon_.get (), captionMin_.get (), captionMax_.get (), captionClose_.get () })
+        if (c != nullptr) c->setVisible (merged);
+    if (merged)
+    {
+        captionIcon_->setBounds (menuRow.removeFromLeft (28));
+        captionClose_->setBounds (menuRow.removeFromRight (kCaptionButtonW));
+        captionMax_->setBounds (menuRow.removeFromRight (kCaptionButtonW));
+        captionMin_->setBounds (menuRow.removeFromRight (kCaptionButtonW));
+    }
     menuBar.setBounds (menuRow);
+    {
+        int namesW = 8;
+        const auto names = getMenuBarNames ();
+        for (int i = 0; i < names.size (); ++i)
+            namesW += getLookAndFeel ().getMenuBarItemWidth (menuBar, i, names[i]);
+        menuNamesRight_ = menuRow.getX () + namesW;
+    }
     // Workspace switcher at the right end of the menu bar row (Adobe-style),
     // over the menu bar's empty part (added after it: painted above it) so
     // the menu bar's background shows through.
@@ -1151,11 +1341,7 @@ void MainWindow::resized()
     // the workspace bar; the groups that do not fit are hidden.
     if (toolbar_ != nullptr && toolbarVisible_)
     {
-        int namesW = 8;
-        const auto names = getMenuBarNames ();
-        for (int i = 0; i < names.size (); ++i)
-            namesW += getLookAndFeel ().getMenuBarItemWidth (menuBar, i, names[i]);
-        const int w = std::min (toolbar_->idealWidth (), std::max (0, menuRow.getWidth () - namesW));
+        const int w = std::min (toolbar_->idealWidth (), std::max (0, menuRow.getRight () - menuNamesRight_));
         toolbar_->setBounds (menuRow.removeFromRight (w));
     }
 
@@ -1537,7 +1723,7 @@ bool MainWindow::areLeftPanelsVisible() const
 
 void MainWindow::setLeftPanelsVisible (bool visible)
 {
-    // View > Panels (Ctrl+Shift+Enter): hiding the panels maximises the
+    // View > Side Panels Visible (Ctrl+Shift+Enter): hiding the panels maximises the
     // Editor's group (Adobe's maximised frame); showing them restores all.
     if (dock_ == nullptr || visible == areLeftPanelsVisible ())
         return;
@@ -4900,6 +5086,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         case ViewShowToolbar:
             setToolbarVisible (! toolbarVisible_);
+            break;
+        case ViewHideTitleBar:
+            setTitleBarHidden (! titleBarHidden_);
             break;
         case ViewShowFileBorders:
             app.setSessionBordersVisible (!app.settings.sessionShowBorders);
@@ -9853,8 +10042,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowWaveform, "Waveform View", true, showWaveformView);
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ViewShowLeftPanels, "Panels\tCtrl+Shift+Enter", true, areLeftPanelsVisible ());
+        menu.addItem (ViewShowLeftPanels, "Side Panels Visible\tCtrl+Shift+Enter", true, areLeftPanelsVisible ());
         menu.addItem (ViewShowToolbar, "Toolbar", true, toolbarVisible_);
+        if (titleBarHidingSupported ())
+            menu.addItem (ViewHideTitleBar, "Hide Title Bar", true, titleBarHidden_);
         menu.addSeparator();
         // Track axis placement: the vertical axis can sit on the right and
         // the time ruler at the bottom of both track views. The choices are
@@ -10705,6 +10896,99 @@ bool MainWindow::runMenuCommand (const juce::String& cmd, const juce::var& param
 }
 
 // ---------------------------------------------------------------------------
+// View > Hide Title Bar (issue #52): the title bar merged into the menu row.
+// ---------------------------------------------------------------------------
+
+bool MainWindow::titleBarHidingSupported () noexcept
+{
+#if JUCE_WINDOWS
+    return true;    // the hit test below is what makes the row a title bar
+#else
+    return false;   // only Windows asks the window what is under the mouse
+#endif
+}
+
+void MainWindow::setTitleBarHidden (bool hidden)
+{
+    if (app.recentStore != nullptr)
+        app.recentStore->setValue ("title_bar_hidden", hidden ? 1 : 0);
+    if (hidden == titleBarHidden_)
+        return;
+    titleBarHidden_ = hidden;
+    // The window keeps its frame-less, title-bar-less peer (the system still
+    // draws its shadow and snaps it); its buttons and caption come from the
+    // hit test. Changing the title bar recreates the native window.
+    setTitleBarHeight (hidden ? 0 : 26);
+    setUsingNativeTitleBar (! hidden);
+    setResizable (true, ! hidden);   // hidden: the system's borderless resize
+#if JUCE_WINDOWS
+    if (auto* peer = getPeer ())
+        applyWindowIcon (peer->getNativeHandle ());   // a new HWND
+#endif
+    resized ();
+    repaint ();
+    menuItemsChanged ();
+}
+
+juce::Rectangle<int> MainWindow::captionPartBounds (int part) const
+{
+    const CaptionPart* parts[] = { captionIcon_.get (), captionMin_.get (), captionMax_.get (), captionClose_.get () };
+    if (! titleBarHidden_ || ! juce::isPositiveAndBelow (part, 4) || parts[part] == nullptr)
+        return {};
+    return parts[part]->getBounds ();
+}
+
+juce::BorderSize<int> MainWindow::getBorderThickness () const
+{
+    // No frame of our own with the title bar hidden: the menu row is the top
+    // edge and the system resizes from just inside the window's edges.
+    return titleBarHidden_ ? juce::BorderSize<int> () : DocumentWindow::getBorderThickness ();
+}
+
+juce::Component::WindowControlKind MainWindow::findControlAtPoint (juce::Point<float> pt) const
+{
+    using Kind = WindowControlKind;
+    if (! titleBarHidden_)
+        return DocumentWindow::findControlAtPoint (pt);
+    // Rectangle tests only: Component::contains could call back into the
+    // system hit test (see Component::findControlAtPoint).
+    if (! menuRowBounds_.toFloat ().contains (pt))
+        return Kind::client;
+    if (captionMin_ != nullptr && captionMin_->getBounds ().toFloat ().contains (pt))     return Kind::minimise;
+    if (captionMax_ != nullptr && captionMax_->getBounds ().toFloat ().contains (pt))     return Kind::maximise;
+    if (captionClose_ != nullptr && captionClose_->getBounds ().toFloat ().contains (pt)) return Kind::close;
+    // Windows 11 resizes from a strip inside the window's top edge.
+    constexpr float topResize = 4.0f;
+    if (! isFullScreen () && pt.y < (float) menuRowBounds_.getY () + topResize)
+    {
+        if (pt.x < topResize) return Kind::sizeTopLeft;
+        if (pt.x >= (float) getWidth () - topResize) return Kind::sizeTopRight;
+        return Kind::sizeTop;
+    }
+    if (captionIcon_ != nullptr && captionIcon_->getBounds ().toFloat ().contains (pt))
+        return Kind::client;   // its own click: the window menu
+    if (pt.x < (float) menuNamesRight_)
+        return Kind::client;   // a menu name
+    auto overChild = [pt] (const juce::Component* bar, const juce::Rectangle<int>& local)
+    {
+        return local.translated (bar->getX (), bar->getY ()).toFloat ().contains (pt);
+    };
+    if (toolbar_ != nullptr && toolbar_->isVisible () && toolbar_->getBounds ().toFloat ().contains (pt))
+        for (int i = 0; i < toolbar_->numButtons (); ++i)
+            if (auto* b = toolbar_->buttonAt (i); b != nullptr && b->isVisible () && overChild (toolbar_.get (), b->getBounds ()))
+                return Kind::client;
+    if (workspaceBar_ != nullptr && workspaceBar_->isVisible () && workspaceBar_->getBounds ().toFloat ().contains (pt))
+    {
+        for (const auto& slot : workspaceBar_->layoutSlots ())
+            if (overChild (workspaceBar_.get (), slot.r))
+                return Kind::client;
+        if (overChild (workspaceBar_.get (), workspaceBar_->chevronBounds ()))
+            return Kind::client;
+    }
+    return Kind::caption;   // an empty part of the row: drag, snap, double-click
+}
+
+// ---------------------------------------------------------------------------
 // Toolbar (issue #43): the menu bar row, left of the workspace bar.
 // ---------------------------------------------------------------------------
 
@@ -10840,7 +11124,7 @@ static const std::vector<std::pair<juce::String, juce::String>>& mainWindowKeys(
             { "shift++", "Raise the selection by 1 dB" }, { "shift+-", "Lower the selection by 1 dB" },
             { "shift+f10", "Record" }, { "f11", "Resample" }, { "shift+f12", "Split configuration" },
             { "f12", "Split" }, { "f5", "Refresh the spectrogram" }, { "cmd+h", "Show harmonics" },
-            { "cmd+shift+return", "Panels" }, { "cmd+w", "Close the file" }, { "cmd+q", "Quit" },
+            { "cmd+shift+return", "Side Panels Visible" }, { "cmd+w", "Close the file" }, { "cmd+q", "Quit" },
             { "cmd+.", "Stop" }, { "cmd+f4", "Close the file" }, { "cmd+z", "Undo" }, { "cmd+y", "Redo" },
             { "cmd+x", "Cut" }, { "cmd+t", "Trim" }, { "cmd+c", "Copy" }, { "cmd+v", "Paste" },
             { "cmd+shift+v", "Paste Mix" }, { "cmd+a", "Select All" }, { "cmd+f", "Find" }, { "cmd+g", "Go to Time" },
