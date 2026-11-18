@@ -49,7 +49,9 @@ const char* kindName (Kind k)
 
 const char* typeName (Type t)
 {
-    return t == Type::FooterOnly ? "Footer Only" : "Add Axis";
+    // "Axis and Footer": an extra axis strip AND a footer readout (issue
+    // #54; it was called "Add Axis" and showed no readout).
+    return t == Type::FooterOnly ? "Footer Only" : "Axis and Footer";
 }
 
 const juce::StringArray& unitNames (Kind k)
@@ -139,6 +141,23 @@ List footerOnly (const List& entries, Kind k)
     return out;
 }
 
+List secondary (const List& entries, Kind k)
+{
+    List out;
+    const Entry* main = primary (entries, k);
+    for (const auto& e : entries)
+        if (e.kind == k && e.visible && &e != main)
+            out.push_back (e);
+    return out;
+}
+
+bool isSecondary (const List& entries, int index)
+{
+    if (index < 0 || index >= (int) entries.size()) return false;
+    const Entry& e = entries[(size_t) index];
+    return e.visible && &e != primary (entries, e.kind);
+}
+
 juce::String defaultName (Kind k, int unitsIndex)
 {
     const auto& names = unitNames (k);
@@ -209,6 +228,26 @@ juce::String formatFrequency (const Entry& e, double fHz, double nyq)
         return k + "k";
     }
     return juce::String (v, 1);
+}
+
+juce::String formatTickNumber (double v, int maxDecimals)
+{
+    juce::String s (v, juce::jmax (0, maxDecimals));
+    if (s.containsChar ('.'))
+    {
+        while (s.endsWithChar ('0')) s = s.dropLastCharacters (1);
+        if (s.endsWithChar ('.')) s = s.dropLastCharacters (1);
+    }
+    if (s == "-0") s = "0";
+    return s;
+}
+
+juce::String formatFrequencyTick (const Entry& e, double displayed)
+{
+    if (e.units == 1) return formatTickNumber (displayed) + " %";
+    if (e.units == 2) return formatTickNumber (displayed);
+    if (std::abs (displayed) >= 1000.0) return formatTickNumber (displayed / 1000.0) + " kHz";
+    return formatTickNumber (displayed) + " Hz";
 }
 
 juce::String formatFrequencyAxis (const Entry& e, double fHz, double nyq)
@@ -462,14 +501,16 @@ void applyEntries (Application& app, const List& entries)
         app.specFreqUnits     = 0;
     }
 
-    // ---- Footer Only entries become the alternative-scale references: the
-    // status-bar readouts, the Go to Time fields and the export columns all
-    // keep working through the state they already used. ----
+    // ---- The secondary entries ("Axis and Footer" extras and "Footer
+    // Only") become the alternative-scale references, for the code that still
+    // reads that list. The readouts, Go to Time and the table columns use the
+    // entries themselves (unit-aware: a reference is only a factor). ----
     app.altTimeRefs.clear();
     app.altFreqRefs.clear();
-    for (const auto& e : entries)
+    for (int i = 0; i < (int) entries.size(); ++i)
     {
-        if (!e.visible || e.type != Type::FooterOnly) continue;
+        const Entry& e = entries[(size_t) i];
+        if (! isSecondary (entries, i) || e.kind == Kind::Amplitude) continue;
         Application::AltScaleRef r;
         r.name     = e.name;
         r.enabled  = true;

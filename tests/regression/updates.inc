@@ -1022,6 +1022,61 @@ static void updTest_updaterProgram()
     scupd::readUpdateResult (install, res);
 }
 
+// ---------------------------------------------------------------------------
+// The "a new version is available" dialog (issue #49): long release notes
+// stay inside a fixed-size scrollable field, the buttons below it.
+// ---------------------------------------------------------------------------
+static void updTest_offerDialog()
+{
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "update offer"));
+
+    scupd::ReleaseInfo rel;
+    rel.tag = "v9.9.9";
+    rel.version = "9.9.9";
+    rel.pageUrl = scupd::kReleasesUrl;
+    juce::String notes;
+    for (int i = 0; i < 400; ++i)
+        notes << "- change " << i << ": a long line of release notes that describes one fix in detail\n";
+    notes << "LAST LINE OF THE NOTES";
+    rel.notes = notes;
+
+    std::unique_ptr<juce::AlertWindow> dlg (win->createUpdateOfferDialog (rel, "1.0.0",
+                                                "SpectroCraft-9.9.9-macos-arm64.zip", 40 << 20));
+    CHECK (dlg != nullptr, "update offer: dialog created");
+    if (dlg == nullptr) return;
+
+    auto* ed = dlg->getNumCustomComponents() > 0
+             ? dynamic_cast<juce::TextEditor*> (dlg->getCustomComponent (0)) : nullptr;
+    CHECK (ed != nullptr, "update offer: the release notes are in their own field");
+    auto* ok = dlg->getButton ("Update Now");
+    auto* later = dlg->getButton ("Later");
+    CHECK (ok != nullptr && later != nullptr, "update offer: Update Now and Later buttons");
+    if (ed != nullptr && ok != nullptr)
+    {
+        CHECK (ed->isReadOnly() && ed->isMultiLine(), "update offer: the notes field is read-only and multi-line");
+        CHECK (ed->getText().contains ("LAST LINE OF THE NOTES"),
+               "update offer: the field holds the whole notes (scroll to read them)");
+        CHECK (ed->getWidth() == MainWindow::kUpdateNotesW && ed->getHeight() == MainWindow::kUpdateNotesH,
+               "update offer: the notes field keeps its fixed size");
+        CHECK (dlg->getHeight() < MainWindow::kUpdateNotesH + 400,
+               "update offer: the window stays short with very long notes ("
+               + juce::String (dlg->getHeight()) + " px)");
+        CHECK (ok->getY() >= ed->getBottom(),
+               "update offer: the buttons sit below the notes, not over them");
+    }
+
+    // No notes: no empty field.
+    rel.notes = {};
+    std::unique_ptr<juce::AlertWindow> plain (win->createUpdateOfferDialog (rel, "1.0.0", "a.zip", 1 << 20));
+    CHECK (plain != nullptr && plain->getNumCustomComponents() == 0,
+           "update offer: no notes field when the release has no notes");
+
+    dlg.reset();
+    plain.reset();
+    win.reset();
+}
+
 } // namespace scupdtest
 
 static void runRegression_updates()
@@ -1038,4 +1093,5 @@ static void runRegression_updates()
     scupdtest::updTest_platformLayouts();
     scupdtest::updTest_updaterProgram();
     scupdtest::updTest_setting();
+    scupdtest::updTest_offerDialog();
 }

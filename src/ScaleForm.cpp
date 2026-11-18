@@ -22,6 +22,8 @@ constexpr int kColGap    = 10;    // between two columns
 constexpr int kMargin    = 8;     // around the whole form
 constexpr int kTopPad    = 6;
 constexpr int kNewBtnH   = 24;
+constexpr int kBottomBarH = 36;   // Close / Cancel at the bottom of the form
+constexpr int kBottomBtnW = 80;
 constexpr int kLabelW    = 52;    // "Units", "Offset"... column inside a block
 constexpr int kGripW     = 16;    // the drag grip left of a name
 constexpr int kEyeW      = 24;    // the visibility eye (same icon as the tables)
@@ -179,7 +181,10 @@ struct ScaleFormWindow::Block : public juce::Component
     Block (ScaleFormWindow& o, int entryIndexIn, sc::axes::Kind k)
         : owner (o), entryIndex (entryIndexIn), kind (k)
     {
-        name.onTextChange = [this] { owner.commit(); };
+        // Typing commits live without rebuilding the blocks: a rebuild
+        // destroys the field being typed in, which lost the focus after
+        // every character (issue #54).
+        name.onTextChange = [this] { owner.commit (false); };
         name.onDragMoved = [this] (const juce::MouseEvent& e)
             { owner.nameDragMoved (this, e.getScreenPosition()); };
         name.onDragEnded = [this] (const juce::MouseEvent& e)
@@ -196,8 +201,8 @@ struct ScaleFormWindow::Block : public juce::Component
             previousUnits = u;
             owner.commit();
         };
-        offset.onTextChange = [this] { owner.commit(); };
-        scale.onTextChange  = [this] { owner.commit(); };
+        offset.onTextChange = [this] { owner.commit (false); };
+        scale.onTextChange  = [this] { owner.commit (false); };
         type.addItem (sc::axes::typeName (sc::axes::Type::AddAxis), 1);
         type.addItem (sc::axes::typeName (sc::axes::Type::FooterOnly), 2);
         type.onChange = [this] { owner.commit(); };
@@ -402,6 +407,17 @@ struct ScaleFormWindow::FormBody : public juce::Component
             newBtn[i].onClick = [this, i] { form.addAxis ((sc::axes::Kind) i); };
             addAndMakeVisible (newBtn[i]);
         }
+
+        // Every change already applies live: Close only closes; Cancel puts
+        // back the axes the file had when the form was opened (issue #54).
+        closeBtn.setButtonText ("Close");
+        closeBtn.setTooltip ("Close the form; the changes are already applied");
+        closeBtn.onClick = [this] { form.closeForm(); };
+        addAndMakeVisible (closeBtn);
+        cancelBtn.setButtonText ("Cancel");
+        cancelBtn.setTooltip ("Undo every change made since the form was opened, then close it");
+        cancelBtn.onClick = [this] { form.cancelChanges(); };
+        addAndMakeVisible (cancelBtn);
     }
 
     void paint (juce::Graphics& g) override
@@ -438,13 +454,14 @@ struct ScaleFormWindow::FormBody : public juce::Component
     }
 
     juce::TextButton newBtn[3];
+    juce::TextButton closeBtn, cancelBtn;
     ScaleFormWindow& form;
 };
 
 // ---------------------------------------------------------------- construction
 ScaleFormWindow::ScaleFormWindow (Application& appIn)
     : DocumentWindow ("Scale", juce::Colour (0xff232323),
-                      DocumentWindow::closeButton),
+                      DocumentWindow::allButtons),
       app (appIn)
 {
     /* A normal OS window: a real title bar with a close button, and the app's
@@ -457,9 +474,13 @@ ScaleFormWindow::ScaleFormWindow (Application& appIn)
     setContentNonOwned (body, false);
     setAlwaysOnTop (true);              // stays reachable while you click in the tracks
     setResizable (true, true);
-    setResizeLimits (640, 220, 1600, 1200);
+    // 30 % narrower than it was (980): the three columns still show every
+    // label and field in full; the narrowest field is a secondary axis' Scale,
+    // next to its SAME and crosshair buttons. Minimise / maximise like any
+    // window (issue #54).
+    setResizeLimits (600, 260, 2400, 1600);
 
-    centreWithSize (980, 360);
+    centreWithSize (690, 400);
     rebuild();
 }
 
@@ -515,7 +536,7 @@ void ScaleFormWindow::rebuild()
             if (e.kind == (sc::axes::Kind) col) ++count;
         need = std::max (need, kTopPad + kHeadH
                               + count * (blockHeightFor ((sc::axes::Kind) col) + kBlockGap)
-                              + kNewBtnH + kMargin);
+                              + kNewBtnH + kMargin + kBottomBarH);
     }
     if (body->getHeight() < need)
         setSize (getWidth(), need + (getHeight() - body->getHeight()));
@@ -551,7 +572,49 @@ void ScaleFormWindow::resized()
                                      std::min (90, colW - 4), kNewBtnH);
     }
 
+    // Close / Cancel, bottom right.
+    const int by = b.getBottom() - kMargin - kNewBtnH;
+    body->cancelBtn.setBounds (b.getRight() - kMargin - kBottomBtnW, by, kBottomBtnW, kNewBtnH);
+    body->closeBtn.setBounds (body->cancelBtn.getX() - 8 - kBottomBtnW, by, kBottomBtnW, kNewBtnH);
+
     body->repaint();
+}
+
+void ScaleFormWindow::visibilityChanged()
+{
+    juce::DocumentWindow::visibilityChanged();
+    // What Cancel goes back to: the file's axes when the form was opened.
+    if (isVisible())
+    {
+        openedWith = app.axisEntries;
+        openedDoc = (const void*) app.doc();
+    }
+}
+
+void ScaleFormWindow::closeForm()
+{
+    setVisible (false);
+}
+
+void ScaleFormWindow::cancelChanges()
+{
+    // Only for the file the form was opened on (a document switch since then
+    // leaves both files as they are), and never an empty list.
+    if ((const void*) app.doc() == openedDoc && ! openedWith.empty()
+        && app.axisEntries != openedWith)
+    {
+        app.setAxisEntries (openedWith, "Scale (cancelled)");
+        shown = app.axisEntries;
+        if (app.onStateChange) app.onStateChange ();
+        rebuild();
+    }
+    setVisible (false);
+}
+
+juce::Rectangle<int> ScaleFormWindow::bottomButtonBounds (bool cancel) const
+{
+    if (body == nullptr) return {};
+    return cancel ? body->cancelBtn.getBounds() : body->closeBtn.getBounds();
 }
 
 juce::Rectangle<int> ScaleFormWindow::columnRect (int columnIndex) const
@@ -601,7 +664,7 @@ int ScaleFormWindow::columnIndexOf (int entryIndex) const
 }
 
 // -------------------------------------------------------------------- commit
-void ScaleFormWindow::commit()
+void ScaleFormWindow::commit (bool rebuildAfter)
 {
     const auto before = app.axisEntries;
     sc::axes::List out = before;
@@ -615,8 +678,12 @@ void ScaleFormWindow::commit()
     // Live preview: the tracks and the footer update immediately, and the
     // change is one undoable step (History shows "Scale").
     app.setAxisEntries (out, "Scale");
+    // The blocks already show what was just applied. Recording that before
+    // the state callback runs keeps refreshFromApp() (called from it) from
+    // rebuilding the form under the field being typed in.
+    if (! rebuildAfter) shown = app.axisEntries;
     if (app.onStateChange) app.onStateChange ();
-    rebuild();
+    if (rebuildAfter) rebuild();
 }
 
 void ScaleFormWindow::addAxis (sc::axes::Kind kind)

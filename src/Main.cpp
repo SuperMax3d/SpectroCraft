@@ -44,6 +44,7 @@
 #include "CrashTrace.h"
 #include "InvalidParamTrace.h"
 #include "SingleInstance.h"
+#include "Updates.h"
 #include "StartupTrace.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "MainWindow.h"
@@ -899,6 +900,9 @@ public:
                 // The updater swapped the files and started this new version;
                 // reportFinishedUpdate() says what it did (update-result.json).
                 finishUpdateFlag = true;
+                // Leave the updater's console, which JUCE attached us to:
+                // closing that window would end SpectroCraft too (#49).
+                sc::update::detachFromLaunchConsole();
             }
 #if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
             else if (args[i] == "--control")

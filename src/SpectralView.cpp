@@ -1151,13 +1151,29 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     juce::String info = tText + "   f=" + formatFreqAxisLabel (freq, factor)
                         + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale(), ch);
 
-    // Alternative scale overlays: every enabled reference, by name.
-    for (const auto& r : app.altTimeRefs)
-        if (r.enabled && std::abs (r.refMain) > 1e-9)
-            info += "   | " + r.name + "=" + juce::String (t * r.altValue / r.refMain, 3);
-    for (const auto& r : app.altFreqRefs)
-        if (r.enabled && std::abs (r.refMain) > 1e-9)
-            info += "   | " + r.name + "=" + juce::String (freq * r.altValue / r.refMain, 3);
+    // The secondary axes ("Axis and Footer" and "Footer Only"), each in its
+    // own unit - exactly what its axis strip shows. This used the derived
+    // references, a bare factor: a "%" axis read f * scale here and
+    // f * scale / Nyquist * 100 on its strip (issue #54). A caller that filled
+    // the reference lists directly (no entries) still gets its readouts.
+    const auto timeSec = sc::axes::secondary (app.axisEntries, sc::axes::Kind::Time);
+    const auto freqSec = sc::axes::secondary (app.axisEntries, sc::axes::Kind::Frequency);
+    if (! timeSec.empty() || ! freqSec.empty())
+    {
+        for (const auto& e : timeSec)
+            info += "   | " + e.name + "=" + sc::axes::formatTime (e, t, rate);
+        for (const auto& e : freqSec)
+            info += "   | " + e.name + "=" + sc::axes::formatFrequency (e, freq, rate * 0.5);
+    }
+    else
+    {
+        for (const auto& r : app.altTimeRefs)
+            if (r.enabled && std::abs (r.refMain) > 1e-9)
+                info += "   | " + r.name + "=" + juce::String (t * r.altValue / r.refMain, 3);
+        for (const auto& r : app.altFreqRefs)
+            if (r.enabled && std::abs (r.refMain) > 1e-9)
+                info += "   | " + r.name + "=" + juce::String (freq * r.altValue / r.refMain, 3);
+    }
 
     if (onCursorInfo)
         onCursorInfo (info);
@@ -1981,6 +1997,13 @@ juce::String SpectralView::formatFreqAxisLabel (double fHz, double factor)
     return s;
 }
 
+juce::String SpectralView::formatFreqTickLabel (double displayed, bool plainHz)
+{
+    if (! plainHz) return sc::axes::formatTickNumber (displayed);
+    if (std::abs (displayed) >= 1000.0) return sc::axes::formatTickNumber (displayed / 1000.0) + " kHz";
+    return sc::axes::formatTickNumber (displayed) + " Hz";
+}
+
 void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 {
     const double rate = app.audioEngine().sampleRate();
@@ -1993,8 +2016,6 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 
     const auto rows = rowRects ();
     g.setFont (sc::axes::axisLabelFont());
-    struct AxisTick { float y; double hz; bool minor; };
-    std::vector<AxisTick> axisTicks;   // every labelled tick, reused by the extra axes
 
     // The main axis labels stay inside the main strip (nearest the plot) and
     // hug the plot on either side. No room is kept for the channel label: the
@@ -2008,49 +2029,19 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                                                       axisOnRight(), 0);
     const juce::Justification mainJ = axisOnRight() ? juce::Justification::bottomLeft
                                                     : juce::Justification::bottomRight;
+    const double factor = (app.specFreqScaleMode == 1 && app.specFreqFactor > 0.0) ? app.specFreqFactor : 1.0;
+    const double nyq = rate * 0.5;
 
-    for (const auto& rr : rows)
+    // Every axis picks its ticks at nice values of ITS displayed unit
+    // (displayed = k * Hz) and draws each one at the exact frequency it stands
+    // for, so a label reads exactly what its line points at. Ticks used to sit
+    // at nice Hz values of the main axis and show the scaled (or extra-unit)
+    // value rounded: "1.6 kHz" next to a line at 1605 Hz (issue #54).
+    auto forEachTick = [&] (const juce::Rectangle<int>& rr, double k,
+                            const std::function<void (double, bool, bool)>& emit)
     {
-        if (rr.getHeight() <= 0) continue;
-        // Labels only when the row is tall enough to hold them.
-        const bool showLabels = rr.getHeight() >= 48;
-
-        auto drawTickAndLabel = [&](double f, bool minor = false, bool withLabel = true)
-        {
-            const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
-            // Grid line spans the plot only; labels sit in the axis strip on
-            // whichever side it is placed.
-            const float tickX0 = axisOnRight() ? 0.0f : (float) axisW();
-            const float tickX1 = axisOnRight() ? (float) (layoutWidth() - axisW())
-                                               : (float) layoutWidth();
-            // The grey grid line can be hidden from the View menu; the axis
-            // labels below are unaffected. Same colour as the other tracks.
-            if (app.settings.showFreqGrid)
-            {
-                g.setColour (minor ? sc::axes::axisGridColour().darker (0.35f)
-                                   : sc::axes::axisGridColour());
-                g.drawLine (tickX0, y, tickX1, y, 1.0f);
-            }
-            if (!showLabels || !withLabel) return;
-            if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
-                return; // room for the channel label
-            // Drop labels that would collide with the neighbouring row's edge
-            // label at a shared boundary (or be clipped at the component
-            // edge); keep the tick line itself.
-            if ((float) y < rr.getY() + 13.0f || (float) y > rr.getBottom() - 1.0f)
-                return;
-            g.setColour (minor ? sc::axes::axisMinorLabelColour()
-                               : sc::axes::axisLabelColour());
-            const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
-            // Minor labels too: an extra axis used to label only the decades
-            // and so showed fewer values than the main one (issue #27).
-            axisTicks.push_back ({ y, f, minor });
-            // Each axis keeps to its own strip: an extra frequency axis used to
-            // be drawn on top of these labels on the left side.
-            g.drawText (formatFreqAxisLabel (f, factor),
-                       mainLab.getX(), (int) y - 12, mainLab.getWidth(), 12,
-                       mainJ, false);
-        };
+        const double dMin = fMin * k, dMax = fMax * k;
+        auto put = [&] (double d, bool minor, bool label) { emit (d / k, minor, label); };
 
         if (settings_.logFrequency)
         {
@@ -2058,10 +2049,10 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             // decades stay major and every digit per decade is drawn a bit
             // darker at mid zooms (thinned to 1-2-5 when crowded); inside a
             // sub-decade range a nice linear step provides the divisions.
-            const double spanDec = std::log10 (std::max (1e-9, fMax / fMin));
+            const double spanDec = std::log10 (std::max (1e-9, dMax / dMin));
             if (spanDec < 0.7)
             {
-                const double span = std::max (1e-9, fMax - fMin);
+                const double span = std::max (1e-9, dMax - dMin);
                 bool done = false;
                 for (double e = std::floor (std::log10 (span / 8.0));
                      !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
@@ -2070,28 +2061,27 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                         const double step = m * std::pow (10.0, e);
                         if (span / step >= 3.0 && span / step <= 8.0)
                         {
-                            for (double f = std::ceil (fMin / step - 1e-9) * step;
-                                 f <= fMax + 1e-6; f += step)
-                                drawTickAndLabel (f, false);
+                            for (double i = std::ceil (dMin / step - 1e-9); i * step <= dMax + step * 1e-6; ++i)
+                                put (i * step, false, true);
                             done = true;
                             break;
                         }
                     }
                 if (!done)
                     for (int i = 0; i <= 4; ++i)
-                        drawTickAndLabel (fMin + span * (double) i / 4.0, false);
+                        put (dMin + span * (double) i / 4.0, false, true);
             }
             else
             {
                 auto collect = [&] (const int* digs, int n)
                 {
                     std::vector<double> t;
-                    for (double p = std::ceil (std::log10 (fMin)) - 1.0;
-                         p <= std::floor (std::log10 (fMax)); ++p)
+                    for (double p = std::ceil (std::log10 (dMin)) - 1.0;
+                         p <= std::floor (std::log10 (dMax)); ++p)
                         for (int i = 0; i < n; ++i)
                         {
-                            const double f = (double) digs[i] * std::pow (10.0, p);
-                            if (f >= fMin - 1e-6 && f <= fMax + 1e-6) t.push_back (f);
+                            const double d = (double) digs[i] * std::pow (10.0, p);
+                            if (d >= dMin * (1.0 - 1e-9) && d <= dMax * (1.0 + 1e-9)) t.push_back (d);
                         }
                     return t;
                 };
@@ -2105,7 +2095,7 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                 // zoomed to [100 Hz, 2 kHz] — add nice linear subdivisions so
                 // sub-decade regions never look empty.
                 const double gapThresh = std::max (24.0, rr.getHeight() * 0.18);
-                auto yOf = [&] (double f) { return (float) rr.getY() + freqToY (f, rr.getHeight()); };
+                auto yOf = [&] (double d) { return (float) rr.getY() + freqToY (d / k, rr.getHeight()); };
                 auto fillGap = [&] (double a, double b)
                 {
                     if (b <= a * 1.0001) return;
@@ -2122,63 +2112,118 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                             {
                                 const int nDiv = (int) std::lround (span / step);
                                 const bool label = gapPx / (nDiv + 1) >= 16.0;
-                                for (double f = std::ceil (a / step - 1e-9) * step;
-                                     f < b - step * 1e-3; f += step)
-                                    if (f > a + step * 1e-3) drawTickAndLabel (f, true, label);
+                                for (double i = std::ceil (a / step - 1e-9); i * step < b - step * 1e-3; ++i)
+                                    if (i * step > a + step * 1e-3) put (i * step, true, label);
                                 done = true;
                                 break;
                             }
                         }
                 };
-                double prev = fMin;
-                for (double f : ticks) { fillGap (prev, f); prev = f; }
-                fillGap (prev, fMax);
+                double prev = dMin;
+                for (double d : ticks) { fillGap (prev, d); prev = d; }
+                fillGap (prev, dMax);
 
-                for (double f : ticks)
-                    drawTickAndLabel (f,
-                                     std::abs (std::log10 (f) - std::round (std::log10 (f))) > 1e-9);
+                for (double d : ticks)
+                    put (d, std::abs (std::log10 (d) - std::round (std::log10 (d))) > 1e-9, true);
             }
         }
         else
         {
-            const int nTicks = rr.getHeight() >= 64 ? 5 : 2;
-            for (int i = 0; i <= nTicks; ++i)
-                drawTickAndLabel (fMin + (fMax - fMin) * i / nTicks);
+            // Linear: a nice 1-2-5 step giving about as many ticks as the
+            // row has room for.
+            const int target = rr.getHeight() >= 64 ? 5 : 2;
+            const double span = std::max (1e-9, dMax - dMin);
+            const double raw = span / target;
+            const double mag = std::pow (10.0, std::floor (std::log10 (raw)));
+            double step = mag;
+            for (double m : { 1.0, 2.0, 5.0, 10.0 })
+                if (m * mag >= raw * 0.999) { step = m * mag; break; }
+            for (double i = std::ceil (dMin / step - 1e-9); i * step <= dMax + step * 1e-6; ++i)
+                put (i * step, false, true);
         }
-    }
+    };
 
-    // Extra frequency axes: the same tick positions, labelled in each entry's
-    // own units, in the strips further out. The engine renders one frequency
-    // window for every channel row, so a frequency axis is always shared.
-    if (axisTicks.empty()) return;
-    const int axW = axisW();
-    int index = 1;
-    for (const auto& e : freqExtras)
+    // Where a label may go in a row: clear of the channel label at the row
+    // centre and of the neighbouring row's edge.
+    auto labelFits = [&] (const juce::Rectangle<int>& rr, float y)
     {
-        const auto strip = sc::axes::verticalStrip (index, nFreq, axW, plotRect().getX(),
-                                                    layoutWidth() - (axisOnRight() ? axW : 0),
-                                                    plotRect().getY(), plotRect().getBottom(),
-                                                    axisOnRight(), 0);
-        if (axisOnRight() ? strip.getRight() > layoutWidth() : strip.getX() < 0) break;
+        if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
+            return false;
+        return ! ((float) y < rr.getY() + 13.0f || (float) y > rr.getBottom() - 1.0f);
+    };
 
-        // Secondary axis: the same smaller type the extra time axes use; its
-        // minor labels a shade darker, like the main axis' own.
-        g.setFont (juce::Font { juce::FontOptions (8.5f) });
-        const auto lab = sc::axes::verticalLabelRect (index, nFreq, axW, plotRect().getX(),
-                                                      layoutWidth() - (axisOnRight() ? axW : 0),
-                                                      plotRect().getY(), plotRect().getBottom(),
-                                                      axisOnRight(), 0);
-        for (const auto& t : axisTicks)
+    for (const auto& rr : rows)
+    {
+        if (rr.getHeight() <= 0) continue;
+        // Labels only when the row is tall enough to hold them.
+        const bool showLabels = rr.getHeight() >= 48;
+
+        forEachTick (rr, factor, [&] (double f, bool minor, bool withLabel)
         {
-            g.setColour (t.minor ? sc::axes::axisMinorLabelColour().darker (0.25f)
-                                 : sc::axes::axisMinorLabelColour());
-            const auto box = juce::Rectangle<int> (lab.getX(), (int) t.y - 12, lab.getWidth(), 12);
-            // With the unit spelled out: an extra axis in Hz must read as Hz.
-            g.drawText (sc::axes::formatFrequencyAxis (e, t.hz, rate * 0.5), box,
-                        axisOnRight() ? juce::Justification::bottomLeft
-                                      : juce::Justification::bottomRight, true);
+            const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
+            // Grid line spans the plot only; labels sit in the axis strip on
+            // whichever side it is placed.
+            const float tickX0 = axisOnRight() ? 0.0f : (float) axisW();
+            const float tickX1 = axisOnRight() ? (float) (layoutWidth() - axisW())
+                                               : (float) layoutWidth();
+            // The grey grid line can be hidden from the View menu; the axis
+            // labels below are unaffected. Same colour as the other tracks.
+            if (app.settings.showFreqGrid)
+            {
+                g.setColour (minor ? sc::axes::axisGridColour().darker (0.35f)
+                                   : sc::axes::axisGridColour());
+                g.drawLine (tickX0, y, tickX1, y, 1.0f);
+            }
+            if (!showLabels || !withLabel || !labelFits (rr, y)) return;
+            g.setColour (minor ? sc::axes::axisMinorLabelColour()
+                               : sc::axes::axisLabelColour());
+            g.drawText (formatFreqTickLabel (f * factor, std::abs (factor - 1.0) < 1e-12),
+                       mainLab.getX(), (int) y - 12, mainLab.getWidth(), 12,
+                       mainJ, false);
+        });
+
+        // Extra frequency axes, in the strips further out: their own nice
+        // values, each with a short tick at the exact height it stands for.
+        // The engine renders one frequency window for every channel row, so a
+        // frequency axis is always shared.
+        const int axW = axisW();
+        int index = 1;
+        for (const auto& e : freqExtras)
+        {
+            const auto strip = sc::axes::verticalStrip (index, nFreq, axW, plotRect().getX(),
+                                                        layoutWidth() - (axisOnRight() ? axW : 0),
+                                                        plotRect().getY(), plotRect().getBottom(),
+                                                        axisOnRight(), 0);
+            if (axisOnRight() ? strip.getRight() > layoutWidth() : strip.getX() < 0) break;
+            const auto lab = sc::axes::verticalLabelRect (index, nFreq, axW, plotRect().getX(),
+                                                          layoutWidth() - (axisOnRight() ? axW : 0),
+                                                          plotRect().getY(), plotRect().getBottom(),
+                                                          axisOnRight(), 0);
+            ++index;
+            const double k = sc::axes::displayValueFrequency (e, 1.0, nyq);
+            if (! (k > 0.0)) continue;
+
+            // Secondary axis: the same smaller type the extra time axes use;
+            // its minor labels a shade darker, like the main axis' own.
+            g.setFont (juce::Font { juce::FontOptions (8.5f) });
+            const float edgeX = axisOnRight() ? (float) strip.getX() : (float) strip.getRight();
+            const float dir = axisOnRight() ? 1.0f : -1.0f;
+            forEachTick (rr, k, [&] (double f, bool minor, bool withLabel)
+            {
+                const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
+                const auto c = minor ? sc::axes::axisMinorLabelColour().darker (0.25f)
+                                     : sc::axes::axisMinorLabelColour();
+                g.setColour (c);
+                g.drawLine (edgeX, y, edgeX + dir * (minor ? 2.0f : 4.0f), y, 1.0f);
+                if (!showLabels || !withLabel || !labelFits (rr, y)) return;
+                const auto box = juce::Rectangle<int> (lab.getX(), (int) y - 12, lab.getWidth(), 12);
+                // With the unit spelled out: an extra axis in Hz must read as Hz.
+                g.drawText (sc::axes::formatFrequencyTick (e, f * k), box,
+                            axisOnRight() ? juce::Justification::bottomLeft
+                                          : juce::Justification::bottomRight, true);
+            });
         }
-        ++index;
+        g.setFont (sc::axes::axisLabelFont());
     }
 }
 

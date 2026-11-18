@@ -363,9 +363,13 @@ bool relaunch (const std::string& exe, const std::vector<std::string>& args)
     STARTUPINFOW si = {};
     si.cb = sizeof (si);
     PROCESS_INFORMATION pi = {};
-    // Its own console and process group: it must survive this program exiting.
+    // No console (SpectroCraft is a GUI program) and its own process group:
+    // it must survive this program and its console window. JUCE still
+    // attaches a GUI app to its parent's console at startup, so the app also
+    // detaches itself when it sees --finish-update (issue #49: closing this
+    // console window used to end the freshly updated SpectroCraft).
     const BOOL ok = CreateProcessW (nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
-                                    CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+                                    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
                                     nullptr, nullptr, &si, &pi);
     if (! ok) return false;
     CloseHandle (pi.hProcess);

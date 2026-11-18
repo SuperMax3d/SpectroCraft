@@ -586,8 +586,201 @@ static void testAxisPickArithmeticAndControls()
     app.undoStep ();
 }
 
+// --------------------------------------------- A7: issue #54 corrections
+
+static void testAxisIssue54()
+{
+    progress ("regression axes#A7: exact tick labels, Axis and Footer, unit-aware readouts, the form");
+
+    // Tick labels carry every digit of a nice value: "1.6 kHz" used to label
+    // a line at 1550 Hz, and the panel wrote "2k" for 1500 Hz.
+    CHECK (sc::axes::formatTickNumber (1550.0) == "1550" && sc::axes::formatTickNumber (1.25) == "1.25"
+               && sc::axes::formatTickNumber (12.5) == "12.5"
+               && sc::axes::formatTickNumber (1549.9999999) == "1550"
+               && sc::axes::formatTickNumber (-0.0001) == "0",
+           "formatTickNumber keeps the digits of a tick value, no more");
+    CHECK (SpectralView::formatFreqTickLabel (1550.0, true) == "1.55 kHz"
+               && SpectralView::formatFreqTickLabel (500.0, true) == "500 Hz"
+               && SpectralView::formatFreqTickLabel (12.5, false) == "12.5",
+           "spectrogram tick labels are exact");
+    CHECK (juce::String (sc::axes::typeName (sc::axes::Type::AddAxis)) == "Axis and Footer",
+           "\"Add Axis\" is now \"Axis and Footer\"");
+
+    const juce::File store = makeTempFile ("axes_54.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("axes_54.wav");
+    writeWav (wav, 1, 8000.0, 16000,
+              [] (int, int64_t f, double rate)
+              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * 440.0 * (double) f / rate); });
+    Application app (store);
+    CHECK (app.openFile (wav), "axes#54: open wav");
+    if (app.doc() == nullptr) return;
+    const double nyq = 4000.0;
+
+    // A "%" axis shown as an axis AND in the footer, a footer-only one, and a
+    // second amplitude unit.
+    const auto pctN1 = regrAxes_axis (sc::axes::Kind::Frequency, "%N1", 1, 3.0, sc::axes::Type::AddAxis);
+    const auto rel   = regrAxes_axis (sc::axes::Kind::Frequency, "Rel", 2, 0.0025, sc::axes::Type::FooterOnly);
+    const auto volts = regrAxes_axis (sc::axes::Kind::Amplitude, "Volts", 2, 10.0, sc::axes::Type::AddAxis);
+    auto list = app.axisEntries;
+    list.push_back (pctN1);
+    list.push_back (rel);
+    list.push_back (volts);
+    CHECK (app.setAxisEntries (list, "Scale"), "axes#54: secondary axes accepted");
+
+    const auto sec = sc::axes::secondary (app.axisEntries, sc::axes::Kind::Frequency);
+    CHECK (sec.size() == 2 && sec[0].name == "%N1" && sec[1].name == "Rel",
+           "secondary(): the Axis and Footer extra and the Footer Only axis, not the main one");
+    int mainIdx = -1, pctIdx = -1, voltsIdx = -1;
+    for (int i = 0; i < (int) app.axisEntries.size(); ++i)
+    {
+        const auto& e = app.axisEntries[(size_t) i];
+        if (e.kind == sc::axes::Kind::Frequency && &e == sc::axes::primary (app.axisEntries, e.kind)) mainIdx = i;
+        if (e.name == "%N1") pctIdx = i;
+        if (e.name == "Volts") voltsIdx = i;
+    }
+    CHECK (mainIdx >= 0 && ! sc::axes::isSecondary (app.axisEntries, mainIdx)
+               && sc::axes::isSecondary (app.axisEntries, pctIdx),
+           "isSecondary() agrees");
+
+    // The footer shows the Axis and Footer entry too, in its own unit.
+    const juce::String suffix = FFTAnalysisView::altFreqSuffix (app, 1000.0);
+    CHECK (suffix.contains ("%N1=" + sc::axes::formatFrequency (pctN1, 1000.0, nyq))
+               && suffix.contains ("Rel="),
+           "the footer readout lists the Axis and Footer axis and the Footer Only one: " + suffix);
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "axes 54"));
+    if (auto* sv = win->spectralViewComp())
+    {
+        // The spectrogram's cursor readout: each secondary axis in its own unit,
+        // exactly what its strip shows (a "%" axis used to read f * scale here).
+        juce::String probe;
+        sv->onCursorInfo = [&probe] (const juce::String& t) { probe = t; };
+        const int px = 2 + sv->getWidth() / 3, py = 60 + sv->getHeight() / 3;
+        sv->mouseMove (mkMouse (*sv, px, py, {}));
+        const double fAt = sv->freqAtY (py);
+        CHECK (probe.contains ("| %N1=" + sc::axes::formatFrequency (pctN1, fAt, nyq)),
+               "the spectrogram readout shows the % axis in percent: " + probe);
+        CHECK (! probe.contains ("| %N1=" + juce::String (fAt * 3.0, 3)),
+               "...not the frequency times the scale");
+        sv->onCursorInfo = nullptr;
+
+        // The ruler draws with a scaled main axis and a % extra, log and linear.
+        for (int logF = 0; logF < 2; ++logF)
+        {
+            auto st = app.settings;
+            st.logFrequency = (logF == 1);
+            sv->setSettings (st);
+            juce::Image img (juce::Image::RGB, juce::jmax (1, sv->getWidth()), juce::jmax (1, sv->getHeight()), true);
+            { juce::Graphics g (img); sv->paint (g); }
+            CHECK (img.getWidth() > 1, "the spectrogram paints its axes (log " + juce::String (logF) + ")");
+        }
+    }
+
+    // Table from Spectral Selection: one column per other unit, unit-aware.
+    if (auto* d = app.doc())
+    {
+        d->spectralSel.addRect (0.2, 0.8, 300.0, 600.0, false);
+        std::string err;
+        const juce::String csv = app.freqVsTimeCsv (&err);
+        const auto lines = juce::StringArray::fromLines (csv);
+        CHECK (lines.size() > 2, "axes#54: the table has rows (" + juce::String (err) + ")");
+        if (lines.size() > 2)
+        {
+            const auto head = juce::StringArray::fromTokens (lines[0], "\t", "");
+            const auto row  = juce::StringArray::fromTokens (lines[1], "\t", "");
+            const int iHz = head.indexOf ("ch1_Hz"), iPct = head.indexOf ("ch1_%N1"),
+                      iRel = head.indexOf ("ch1_Rel"), iV = head.indexOf ("ch1_Volts");
+            CHECK (iHz >= 0 && iPct > iHz && iRel > iPct && iV > iRel,
+                   "the table has a column per other frequency and amplitude unit: " + lines[0]);
+            if (iHz >= 0 && iPct >= 0 && iPct < row.size())
+                CHECK (regrAxes_near (row[iPct].getDoubleValue(),
+                                      sc::axes::displayValueFrequency (pctN1, row[iHz].getDoubleValue(), nyq), 0.01),
+                       "the % column holds percent of Nyquist times the scale");
+            CHECK (row.size() == head.size(), "every row has a value per column");
+        }
+    }
+
+    // The Frequency Analysis panel: exact Hz labels, then the chosen unit.
+    {
+        FFTAnalysisView view (app);
+        view.setSize (500, 300);
+        CHECK (view.freqTickLabel (1500.0) == "1.5k" && view.freqTickLabel (250.0) == "250",
+               "panel Hz tick labels are exact (1500 Hz read \"2k\")");
+        view.setFrequencyUnitEntry (pctIdx);
+        if (view.getAxisMode() != 2)
+            CHECK (view.freqTickLabel (1000.0)
+                       == sc::axes::formatTickNumber (sc::axes::displayValueFrequency (pctN1, 1000.0, nyq)),
+                   "Unit > Frequency: the labels use the chosen axis");
+        view.setAmplitudeUnitEntry (voltsIdx);
+        juce::Image img (juce::Image::RGB, 500, 300, true);
+        { juce::Graphics g (img); view.paint (g); }
+        CHECK (true, "the panel paints with both units chosen");
+    }
+
+    // The Scale form: typing keeps the field (the focus used to be lost after
+    // one character), Cancel puts the opening state back, Close keeps it.
+    {
+        const auto opened = app.axisEntries;
+        ScaleFormWindow form (app);
+        form.setVisible (true);
+        form.setBounds (0, 0, 700, 520);
+
+        juce::TextEditor* nameEd = nullptr;
+        std::function<void (juce::Component&)> find = [&] (juce::Component& c)
+        {
+            for (auto* ch : c.getChildren())
+            {
+                if (auto* ed = dynamic_cast<juce::TextEditor*> (ch))
+                    if (nameEd == nullptr && ed->getText() == "%N1") nameEd = ed;
+                find (*ch);
+            }
+        };
+        find (form);
+        CHECK (nameEd != nullptr, "axes#54: the %N1 name field is found");
+        if (nameEd != nullptr)
+        {
+            juce::Component::SafePointer<juce::TextEditor> keep (nameEd);
+            nameEd->setText ("%N1x", false);
+            if (nameEd->onTextChange) nameEd->onTextChange();
+            CHECK (keep != nullptr && form.isParentOf (keep.getComponent()),
+                   "typing a name keeps the same field (no rebuild under the caret)");
+            bool renamed = false;
+            for (const auto& e : app.axisEntries) renamed = renamed || e.name == "%N1x";
+            CHECK (renamed, "...and the name applies live");
+        }
+
+        const auto cancelR = form.bottomButtonBounds (true), closeR = form.bottomButtonBounds (false);
+        CHECK (! cancelR.isEmpty() && ! closeR.isEmpty() && form.contentBounds().contains (cancelR)
+                   && form.contentBounds().contains (closeR) && closeR.getRight() <= cancelR.getX(),
+               "Close and Cancel sit at the bottom of the form");
+        bool overlap = false;
+        for (int i = 0; i < form.numRows(); ++i)
+            overlap = overlap || form.rowBounds (i).intersects (cancelR) || form.rowBounds (i).intersects (closeR);
+        CHECK (! overlap, "...below the axis blocks");
+
+        form.cancelChanges();
+        CHECK (app.axisEntries == opened && ! form.isVisible(), "Cancel puts the axes back and closes the form");
+
+        form.setVisible (true);
+        auto changed = app.axisEntries;
+        for (auto& e : changed) if (e.name == "Rel") e.scale = 0.005;
+        CHECK (app.setAxisEntries (changed, "Scale"), "a change while the form is open");
+        form.closeForm();
+        bool kept = false;
+        for (const auto& e : app.axisEntries) kept = kept || (e.name == "Rel" && regrAxes_near (e.scale, 0.005));
+        CHECK (kept && ! form.isVisible(), "Close keeps the changes");
+    }
+
+    win.reset();
+    wav.deleteFile();
+    store.deleteFile();
+}
+
 static void runRegression_axes()
 {
+    testAxisIssue54();
     testAxisModelAndSharedGeometry();
     testAxisFooterReadouts();
     testAxisMigrationAndPersistence();

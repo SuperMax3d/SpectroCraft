@@ -290,6 +290,14 @@ public:
     // Local analysis parameters (unit tests + persistence wiring checks).
     int fftSize() const { return localN; }
     int axisMode() const { return axisMode_; }
+    /** Unit > Frequency / Amplitude: an index into app.axisEntries, or -1 for
+        Hz / the file's calibration (what the right-click menu sets). */
+    void setFrequencyUnitEntry (int entryIndex) { freqUnitEntry_ = entryIndex; repaint(); }
+    void setAmplitudeUnitEntry (int entryIndex) { ampUnitEntry_ = entryIndex; repaint(); }
+    int frequencyUnitEntry() const { return freqUnitEntry_; }
+    /** The frequency axis label of a tick at fHz, in the chosen unit: every
+        digit the nice tick value carries ("1.25k", "12.5"). */
+    juce::String freqTickLabel (double fHz) const;
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
     juce::ComboBox& windowComboRef() { return windowCombo; }
     juce::ComboBox& axisComboRef() { return axisCombo; }
@@ -473,6 +481,17 @@ public:
     // responds immediately - the same scheme as the waveform/spectral views.
     void panHorizontalByCursorX (int x);
     void panVerticalByCursorY (int y);
+
+    // Unit > Frequency / Unit > Amplitude (issue #54): which axis of the
+    // Scale form the graphs' frequency and level labels use, as an index into
+    // app.axisEntries; -1 = Hz / the file's own calibration.
+    int freqUnitEntry_ = -1, ampUnitEntry_ = -1;
+    const sc::axes::Entry* freqUnitEntry() const;
+    const sc::axes::Entry* ampUnitEntry() const;
+    /** displayed = k * Hz for the chosen frequency unit (1 for Hz and in the
+        1/3-octave mode, which keeps its band centres). */
+    double freqUnitK() const;
+    juce::String levelTickLabel (double relDb, int ch) const;
 
     // Grid/label helpers shared between the classic and curve modes.
     void buildFreqAxisTicks (std::vector<double>& freqTicks,
