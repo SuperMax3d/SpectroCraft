@@ -74,8 +74,32 @@ jobs:
 
       # -j 1: shards in turn, so two processes never download the same model
       # file at the same time.
+      #
+      # AVX-512: some Windows runner hosts (INTEL(R) XEON(R) PLATINUM 8573C)
+      # advertise AVX-512 but raise an illegal instruction (0xC000001D) in the
+      # AI tests, in OpenVINO (oneDNN) as well as in ggml's AVX-512 CPU
+      # variants; the same commit passes on a re-run. The cause is unknown
+      # (oneDNN checks XCR0 too). For the tests only, oneDNN is capped at
+      # AVX2 and the AVX-512 ggml variants are held out of the runtime folder
+      # (ggml then loads the best remaining one: alderlake or haswell). They
+      # go back before the payload is assembled, so the release ships them.
+      # The test runner prints the CPU model and its AVX flags first.
       - name: Unit tests (shards in turn, AI tests included)
-        run: ctest --test-dir build -C Release -j 1 --output-on-failure
+        shell: pwsh
+        env:
+          ONEDNN_MAX_CPU_ISA: AVX2
+        run: |
+          $rt = "build/src/SpectroCraft_artefacts/Release/SpectroCraft"
+          $held = "build/ggml-avx512-held"
+          New-Item -ItemType Directory -Force -Path $held | Out-Null
+          $avx512 = "ggml-cpu-skylakex.dll", "ggml-cpu-cannonlake.dll", "ggml-cpu-cascadelake.dll", "ggml-cpu-icelake.dll"
+          foreach ($d in $avx512) {
+            if (Test-Path -LiteralPath "$rt/$d") { Move-Item -LiteralPath "$rt/$d" -Destination $held -Force }
+          }
+          ctest --test-dir build -C Release -j 1 --output-on-failure
+          $rc = $LASTEXITCODE
+          Get-ChildItem -LiteralPath $held -File | Move-Item -Destination $rt -Force
+          exit $rc
 
       # Real audio.cpp CLI (cpu zip): catalogue install, FlashSR super
       # resolution and htdemucs stem separation (~70 MB downloaded).
@@ -347,6 +371,7 @@ jobs:
           -DSPECTRO_ENABLE_FFMPEG=OFF
           -DSC_AI_DOWNLOAD_DIR="$GITHUB_WORKSPACE/ai-downloads"
           -DSC_TEST_MODELS_DIR="$GITHUB_WORKSPACE/test-models"
+          -DSC_TEST_XVFB_PER_SHARD=ON
 
       - name: Build (Debug, app + updater + fake recorder plugin + AI runtimes)
         run: cmake --build build --target SpectroCraft --parallel "$(nproc)" -- -k 0
@@ -375,7 +400,10 @@ jobs:
           exit $bad
 
       - name: Unit tests (parallel shards, AI tests included, virtual display)
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
+        # Each shard runs under its own X server (SC_TEST_XVFB_PER_SHARD, set at
+        # configure time): with one display for all of them, another shard's
+        # window took the keyboard focus from shard 0's dialog tests.
+        run: ctest --test-dir build -j "$(nproc)" --output-on-failure
 
       # Real audio.cpp CLI (cpu .tar.gz with its libggml*.so): catalogue
       # install, FlashSR super resolution and htdemucs stem separation

@@ -50,6 +50,50 @@ static void testAppRegReadSamplesAtEnd()
     wav.deleteFile ();
 }
 
+/** AudioEngine::pasteMixAt() at the end of the file (edit.pasteMix with the
+    playhead at EOF): nothing is left to mix, so the clipboard is appended.
+    It used to call AudioBuffer::getReadPointer (ch, totalSamples) for the
+    empty overlap, which asserts (juce_AudioSampleBuffer.h, sampleIndex <
+    size) - the 42-46 JUCE assertions the control fuzz triggered on every
+    Debug run. Found by counting JUCE assertions per test. */
+static void testAppRegPasteMixAtEnd()
+{
+    progress ("regression app-from-tests: paste-mix at the end of the file appends");
+    const juce::File wav = makeTempFile ("reg_paste_mix_end.wav");
+    const int64_t frames = 1000;
+    writeWav (wav, 2, 8000.0, frames, [] (int ch, int64_t f, double)
+             { return (float) (ch + 1) * 0.001f * (float) (f % 100); });
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "paste-mix at end: load");
+    CHECK (eng.fullyInMemory (), "paste-mix at end: in-memory engine");
+
+    juce::AudioBuffer<float> clip (2, 100);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < 100; ++i)
+            clip.setSample (ch, i, 0.5f - 0.001f * (float) (i + ch));
+
+    const int assertsBefore = scAssertCounter().count.load();
+    std::string err;
+    CHECK (eng.pasteMixAt (frames, clip, &err), "paste-mix at end: succeeds (" + err + ")");
+    CHECK (scAssertCounter().count.load() == assertsBefore,
+           "paste-mix at end: no JUCE assertion (no read pointer at the end of the buffer)");
+    CHECK (eng.numSamples() == frames + 100, "paste-mix at end: the clipboard is appended");
+
+    float appended[100] = {};
+    CHECK (eng.readSamples (1, frames, 100, appended), "paste-mix at end: read the appended part");
+    bool same = true;
+    for (int i = 0; i < 100; ++i)
+        same = same && std::abs (appended[i] - clip.getSample (1, i)) < 1e-6f;
+    CHECK (same, "paste-mix at end: the appended samples are the clipboard's");
+
+    float last = 0.0f;
+    CHECK (eng.readSamples (1, frames - 1, 1, &last), "paste-mix at end: last original sample read");
+    CHECK (std::abs (last - 2.0f * 0.001f * (float) ((frames - 1) % 100)) < 1e-6f,
+           "paste-mix at end: the original samples are unchanged");
+    wav.deleteFile ();
+}
+
 /** Transport > Recording Device: the "(no devices)" / "(no recorder plugins
     found)" placeholders used ID 0, which PopupMenu reserves for "nothing
     picked" (assertion juce_PopupMenu.cpp). They are now disabled items with a
@@ -299,6 +343,7 @@ static void testAppRegNoAudioDeviceSwitch()
 static void runRegression_app_from_tests()
 {
     testAppRegReadSamplesAtEnd ();
+    testAppRegPasteMixAtEnd ();
     testAppRegRecordingMenuIds ();
     testAppRegRecorderPluginPattern ();
     testAppRegScaleDialogFocus ();

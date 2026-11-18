@@ -191,25 +191,36 @@ static void testVideoDecoder4k()
         scSkip ("video 4K: this Media Foundation cannot resize, frames stay 4K");
 #endif
 
-    const double t0 = juce::Time::getMillisecondCounterHiRes();
     bool allOk = true, sizeOk = true;
+    std::vector<double> frameMs;
     for (int i = 0; i < 25; ++i)
     {
+        const double f0 = juce::Time::getMillisecondCounterHiRes();
         sc::VideoFrame fr;
         if (!dec->frameAt (i / 25.0 + 0.02, fr) || videoFrameIndexOf (fr.image) != i)
             allOk = false;
+        frameMs.push_back (juce::Time::getMillisecondCounterHiRes() - f0);
         if (fr.image.getWidth() != dec->outputSize().x || fr.image.getHeight() != dec->outputSize().y)
             sizeOk = false;
     }
-    const double msPerFrame = (juce::Time::getMillisecondCounterHiRes() - t0) / 25.0;
     CHECK (allOk, "video 4K: every frame decodes to the right picture");
     CHECK (sizeOk, "video 4K: frames have the decoder's output size");
-    std::fprintf (stderr, "[video] 4K -> %dx%d: %.1f ms per frame\n",
-                  dec->outputSize().x, dec->outputSize().y, msPerFrame);
+    // The median frame, not the mean: the first frame pays the seek that
+    // setNeededLongSide forces, and one stall of a loaded runner (the other
+    // shards use every core) made the mean fail twice on the macOS CI (121
+    // and 143 ms, runs 43945464908 and 43987315411) while a typical frame
+    // took ~28 ms there. A full-size software path makes every frame slow,
+    // which the median still catches.
+    const double meanMs = std::accumulate (frameMs.begin(), frameMs.end(), 0.0) / (double) frameMs.size();
+    std::vector<double> sorted (frameMs);
+    std::nth_element (sorted.begin(), sorted.begin() + (long) sorted.size() / 2, sorted.end());
+    const double medianMs = sorted[sorted.size() / 2];
+    std::fprintf (stderr, "[video] 4K -> %dx%d: median %.1f ms per frame (mean %.1f)\n",
+                  dec->outputSize().x, dec->outputSize().y, medianMs, meanMs);
     // Real time at 25 fps needs < 40 ms; Debug builds on shared CI runners
     // get some slack, the point is catching a full-size software path.
-    CHECK (msPerFrame < 120.0, "video 4K: playback decode is fast enough ("
-           + juce::String (msPerFrame, 1) + " ms per frame)");
+    CHECK (medianMs < 120.0, "video 4K: playback decode is fast enough (median "
+           + juce::String (medianMs, 1) + " ms per frame)");
 
     // Zooming in: back to the source size, same frame on screen.
     dec->setNeededLongSide (0);

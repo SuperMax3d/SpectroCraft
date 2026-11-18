@@ -194,4 +194,9 @@ target_compile_definitions (SpectroCraft
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"
+        # Debug: JUCE assertions go through juce::Logger instead of a bare
+        # stderr line, so the unit-test runner can count them per test and the
+        # diagnostic log records them (src/Diagnostics.cpp, DiagLogger). Release
+        # builds compile assertions out, as before.
+        $<$<CONFIG:Debug>:JUCE_LOG_ASSERTIONS=1>
 )
