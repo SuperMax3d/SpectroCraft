@@ -88,6 +88,14 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    /** The wheel over the bar (issue #48: the session bar zooms its rows):
+        the vertical delta. Unset, the wheel goes to the parent as before. */
+    std::function<void (float deltaY)> onWheel;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        if (onWheel) onWheel (w.isReversed ? -w.deltaY : w.deltaY);
+        else juce::Component::mouseWheelMove (e, w);
+    }
 
 private:
     double rangeMin = 0.0, rangeMax = 1.0, winLo = 0.0, winHi = 1.0;

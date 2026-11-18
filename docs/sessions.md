@@ -75,10 +75,22 @@ or go away.
   left output, every right channel on the right one, a mono track on both
   (each output divides by the number of channels it receives, so the sum
   does not clip).
+- The **footer** shows each channel name once (issue #48): two stereo tracks
+  give **L** and **R**, a stereo and a mono track **L**, **R** and **1**. A
+  click on **L** shows or hides the left channel of every track together;
+  Ctrl+click shows only those channels (again: all of them).
+- **Effects > Resample** converts **each track** (issue #48): its channel
+  count and mix matrix are those of one track, applied to every track. Two
+  stereo tracks resampled to mono become two mono tracks, and stay mono when
+  a track is added later. A new sample rate moves every file and trim to the
+  new rate. Tracks of different channel counts can only change the rate
+  (the channel field is locked).
 
 While a session is open, a bar at the far right of the editor scrolls through
 the rows of every file. Drag its thumb to move through them, or drag an edge
-to show fewer rows (they get taller) or more.
+to show fewer rows (they get taller) or more. The mouse wheel over the bar
+does the same as the edge (issue #48): up for one row fewer, down for one
+more.
 
 Every add, move and remove is one undoable step (audio and layout together),
 like any edit.
