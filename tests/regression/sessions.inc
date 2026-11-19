@@ -1008,6 +1008,182 @@ static void regrSessions_reviewBatch3()
     dir.deleteRecursively ();
 }
 
+// Issue #48: the rows bar zooms with the wheel, the footer groups the
+// channels by name, Resample converts each track, the spectrogram keeps its
+// time scale after a move that shortens the timeline.
+static void regrSessions_issue48()
+{
+    progress ("regression sessions: #48 wheel, footer by name, resample per track, spectrogram after a move");
+    using namespace scsessiontest;
+    const juce::File dir = makeTempFile ("sc_sessions_48");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"),
+                     fc = dir.getChildFile ("c.wav"), fmono = dir.getChildFile ("mono.wav");
+    writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (fb, 2, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    writeWav (fc, 2, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (3, ch, f); });
+    writeWav (fmono, 1, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (4, ch, f); });
+    const juce::File store = dir.getChildFile ("store.recent");
+    std::string err;
+    using V = std::vector<int>;
+
+    // 1 + 2: two stereo tracks in a window.
+    {
+        Application app (store);
+        CHECK (app.openFile (fm), "#48: open");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        CHECK (app.addSessionFile (fb, true, &err) && d->engine.numChannels () == 4 && d->session.numLanes () == 2,
+               "#48: a second stereo track (" + juce::String (err) + ")");
+        const auto g = app.channelGroups ();
+        CHECK (g.size () == 2 && g[0] == V ({ 0, 2 }) && g[1] == V ({ 1, 3 }), "#48: L, R, L, R make two groups");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "sessions 48"));
+        win->setSize (1400, 900);
+        win->showEveryChannel ();
+        win->syncSharedState ();
+        auto* sb = win->statusBarComp ();
+        CHECK (sb != nullptr && sb->channelChipRects ().size () == 2 && sb->channelChipLabel (0) == "L"
+                   && sb->channelChipLabel (1) == "R",
+               "#48: the footer shows L and R once");
+        if (sb != nullptr && sb->onChannelClicked)
+        {
+            sb->onChannelClicked (0, false);
+            CHECK (app.visibleChannels == V ({ 1, 3 }) && ! sb->channelChipShown (0) && sb->channelChipShown (1),
+                   "#48: a click on L hides the L of both tracks");
+            sb->onChannelClicked (0, false);
+            CHECK (app.visibleChannels == V ({ 0, 1, 2, 3 }), "#48: ... and shows them again");
+            sb->onChannelClicked (1, true);
+            CHECK (app.visibleChannels == V ({ 1, 3 }), "#48: Ctrl+click on R shows only the R channels");
+            sb->onChannelClicked (1, true);
+            CHECK (app.visibleChannels == V ({ 0, 1, 2, 3 }), "#48: ... and again shows them all");
+        }
+        // 1: the wheel on the rows bar.
+        win->resized ();
+        auto* bar = win->sessionScrollBar ();
+        CHECK (bar != nullptr && bar->onWheel != nullptr, "#48: the rows bar takes the wheel");
+        if (bar != nullptr && bar->onWheel)
+        {
+            bar->onWheel (0.1f);
+            CHECK (app.visibleChannels == V ({ 0, 1, 2 }), "#48: wheel up: one row fewer (taller rows)");
+            bar->onWheel (0.05f);
+            CHECK (app.visibleChannels == V ({ 0, 1, 2 }), "#48: a small trackpad step waits for more");
+            bar->onWheel (0.05f);
+            CHECK (app.visibleChannels == V ({ 0, 1 }), "#48: ... then counts");
+            bar->onWheel (-0.3f);
+            CHECK (app.visibleChannels == V ({ 0, 1, 2, 3 }), "#48: wheel down: more rows, up to all");
+        }
+        win->zoomSessionRows (10);
+        CHECK (app.visibleChannels == V ({ 0 }), "#48: never fewer than one row");
+        win->showEveryChannel ();
+        // Tracks of other widths keep their own chips.
+        CHECK (app.addSessionFile (fmono, true, &err) && d->engine.numChannels () == 5, "#48: a mono track too");
+        const auto g3 = app.channelGroups ();
+        CHECK (g3.size () == 3 && g3[0] == V ({ 0, 2 }) && g3[1] == V ({ 1, 3 }) && g3[2] == V ({ 4 }),
+               "#48: L, R and the mono track's 1");
+        win.reset ();
+    }
+
+    auto resampleStep = [] (double rate, const std::vector<std::vector<double>>& weights)
+    {
+        sc::ActionStep st;
+        st.type = sc::actionTypes::kResample;
+        auto* o = new juce::DynamicObject ();
+        o->setProperty ("rate", rate);
+        if (! weights.empty ())
+        {
+            juce::Array<juce::var> rows;
+            for (const auto& r : weights)
+            {
+                juce::Array<juce::var> row;
+                for (double v : r) row.add (v);
+                rows.add (row);
+            }
+            o->setProperty ("weights", rows);
+        }
+        st.params = juce::var (o);
+        return st;
+    };
+
+    // 3: two stereo tracks to mono: each track is converted.
+    {
+        Application app;
+        CHECK (app.openFile (fm) && app.addSessionFile (fb, true, &err), "#48 resample: two stereo tracks");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        CHECK (app.resampleSourceChannels () == 2, "#48 resample: it converts from one track's 2 channels");
+        const auto w = app.resampleEngineWeights ({ { 1.0, 1.0 } });
+        CHECK (w.size () == 2 && w[0] == std::vector<double> ({ 1, 1, 0, 0 }) && w[1] == std::vector<double> ({ 0, 0, 1, 1 }),
+               "#48 resample: the same matrix for each track");
+        CHECK (sc::applyActionStep (app, resampleStep (8000.0, { { 1.0, 1.0 } }), &err, nullptr),
+               "#48 resample: to mono (" + juce::String (err) + ")");
+        auto& eng = d->engine;
+        CHECK (eng.numChannels () == 2 && d->session.laneChannels == V ({ 1, 1 }) && d->session.totalChannels () == 2,
+               "#48 resample: two mono tracks");
+        CHECK (sampleIs (eng, 0, 100, 0.5f * (sig (1, 0, 100) + sig (1, 1, 100)))
+                   && sampleIs (eng, 1, 100, 0.5f * (sig (2, 0, 100) + sig (2, 1, 100))),
+               "#48 resample: each track is the mix of its own channels");
+        CHECK (app.channelName (0) == "1" && app.channelName (1) == "1", "#48 resample: named as mono tracks");
+    }
+    // 4: two stereo files in series, resampled to mono, then a new track.
+    {
+        Application app;
+        CHECK (app.openFile (fm) && app.addSessionFile (fc, false, &err), "#48 series: main + c in series");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        CHECK (sc::applyActionStep (app, resampleStep (8000.0, { { 1.0, 1.0 } }), &err, nullptr)
+                   && d->engine.numChannels () == 1 && d->session.laneChannels == V ({ 1 }),
+               "#48 series: mono (" + juce::String (err) + ")");
+        CHECK (app.runSessionContextItem (CtxSessionAddTrack, -1, 0) && d->engine.numChannels () == 2
+                   && d->session.laneChannels == V ({ 1, 1 }),
+               "#48 series: Add Track adds a mono track, the files stay mono");
+        CHECK (sampleIs (d->engine, 0, 8100, 0.5f * (sig (3, 0, 100) + sig (3, 1, 100))) && sampleIs (d->engine, 1, 8100, 0.0f),
+               "#48 series: c is still its mono mix, the new track silent");
+        // Rate: every place follows.
+        CHECK (sc::applyActionStep (app, resampleStep (16000.0, {}), &err, nullptr), "#48 series: 16 kHz (" + juce::String (err) + ")");
+        CHECK (d->engine.sampleRate () == 16000.0 && d->session.clips.size () == 2 && d->session.clips[1].offset == 16000
+                   && std::abs (d->session.clips[1].length - 8000) <= 2 && d->session.totalChannels () == d->engine.numChannels (),
+               "#48 series: at 16 kHz the file starts at sample 16000");
+    }
+    // Tracks of different widths: only the rate can change.
+    {
+        Application app;
+        CHECK (app.openFile (fm) && app.addSessionFile (fmono, true, &err), "#48 mixed: stereo + mono");
+        CHECK (app.resampleSourceChannels () == -1, "#48 mixed: no single channel count to convert");
+        CHECK (sc::applyActionStep (app, resampleStep (8000.0, { { 1.0, 1.0 } }), &err, nullptr)
+                   && app.doc ()->engine.numChannels () == 3,
+               "#48 mixed: the channels stay");
+    }
+
+    // 5: a file moved from the main track to a parallel one earlier on: the
+    // timeline gets shorter than the view; the spectrogram keeps its scale.
+    {
+        Application app;
+        CHECK (app.openFile (fm) && app.addSessionFile (fb, false, &err) && app.addSessionTrack (2, &err),
+               "#48 move: b after the main file, an empty track");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        CHECK (eng.numSamples () == 12000, "#48 move: 1.5 s");
+        CHECK (app.moveSessionFile (1, 1, 0, &err) && eng.numSamples () == 8000,
+               "#48 move: b to the second track at 0, the timeline is 1 s (" + juce::String (err) + ")");
+        Settings s = app.settings;
+        std::vector<float> db;
+        CHECK (app.spectralEngine.renderToDb (eng, s, 60, 32, 0.0, 1.5, { 0 }, db) && db.size () == 60 * 32,
+               "#48 move: render the old 1.5 s window");
+        auto column = [&db] (int x)
+        {
+            float m = -1000.0f;
+            for (int y = 0; y < 32; ++y) m = std::max (m, db[(size_t) (y * 60 + x)]);
+            return m;
+        };
+        CHECK (column (10) > -200.0f && column (55) < -299.0f,
+               "#48 move: data up to 1 s, nothing drawn after the end (was stretched over the width): "
+                   + juce::String (column (10), 1) + " / " + juce::String (column (55), 1) + " dB");
+    }
+    dir.deleteRecursively ();
+}
+
 static void runRegression_sessions()
 {
     regrSessions_model();
@@ -1019,4 +1195,5 @@ static void runRegression_sessions()
     regrSessions_trim();
     regrSessions_copies();
     regrSessions_reviewBatch3();
+    regrSessions_issue48 ();
 }

@@ -883,6 +883,11 @@ private:
     bool sessionBarWanted() const;
 public:
     ValueScrollBar* sessionScrollBar() const noexcept { return sessionVScroll.get(); }   // tests
+    /** The wheel over the session bar (issue #48), like dragging its bottom
+        edge: `steps` > 0 shows that many rows fewer (taller), < 0 more. The
+        top row stays while it can. */
+    void zoomSessionRows (int steps);
+    float sessionWheelAccum_ = 0.0f;
 private:
 
     // Dedicated tables track (Tables panel mode 2): a strip above the data

@@ -499,14 +499,18 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
             {
                 const double rate = numParam (p, "rate", 0.0);
                 if (rate <= 0.0)        return fail ("resample: invalid rate");
+                // The weights convert one track of a session (issue #48).
                 auto weights = remixWeightsFromJson (p);
+                if (app.resampleSourceChannels () < 0) weights.clear ();   // tracks of different widths
+                const auto engineWeights = app.resampleEngineWeights (weights);
+                const double fromRate = app.audioEngine().sampleRate ();
                 std::atomic<bool> noCancel;
                 const bool ok = app.audioEngine().resampleTo (
                     rate, nullptr, &noCancel, errOut,
-                    weights.empty () ? nullptr : &weights);
+                    engineWeights.empty () ? nullptr : &engineWeights);
                 if (!ok) return false;
                 app.audioEngine().rebuildMipmaps (nullptr);
-                return true;
+                return app.finishSessionResample (fromRate, rate, weights, errOut);
             }
             break;
 

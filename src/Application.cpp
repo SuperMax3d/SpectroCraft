@@ -5556,6 +5556,111 @@ namespace
     }
 }
 
+int Application::resampleSourceChannels () const
+{
+    const FileDoc* d = doc ();
+    if (d == nullptr) return 0;
+    const auto& s = d->session;
+    if (! s.active () || s.totalChannels () != d->engine.numChannels () || s.laneChannels.empty ())
+        return d->engine.numChannels ();
+    for (int ch : s.laneChannels)
+        if (ch != s.laneChannels[0]) return -1;   // tracks of different widths
+    return s.laneChannels[0];
+}
+
+std::vector<std::vector<double>> Application::resampleEngineWeights (const std::vector<std::vector<double>>& perTrack) const
+{
+    const FileDoc* d = doc ();
+    if (perTrack.empty () || d == nullptr) return perTrack;
+    const auto& s = d->session;
+    const int src = resampleSourceChannels ();
+    if (! s.active () || src <= 0 || s.numLanes () < 2 || (int) perTrack[0].size () != src)
+        return perTrack;
+    // Block diagonal: every track converted with the same matrix.
+    const int lanes = s.numLanes (), outPer = (int) perTrack.size ();
+    std::vector<std::vector<double>> w ((size_t) (lanes * outPer), std::vector<double> ((size_t) (lanes * src), 0.0));
+    for (int lane = 0; lane < lanes; ++lane)
+        for (int o = 0; o < outPer; ++o)
+            for (int i = 0; i < src && i < (int) perTrack[(size_t) o].size (); ++i)
+                w[(size_t) (lane * outPer + o)][(size_t) (lane * src + i)] = perTrack[(size_t) o][(size_t) i];
+    return w;
+}
+
+bool Application::finishSessionResample (double fromRate, double toRate,
+                                         const std::vector<std::vector<double>>& perTrack, std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
+    FileDoc* d = doc ();
+    if (d == nullptr || ! d->session.active ())
+        return true;
+    auto s = d->session;
+    // The tracks' new width: the matrix's outputs when it converts one
+    // track's channels, else unchanged.
+    const bool remix = ! perTrack.empty () && ! s.laneChannels.empty ()
+                       && std::all_of (s.laneChannels.begin (), s.laneChannels.end (),
+                                       [&] (int c) { return c == (int) perTrack[0].size (); });
+    // Rows normalised by their sum, as AudioEngine::resampleTo does.
+    auto norm = perTrack;
+    for (auto& row : norm)
+    {
+        double sum = 0.0;
+        for (double v : row) sum += v;
+        if (std::abs (sum) > 1e-12)
+            for (auto& v : row) v /= sum;
+    }
+    auto remixRows = [&norm] (const std::vector<std::vector<float>>& in)
+    {
+        std::vector<std::vector<float>> out (norm.size (), std::vector<float> (in.empty () ? 0 : in[0].size (), 0.0f));
+        for (size_t o = 0; o < norm.size (); ++o)
+            for (size_t i = 0; i < in.size () && i < norm[o].size (); ++i)
+                if (norm[o][i] != 0.0)
+                    for (size_t n = 0; n < in[i].size (); ++n)
+                        out[o][n] += (float) norm[o][i] * in[i][n];
+        return out;
+    };
+    const double k = fromRate > 0.0 ? toRate / fromRate : 1.0;
+    const bool rateChanged = std::abs (k - 1.0) > 1e-12;
+    const int64_t total = d->engine.numSamples ();
+    auto at = [k] (int64_t t) { return (int64_t) std::llround ((double) t * k); };
+    auto convertHidden = [&] (const sc::session::HiddenAudio& h, int64_t newLen) -> sc::session::HiddenAudio
+    {
+        if (h == nullptr || newLen <= 0) return nullptr;
+        auto rows = *h;
+        if (rateChanged && ! resampleRows (rows, fromRate, toRate)) return nullptr;
+        for (auto& r : rows) r.resize ((size_t) newLen, 0.0f);
+        if (remix) rows = remixRows (rows);
+        return std::make_shared<const std::vector<std::vector<float>>> (std::move (rows));
+    };
+    for (auto& c : s.clips)
+    {
+        if (rateChanged)
+        {
+            const int64_t fs = at (c.fileStart ()), off = at (c.offset);
+            const int64_t end = std::min (total, std::max (at (c.end ()), off + 1));
+            const int64_t fe = std::max (at (c.fileEnd ()), end);
+            c.headLength = std::max<int64_t> (0, off - fs);
+            c.tailLength = std::max<int64_t> (0, fe - end);
+            c.offset = off;
+            c.length = std::max<int64_t> (0, end - off);
+        }
+        if (rateChanged || remix)
+        {
+            c.head = convertHidden (c.head, c.headLength);
+            c.tail = convertHidden (c.tail, c.tailLength);
+            if (c.head == nullptr) c.headLength = 0;
+            if (c.tail == nullptr) c.tailLength = 0;
+        }
+    }
+    if (remix)
+        for (auto& ch : s.laneChannels) ch = (int) perTrack.size ();
+    if (s.totalChannels () != d->engine.numChannels ())
+        return fail ("The resampled file no longer matches its tracks; the other files of the session will not be saved.");
+    d->session = std::move (s);
+    d->applySessionSaveRegion ();
+    d->metaDirty = true;
+    return true;
+}
+
 bool Application::addSessionFilesAt (const std::vector<juce::File>& files, int lane, int64_t offset,
                                      std::string* errOut)
 {
@@ -5972,6 +6077,28 @@ juce::String Application::channelName (int ch) const
         }
     }
     return n == 2 ? juce::String (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+}
+
+std::vector<std::vector<int>> Application::channelGroups () const
+{
+    const FileDoc* d = doc ();
+    const int n = d != nullptr ? d->engine.numChannels () : 0;
+    std::vector<std::vector<int>> groups;
+    const bool session = d != nullptr && d->session.active () && d->session.totalChannels () == n;
+    juce::StringArray names;
+    for (int ch = 0; ch < n; ++ch)
+    {
+        const auto name = channelName (ch);
+        const int at = session ? names.indexOf (name) : -1;
+        if (at >= 0)
+            groups[(size_t) at].push_back (ch);
+        else
+        {
+            names.add (name);
+            groups.push_back ({ ch });
+        }
+    }
+    return groups;
 }
 
 void Application::setSessionBordersVisible (bool visible)

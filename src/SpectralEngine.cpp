@@ -712,12 +712,18 @@ bool SpectralEngine::renderSingleSizeDb (const AudioEngine& engine, const Settin
 
     const double rate = engine.sampleRate();
     const int64_t s0 = std::max ((int64_t) 0, (int64_t) (t0 * rate));
-    const int64_t s1 = std::min (engine.numSamples(), (int64_t) (t1 * rate));
+    // The columns span the whole window [t0, t1], also where it runs past
+    // the end of the data (issue #48: a session move that shortened the
+    // timeline left the window longer than the file, and clamping here
+    // stretched the picture over the full width). Only the tiles stop at
+    // the end; the columns after it read "beyond the data" (silence).
+    const int64_t s1View = std::max (s0 + 1, (int64_t) (t1 * rate));
+    const int64_t s1 = std::min (engine.numSamples(), s1View);
     if (s1 <= s0)
         return true;
 
     // Choose level so one frame ~ one pixel column
-    const double samplesPerPixel = (double) (s1 - s0) / width;
+    const double samplesPerPixel = (double) (s1View - s0) / width;
     const int level = pickMipLevel (samplesPerPixel, s.hopSize);
     const int hop = effectiveHop (level, s);
 
@@ -797,7 +803,7 @@ bool SpectralEngine::renderSingleSizeDb (const AudioEngine& engine, const Settin
 
         for (int x = 0; x < width; ++x)
         {
-            const int64_t sample = s0 + (int64_t) (((double) x + 0.5) / width * (s1 - s0));
+            const int64_t sample = s0 + (int64_t) (((double) x + 0.5) / width * (s1View - s0));
             // Tile frames are centred on their analysis window: a pixel at
             // time t shows the spectrum of the window centred on t, so
             // transients line up with the waveform instead of appearing early,

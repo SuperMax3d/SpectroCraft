@@ -765,6 +765,18 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         app.visibleChannels = want;
         syncSharedState();
     };
+    // The wheel zooms the rows like an edge drag (issue #48): one row per
+    // notch (a trackpad's small deltas add up first).
+    sessionVScroll->onWheel = [this] (float dy)
+    {
+        sessionWheelAccum_ += dy;
+        int steps = 0;
+        constexpr float notch = 0.1f;
+        while (sessionWheelAccum_ >= notch && steps < 4)  { sessionWheelAccum_ -= notch; ++steps; }
+        while (sessionWheelAccum_ <= -notch && steps > -4) { sessionWheelAccum_ += notch; --steps; }
+        if (std::abs (sessionWheelAccum_) >= notch) sessionWheelAccum_ = 0.0f;
+        if (steps != 0) zoomSessionRows (steps);
+    };
 
     timeBar->setTooltip ("Time zoom/pan bar: drag the thumb to pan, drag an edge to zoom, "
                          "click outside the thumb to jump there.");
@@ -834,15 +846,29 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // macOS) shows only that one, and again on the lone visible one shows
     // them all (the View > Channel N rules).
     if (statusBar)
-        statusBar->onChannelClicked = [this] (int ch, bool only)
+        // A chip stands for a group of channels: in a session, every
+        // channel of that name in every track (issue #48).
+        statusBar->onChannelClicked = [this] (int chip, bool only)
         {
-            if (ch < 0 || ch >= app.audioEngine().numChannels()) return;
-            if (only && app.visibleChannels.size() == 1 && app.visibleChannels[0] == ch)
+            const auto groups = app.channelGroups();
+            if (! juce::isPositiveAndBelow (chip, (int) groups.size())) return;
+            auto group = groups[(size_t) chip];
+            std::sort (group.begin(), group.end());
+            auto& vis = app.visibleChannels;
+            if (only && vis == group)
             {   showEveryChannel(); return; }
             if (only)
-                app.visibleChannels = { ch };
+                vis = group;
             else
-                app.toggleChannelVisible (ch);
+            {
+                const bool anyShown = std::any_of (group.begin(), group.end(), [&vis] (int c)
+                                                   { return std::find (vis.begin(), vis.end(), c) != vis.end(); });
+                for (int c : group)
+                {
+                    const bool shown = std::find (vis.begin(), vis.end(), c) != vis.end();
+                    if (shown == anyShown) app.toggleChannelVisible (c);   // all off, or all on
+                }
+            }
             app.syncActiveDoc ();   // keep the active document's copy in step
             syncSharedState();
         };
@@ -2841,12 +2867,30 @@ void MainWindow::syncSharedState()
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
         // Channel numbers: dim when hidden, red when muted.
+        // One chip per group (issue #48: a session's L, R, L, R read L, R):
+        // shown when any of its channels is, muted when all are.
         {
-            const int nch = app.audioEngine().isFileLoaded() ? app.audioEngine().numChannels() : 0;
+            const auto groups = app.audioEngine().isFileLoaded() ? app.channelGroups()
+                                                                 : std::vector<std::vector<int>> {};
+            const auto muted = app.audioEngine().mutedChannels();
             std::vector<juce::String> names;
-            for (int ch = 0; ch < nch; ++ch) names.push_back (app.channelName (ch));
-            statusBar->setChannels (nch, app.visibleChannels, app.audioEngine().mutedChannels(),
-                                    std::move (names));
+            std::vector<int> shownChips;
+            std::vector<bool> mutedChips;
+            for (size_t gi = 0; gi < groups.size(); ++gi)
+            {
+                const auto& g = groups[gi];
+                names.push_back (app.channelName (g.front()));
+                bool anyShown = false, allMuted = true;
+                for (int c : g)
+                {
+                    anyShown = anyShown || std::find (app.visibleChannels.begin(), app.visibleChannels.end(), c)
+                                               != app.visibleChannels.end();
+                    allMuted = allMuted && c < (int) muted.size() && muted[(size_t) c];
+                }
+                if (anyShown) shownChips.push_back ((int) gi);
+                mutedChips.push_back (allMuted);
+            }
+            statusBar->setChannels ((int) groups.size(), shownChips, mutedChips, std::move (names));
         }
 
         // Active spectral tool indicator + live SHIFT/CTRL selection hint.
@@ -8541,11 +8585,22 @@ juce::AlertWindow* MainWindow::createResampleDialog()
 {
     auto& eng = app.audioEngine();
     const double cur = eng.sampleRate();
-    const int curChans = eng.numChannels();
+    // A session's tracks are converted one by one (issue #48): the channels
+    // are those of one track; tracks of different widths keep theirs.
+    const int srcChans = app.resampleSourceChannels();
+    const bool mixedTracks = srcChans < 0;
+    const int curChans = mixedTracks ? eng.numChannels() : srcChans;
+    const auto* sd = app.doc();
+    const int lanes = sd != nullptr && sd->session.active() ? sd->session.numLanes() : 1;
+    juce::String chansText = juce::String (curChans) + " channel(s)";
+    if (lanes > 1)
+        chansText = mixedTracks ? juce::String (lanes) + " tracks of different channel counts: only the rate can change"
+                                : juce::String (curChans) + " channel(s) per track, " + juce::String (lanes)
+                                      + " tracks (each track is converted)";
 
     auto* w = new OwningAlertWindow ("Resample",
                                      "Current rate: " + juce::String (cur, 3) + " Hz, "
-                                     + juce::String (curChans) + " channel(s)\n"
+                                     + chansText + "\n"
                                      "(whole file; cannot be undone)",
                                      juce::AlertWindow::QuestionIcon, this);
 
@@ -8584,6 +8639,13 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     auto* chansEditor = chansRow->editor();
     rateEditor->setName ("newRate");
     chansEditor->setName ("newChans");
+    if (mixedTracks)
+    {
+        chansEditor->setReadOnly (true);
+        chansRow->setEnabled (false);
+        grid->setEnabled (false);
+        fillRow->setEnabled (false);
+    }
     for (auto* editor : { rateEditor, chansEditor })
         // Let Enter/Escape reach the OK/Cancel shortcuts even while a
         // field has keyboard focus.
@@ -8644,6 +8706,24 @@ void MainWindow::showStemSeparationWindow()
 
 // Show every channel in both views (View > All Channels, and the solo-off
 // half of the Ctrl/Shift+click / Ctrl+Shift+N toggle).
+void MainWindow::zoomSessionRows (int steps)
+{
+    const int n = app.audioEngine().numChannels();
+    if (n <= 0 || steps == 0) return;
+    int lo = n, hi = 0;
+    for (int ch : app.visibleChannels) { lo = std::min (lo, ch); hi = std::max (hi, ch + 1); }
+    if (hi <= lo) { lo = 0; hi = n; }
+    const int count = std::clamp (hi - lo - steps, 1, n);   // wheel up (steps > 0): fewer rows
+    int first = lo;
+    if (first + count > n) first = n - count;               // more rows than fit below: grow upwards
+    std::vector<int> want;
+    for (int ch = first; ch < first + count; ++ch) want.push_back (ch);
+    if (want == app.visibleChannels) return;
+    app.visibleChannels = want;
+    app.syncActiveDoc ();
+    syncSharedState();
+}
+
 void MainWindow::showEveryChannel()
 {
     app.visibleChannels.clear();
@@ -8712,9 +8792,14 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
     }
 
     weights = normaliseRemixWeights (weights);
+    // Issue #48: in a session the matrix converts one track's channels.
+    const int srcChans = app.resampleSourceChannels();
+    const int fromChans = srcChans < 0 ? eng.numChannels() : srcChans;
+    if (srcChans < 0)
+        weights.clear();   // tracks of different widths: the rate only
     const bool sameRate = std::abs (newRate - eng.sampleRate())
                           < 1e-9 * std::max (eng.sampleRate(), newRate);
-    if (sameRate && newChans == eng.numChannels() && isIdentityRemix (weights, newChans))
+    if (sameRate && (weights.empty() || (newChans == fromChans && isIdentityRemix (weights, newChans))))
     { if (onApplied) onApplied (false); return; }   // nothing to do
 
     juce::Array<juce::var> wArr;
@@ -9013,10 +9098,17 @@ void MainWindow::runResampleAsync (double newRate,
                                    std::function<void(bool)> onDone)
 {
     auto& eng = app.audioEngine();
+    // `remixWeights` converts one track of a session (issue #48); the engine
+    // gets the same matrix for every track.
+    const std::vector<std::vector<double>> perTrack = remixWeights;
+    const auto engineWeights = app.resampleEngineWeights (perTrack);
+    const double fromRate = eng.sampleRate();
     juce::String what = "Resampling to " + juce::String (newRate, 3) + " Hz";
-    if (!remixWeights.empty() && (int) remixWeights.size() != eng.numChannels())
-        what += ", " + juce::String (eng.numChannels()) + " -> "
-                + juce::String ((int) remixWeights.size()) + " channels";
+    const int fromChans = remixWeights.empty() ? 0 : (int) remixWeights[0].size();
+    if (!remixWeights.empty() && (int) remixWeights.size() != fromChans)
+        what += ", " + juce::String (fromChans) + " -> "
+                + juce::String ((int) remixWeights.size()) + " channels"
+                + (engineWeights.size() != perTrack.size() ? " per track" : "");
 
     auto* dlg = new WorkProgressDialog ("Resampling", what + " ...",
                                         true, this);
@@ -9024,7 +9116,7 @@ void MainWindow::runResampleAsync (double newRate,
     dlg->beginModal ();
 
     AudioEngine* engPtr = &eng;   // resolved on the message thread (see runDestructiveEdit)
-    std::thread ([this, newRate, remixWeights, dlg, onDone, engPtr] {
+    std::thread ([this, newRate, engineWeights, perTrack, fromRate, dlg, onDone, engPtr] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -9039,17 +9131,23 @@ void MainWindow::runResampleAsync (double newRate,
             newRate,
             [sendProgress] (float f) { sendProgress (0.85 * (double) f); },
             &dlg->cancelled, &err,
-            remixWeights.empty() ? nullptr : &remixWeights);
+            engineWeights.empty() ? nullptr : &engineWeights);
         if (ok)
             engPtr->rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.85 + 0.15 * (double) f);
             });
 
-        juce::MessageManager::callAsync ([this, dlg, ok, err, onDone] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err, onDone, perTrack, fromRate, newRate] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
             {
+                // A session follows (issue #48): places at the new rate,
+                // each track's new channel count.
+                std::string serr;
+                if (!app.finishSessionResample (fromRate, newRate, perTrack, &serr))
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Resample",
+                                               juce::String (serr), "", this);
                 // The clipboard's samples belong to the old sample rate.
                 app.clearClipboard ();
 

@@ -440,6 +440,23 @@ public:
     bool addSessionTrack (int channels, std::string* errOut = nullptr);
     /** Right-click > Remove Track: removes an empty track (not the main one). */
     bool removeSessionTrack (int lane, std::string* errOut = nullptr);
+    /** Resample (issue #48): the channel count the Resample dialog converts
+        from. A session's tracks are converted one by one, so it is their
+        channel count when they all have the same, -1 when they differ (then
+        only the sample rate can change); the file's channel count otherwise. */
+    int resampleSourceChannels() const;
+    /** The weights AudioEngine::resampleTo applies to the whole document for
+        `perTrack` (rows: output channels, columns: the channels of one
+        track): in a session, the same matrix for every track (block
+        diagonal); `perTrack` itself otherwise. Empty stays empty (no channel
+        change). */
+    std::vector<std::vector<double>> resampleEngineWeights (const std::vector<std::vector<double>>& perTrack) const;
+    /** After AudioEngine::resampleTo on a session document: every place
+        scaled to the new rate, the hidden trims resampled and remixed with
+        `perTrack`, each track's channel count updated. No-op without a
+        session; false (with why) when the result does not match the tracks. */
+    bool finishSessionResample (double fromRate, double toRate,
+                                const std::vector<std::vector<double>>& perTrack, std::string* errOut = nullptr);
     /** Moves file `index` (1.. ; the main file stays at 0) to `lane` at
         `offset` samples. The lane must have the file's channel count (or be
         empty: it takes the file's) and the place must be free. A track left
@@ -513,6 +530,11 @@ public:
         two-channel file, its number otherwise; in a session, by its place in
         its own track (two stereo tracks read L, R, L, R). */
     juce::String channelName (int ch) const;
+    /** The footer's channel chips (issue #48): in a session, the channels
+        that share a name form one chip (two stereo tracks: L = channels 0
+        and 2, R = 1 and 3; a click toggles them together); otherwise one
+        chip per channel. In channel order of each group's first channel. */
+    std::vector<std::vector<int>> channelGroups() const;
     /** True while the Move tool is armed (Selection > Move, V; issue #41):
         the only tool that selects, moves and resizes drawings on the
         spectrogram (a click on one selects it; its handles resize it), and
