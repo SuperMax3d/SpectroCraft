@@ -10,6 +10,9 @@
 #include <fstream>
 #include <set>
 #include <ctime>
+#include "Parallel.h"
+#include "FilterEQ.h"
+#include "Envelope.h"
 #include "Application.h"
 #include "AlertGate.h"
 #include "AudioEngine.h"
@@ -767,14 +770,14 @@ static void testUndo()
     eng.silenceSamples ({ 300, 400 });
     CHECK (um.depth() == 2, "two undo levels");
 
-    Patch p;
-    CHECK (um.popUndo (p), "pop undo");
-    CHECK (eng.applyPatch (p, false), "apply undo restores data");
+    Patch* p = nullptr;
+    CHECK ((p = um.popUndo ()) != nullptr, "pop undo");
+    CHECK (eng.applyPatch (*p, false), "apply undo restores data");
     CHECK (readOneSample (eng, 0, 350) != 0.0f, "restored sample non-zero");
 
-    Patch p2;
-    CHECK (um.popRedo (p2), "pop redo");
-    CHECK (eng.applyPatch (p2, true), "apply redo");
+    Patch* p2 = nullptr;
+    CHECK ((p2 = um.popRedo ()) != nullptr, "pop redo");
+    CHECK (eng.applyPatch (*p2, true), "apply redo");
     CHECK (readOneSample (eng, 0, 350) == 0.0f, "re-silenced");
 
     // Regression: per-sample edits (fade/gain/normalize/reverse) must capture
@@ -785,9 +788,9 @@ static void testUndo()
     const float faded = readOneSample (eng, 0, 450);
     CHECK (std::abs (faded - pre * (50.0f / 99.0f)) < 1e-4, "fade applied");
 
-    Patch p3;
-    CHECK (um.popUndo (p3), "pop fade undo");
-    CHECK (eng.applyPatch (p3, false), "apply fade undo");
+    Patch* p3 = nullptr;
+    CHECK ((p3 = um.popUndo ()) != nullptr, "pop fade undo");
+    CHECK (eng.applyPatch (*p3, false), "apply fade undo");
     CHECK (std::abs (readOneSample (eng, 0, 450) - pre) < 1e-4,
            "fade undo restores the original data");
 
@@ -2633,8 +2636,8 @@ static void testEffectChannelScope()
 
     // Undo restores the silenced channel exactly.
     CHECK (um.canUndo(), "silence recorded in undo stack");
-    Patch p;
-    if (um.popUndo (p)) eng.applyPatch (p, false);
+    Patch* p = nullptr;
+    if ((p = um.popUndo ()) != nullptr) eng.applyPatch (*p, false);
     CHECK (std::abs (readOneSample (eng, 0, 3000) - 3000.0f / 7999.0f) < 1e-5f, "undo restores silenced channel");
 
     // Normalize only channel 1: its peak (0.5) goes to 1.0; ch0 must be unchanged.
@@ -11831,9 +11834,9 @@ static void testReplaceRangeDifferentLength()
         CHECK (okTail, "tail shifted up by the length delta");
 
         CHECK (um.depth () == 1, "one undo step recorded");
-        Patch p;
-        CHECK (um.popUndo (p), "pop undo");
-        CHECK (eng.applyPatch (p, false), "undo shorter replace");
+        Patch* p = nullptr;
+        CHECK ((p = um.popUndo ()) != nullptr, "pop undo");
+        CHECK (eng.applyPatch (*p, false), "undo shorter replace");
         CHECK (eng.numSamples () == 100, "length restored by undo");
     }
 
@@ -11869,9 +11872,9 @@ static void testReplaceRangeDifferentLength()
         CHECK (okTail, "tail shifted down by the length delta");
 
         CHECK (um.depth () == 1, "one undo step recorded (longer)");
-        Patch p;
-        CHECK (um.popUndo (p), "pop undo (longer)");
-        CHECK (eng.applyPatch (p, false), "undo longer replace");
+        Patch* p = nullptr;
+        CHECK ((p = um.popUndo ()) != nullptr, "pop undo (longer)");
+        CHECK (eng.applyPatch (*p, false), "undo longer replace");
         CHECK (eng.numSamples () == 100, "length restored by undo (longer)");
     }
 
@@ -16934,6 +16937,19 @@ static void testPlaybackMaskStreaming()
     CHECK (!pm.matches (kToneRate, 2), "mismatched channel count detected");
 }
 
+// Writes the clipboard and checks it took (shared by the transcription and
+// table tests; outside the AI block so a build without AI has it too).
+static void setClipboardText (const juce::String& text)
+{
+    for (int i = 0; i < 50; ++i)
+    {
+        juce::SystemClipboard::copyTextToClipboard (text);
+        if (juce::SystemClipboard::getTextFromClipboard () == text)
+            return;
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+    }
+}
+
 #if defined(SC_ENABLE_AI)
 static double rmsOf (const std::vector<float>& v)
 {
@@ -17783,16 +17799,6 @@ static void testTranscriptionAddMarkersMulti()
 // The Windows clipboard can be briefly held by another process, in which case
 // JUCE's write silently does nothing. Write and then verify (bounded) that the
 // text is actually readable before proceeding.
-static void setClipboardText (const juce::String& text)
-{
-    for (int i = 0; i < 50; ++i)
-    {
-        juce::SystemClipboard::copyTextToClipboard (text);
-        if (juce::SystemClipboard::getTextFromClipboard () == text)
-            return;
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
-    }
-}
 
 static void testTranscriptionClipboard()
 {
@@ -24751,6 +24757,212 @@ static void testToolbarIssue50()
     wav.deleteFile ();
 }
 
+// ------------------------------------------------------- performance bench
+// Not a test: timings of the common operations on a long file, to see where
+// the app is slow. Runs only with SC_BENCH=1 (SC_TEST_FILTER=bench);
+// SC_BENCH_MINUTES sets the length (default 10 min, stereo 48 kHz).
+#if JUCE_MAC
+ #include <mach/mach.h>
+#endif
+static double benchRssMb()
+{
+#if JUCE_MAC
+    mach_task_basic_info info {};
+    mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info (mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t) &info, &n) == KERN_SUCCESS)
+        return (double) info.resident_size / (1024.0 * 1024.0);
+#endif
+    return 0.0;
+}
+
+static void testPerformanceBench()
+{
+    if (juce::SystemStats::getEnvironmentVariable ("SC_BENCH", {}) != "1")
+        return;
+    const double minutes = juce::SystemStats::getEnvironmentVariable ("SC_BENCH_MINUTES", "10").getDoubleValue();
+    const double rate = 48000.0;
+    const int64_t frames = (int64_t) (minutes * 60.0 * rate);
+    const juce::File wav = makeTempFile ("bench.wav");
+    juce::Random rng (7);
+    writeWav (wav, 2, rate, frames, [&rng] (int ch, int64_t f, double r)
+        { return 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * (220.0 + 110.0 * ch) * (double) f / r)
+                 + 0.05f * (rng.nextFloat() - 0.5f); });
+
+    juce::StringArray lines;
+    auto timeIt = [&lines] (const juce::String& what, const std::function<void()>& fn)
+    {
+        const double rss0 = benchRssMb();
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        fn();
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        const auto line = what.paddedRight (' ', 44) + juce::String (ms, 0).paddedLeft (' ', 8) + " ms   RSS "
+                          + juce::String (benchRssMb(), 0) + " MB (" + (benchRssMb() >= rss0 ? "+" : "")
+                          + juce::String (benchRssMb() - rss0, 0) + ")";
+        lines.add (line);
+        std::printf ("[bench] %s\n", line.toRawUTF8());
+        std::fflush (stdout);
+    };
+
+    std::printf ("[bench] %.1f min stereo 48 kHz, %d cores, RSS at start %.0f MB\n", minutes,
+                 juce::SystemStats::getNumCpus(), benchRssMb());
+    Application app;
+    timeIt ("open (decode + mipmaps)", [&] { app.openFile (wav); });
+    auto& eng = app.audioEngine();
+    timeIt ("rebuild waveform mipmaps", [&] { eng.rebuildMipmaps(); });
+    Settings st = app.settings;
+    std::vector<float> db;
+    timeIt ("spectrogram, whole file 1600x512, cold", [&] { app.spectralEngine.clearCache(); app.spectralEngine.renderToDb (eng, st, 1600, 512, 0.0, eng.duration(), { 0 }, db); });
+    timeIt ("spectrogram, whole file 1600x512, warm", [&] { app.spectralEngine.renderToDb (eng, st, 1600, 512, 0.0, eng.duration(), { 0 }, db); });
+    timeIt ("spectrogram, 10 s window, cold", [&] { app.spectralEngine.clearCache(); app.spectralEngine.renderToDb (eng, st, 1600, 512, 30.0, 40.0, { 0 }, db); });
+    {
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "bench"));
+        win->setSize (1600, 900);
+        win->syncSharedState();
+        timeIt ("window repaint, whole file (snapshot)", [&] { app.spectralEngine.clearCache(); auto img = win->createComponentSnapshot (win->getLocalBounds()); juce::ignoreUnused (img); });
+        timeIt ("window repaint again (warm)", [&] { auto img = win->createComponentSnapshot (win->getLocalBounds()); juce::ignoreUnused (img); });
+    }
+    std::string err;
+    auto ok = [&err] (bool r) { if (! r) std::printf ("[bench]   failed: %s\n", err.c_str()); };
+    app.selectAll();
+    timeIt ("effect: change gain -1 dB (whole file)", [&] { ok (app.changeGain (-1.0f, &err)); });
+    timeIt ("undo it", [&] { app.undoStep(); });
+    timeIt ("redo it", [&] { app.redoStep(); });
+    app.selectAll();
+    timeIt ("effect: normalize", [&] { ok (app.normalize (&err)); });
+    app.selectAll();
+    timeIt ("effect: reverse", [&] { ok (app.reverse (&err)); });
+    app.selectAll();
+    timeIt ("effect: fade in", [&] { ok (app.fadeIn (&err)); });
+    app.selectAll();
+    timeIt ("effect: filter EQ (2 points)", [&] { ok (app.applyFilterEq ({ { 100.0, -6.0 }, { 4000.0, 3.0 } }, &err)); });
+    app.selection = { 60.0, 120.0 };
+    timeIt ("edit: delete 60 s", [&] { ok (app.del (&err)); });
+    sc::measures::LevelsParams lp;
+    timeIt ("measure: levels, whole file", [&] { auto r = sc::measures::levels (eng, lp); juce::ignoreUnused (r); });
+    {
+        std::vector<float> x ((size_t) eng.numSamples ());
+        eng.readSamples (0, 0, eng.numSamples (), x.data ());
+        const std::vector<sc::eq::EqPoint> pts { { 100.0, -6.0 }, { 4000.0, 3.0 } };
+        auto y = x;
+        timeIt ("EQ kernel, one channel, 1 thread", [&] { sc::par::ScopedWorkers one (1); sc::eq::applyEq (y.data (), (int) y.size (), rate, pts); });
+        y = x;
+        timeIt ("EQ kernel, one channel, all threads", [&] { sc::eq::applyEq (y.data (), (int) y.size (), rate, pts); });
+    }
+    std::vector<sc::measures::CurveData> curves;
+    timeIt ("measure: spectrum curve, whole file", [&] { sc::measures::spectrumCurve (eng, { 0 }, 0.0, eng.duration(), 4096, 0, 0, nullptr, curves); });
+    timeIt ("measure: freq vs time, 60 s", [&] { sc::measures::timeCurve (eng, { 0 }, 0.0, 60.0, 0, nullptr, curves); });
+    const juce::File out = makeTempFile ("bench_out.wav");
+    timeIt ("save as (32-bit float WAV)", [&] { eng.saveFileAs (out); });
+    std::printf ("[bench] undo steps: %d\n", (int) app.undo().undoSize());
+    out.deleteFile();
+    wav.deleteFile();
+    sc::fileMetaSidecarPath (wav).deleteFile();
+}
+
+// ------------------------------------- undo in place, budget, parallel loops
+static void testUndoInPlaceAndParallel()
+{
+    // The parallel loop covers its range once, in chunks, and passes errors on.
+    {
+        std::vector<int> hits (3000000, 0);
+        sc::par::forRange ((int64_t) hits.size (), [&hits] (int64_t b, int64_t e) { for (int64_t i = b; i < e; ++i) ++hits[(size_t) i]; });
+        CHECK (std::all_of (hits.begin (), hits.end (), [] (int h) { return h == 1; }), "par: every item once");
+        bool thrown = false;
+        try { sc::par::forRange (3000000, [] (int64_t b, int64_t) { if (b > 0) throw std::bad_alloc (); }); }
+        catch (const std::bad_alloc&) { thrown = true; }
+        CHECK (thrown || sc::par::workers () == 1, "par: an exception in a chunk reaches the caller");
+    }
+
+    // EQ and envelope: the same samples with one thread and with all of them.
+    {
+        const int n = 3 * 1000 * 1000;
+        std::vector<float> a ((size_t) n);
+        juce::Random r (3);
+        for (auto& v : a) v = r.nextFloat () - 0.5f;
+        auto b = a;
+        const std::vector<sc::eq::EqPoint> pts { { 100.0, -6.0 }, { 3000.0, 4.0 } };
+        {
+            sc::par::ScopedWorkers one (1);
+            sc::eq::applyEq (a.data (), n, 48000.0, pts);
+        }
+        sc::eq::applyEq (b.data (), n, 48000.0, pts);
+        CHECK (a == b, "par: the EQ is bit-identical on one thread and on " + juce::String (sc::par::workers ()));
+        const std::vector<sc::env::EnvPoint> env { { 0.0, -12.0 }, { 30.0, 3.0 }, { 60.0, -6.0 } };
+        {
+            sc::par::ScopedWorkers one (1);
+            sc::env::applyEnvelope (a.data (), n, 48000.0, env);
+        }
+        sc::env::applyEnvelope (b.data (), n, 48000.0, env);
+        CHECK (a == b, "par: the envelope too");
+    }
+
+    // A same-length edit keeps ONE version, of the channels it changed only;
+    // undo and redo swap it, as many times as wanted.
+    {
+        AudioEngine eng;
+        ::UndoManager um;
+        eng.setUndoManager (&um);
+        const int64_t n = 1 << 20;
+        std::vector<std::vector<float>> data (2, std::vector<float> ((size_t) n));
+        for (int64_t i = 0; i < n; ++i) { data[0][(size_t) i] = (float) (i % 1000) / 1000.0f; data[1][(size_t) i] = -0.25f; }
+        CHECK (eng.initNew (2, 48000.0, &data), "undo in place: document");
+        auto snapshot = [&eng, n] ()
+        {
+            std::vector<std::vector<float>> s (2, std::vector<float> ((size_t) n));
+            for (int ch = 0; ch < 2; ++ch) eng.readSamples (ch, 0, n, s[(size_t) ch].data ());
+            return s;
+        };
+        const auto before = snapshot ();
+        const std::vector<int> only0 { 0 };
+        CHECK (eng.gainSamples ({ 0, n }, -6.0f, &only0), "undo in place: gain on channel 1");
+        const auto after = snapshot ();
+        const Patch& p = um.undoAt (um.undoSize () - 1);
+        CHECK (p.inPlace && p.swapChannels == only0 && p.oldData.size () == 1 && p.newData.empty ()
+                   && p.audioBytes () == n * (int64_t) sizeof (float),
+               "undo in place: one version, of the changed channel only");
+        CHECK (after[1] == before[1] && after[0] != before[0], "undo in place: channel 2 untouched");
+        bool ok = true;
+        for (int round = 0; round < 3; ++round)
+        {
+            Patch* u = um.popUndo ();
+            ok = ok && u != nullptr && u == &um.redoAt (um.redoSize () - 1) && eng.applyPatch (*u, false) && snapshot () == before;
+            Patch* rdo = um.popRedo ();
+            ok = ok && rdo != nullptr && eng.applyPatch (*rdo, true) && snapshot () == after;
+        }
+        CHECK (ok, "undo in place: undo / redo swap back and forth, sample for sample, without copies");
+        // The generic path (replaceSamples) finds the changed channels itself.
+        std::vector<std::vector<float>> repl (2, std::vector<float> (1000, 0.5f));
+        eng.readSamples (0, 5000, 1000, repl[0].data ());   // channel 1 unchanged
+        CHECK (eng.replaceSamples ({ 5000, 6000 }, repl, "replace"), "undo in place: replace");
+        const Patch& q = um.undoAt (um.undoSize () - 1);
+        CHECK (q.inPlace && q.swapChannels == std::vector<int> ({ 1 }), "undo in place: only the channel that changed is kept");
+        // Reverse in place (odd length: the middle sample stays).
+        const auto pre = snapshot ();
+        CHECK (eng.reverseSamples ({ 10, 15 }, nullptr), "undo in place: reverse 5 samples");
+        const auto rev = snapshot ();
+        CHECK (rev[0][10] == pre[0][14] && rev[0][12] == pre[0][12] && rev[0][14] == pre[0][10], "undo in place: reversed");
+        Patch* u = um.popUndo ();
+        CHECK (u != nullptr && eng.applyPatch (*u, false) && snapshot () == pre, "undo in place: reverse undone");
+    }
+
+    // The history's memory budget drops the oldest steps, keeps the newest.
+    {
+        AudioEngine eng;
+        ::UndoManager um;
+        eng.setUndoManager (&um);
+        std::vector<std::vector<float>> data (1, std::vector<float> (100000, 0.5f));
+        CHECK (eng.initNew (1, 48000.0, &data), "budget: document");
+        um.setByteBudget (3 * 100000 * (int64_t) sizeof (float));   // three whole-file steps
+        for (int i = 0; i < 5; ++i)
+            eng.gainSamples ({ 0, 100000 }, -1.0f, nullptr);
+        CHECK (um.undoSize () == 3 && um.droppedForMemory () == 2 && um.bytesHeld () <= um.byteBudget (),
+               "budget: 5 steps, 3 kept within the budget (" + juce::String ((int) um.undoSize ()) + ")");
+        um.setByteBudget (1);
+        CHECK (um.undoSize () == 1, "budget: the newest step always stays");
+        CHECK (::UndoManager::defaultByteBudget () >= (int64_t) 512 * 1024 * 1024, "budget: at least 512 MB by default");
+    }
+}
+
 static void testMainToolbar()
 {
     namespace tb = sc::toolbar;
@@ -31167,9 +31379,9 @@ static void testWriteDataToNewChannels()
     CHECK (ok0, "write new channels: the existing channel is untouched");
 
     CHECK (um.depth () == 1, "write new channels: one undo step recorded");
-    Patch p;
-    CHECK (um.popUndo (p), "write new channels: pop the undo");
-    CHECK (eng.applyPatch (p, false), "write new channels: undo applied");
+    Patch* p = nullptr;
+    CHECK ((p = um.popUndo ()) != nullptr, "write new channels: pop the undo");
+    CHECK (eng.applyPatch (*p, false), "write new channels: undo applied");
     CHECK (eng.numChannels () == 2 && eng.numSamples () == len, "write new channels: back to two channels");
 
     // Data running past the end extends the document with silence.
@@ -31693,6 +31905,8 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
     SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
+    SC_RUN_TEST ("undo in place, history budget, parallel loops", testUndoInPlaceAndParallel);
+    SC_RUN_TEST ("bench: performance timings (SC_BENCH=1 only)", testPerformanceBench);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);

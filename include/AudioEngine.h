@@ -343,7 +343,11 @@ public:
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
     // pyramid is rebuilt only once for the whole run of patches.
-    bool applyPatch (const ::Patch& p, bool forward, bool rebuild = true);
+    /** Applies a step forward (redo) or back (undo). An in-place step
+        (Patch::inPlace) swaps its samples with the buffer, so the patch
+        itself changes: apply the one kept in the history (UndoManager::
+        popUndo / popRedo return it). */
+    bool applyPatch (::Patch& p, bool forward, bool rebuild = true);
 
     // ---- Saving ----
     // Saves are atomic: the data goes to a temporary file next to the target,
@@ -535,6 +539,15 @@ private:
     // old buffer and any recording storage are freed after the scope ends.
     void swapInBuffer (std::unique_ptr<juce::AudioBuffer<float>> nb, int newChans,
                        int64_t newTotal, double newRate);
+
+    /** Records [region) of `channels` as an in-place undo step (one version,
+        swapped on undo / redo). Call BEFORE the region changes. */
+    void recordInPlace (juce::Range<int64_t> region, const std::vector<int>& channels,
+                        const juce::String& description);
+    std::vector<int> affectedChannels (const std::vector<int>* chans) const;
+    template <typename Fn>
+    void processInPlace (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                         const juce::String& description, Fn&& fn);
 
     // friends: static edit helpers in AudioEngine.cpp
     friend void recordReplace (AudioEngine&, const juce::Range<int64_t>&,

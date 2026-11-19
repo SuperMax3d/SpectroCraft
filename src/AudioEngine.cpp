@@ -11,11 +11,13 @@
 #include "Resampler.h"
 #include "UndoManager.h"
 #include "MarkerManager.h"
+#include "Parallel.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <new>
 #include <thread>
+#include <mutex>
 
 // Exclusive access to `buffer` for code that swaps, resizes or frees it.
 // Protocol with the audio thread (getNextAudioBlock): the callback first
@@ -1032,6 +1034,30 @@ void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
                            const juce::String& description,
                            int newChans = 0, double newRate = 0.0)
 {
+    // A same-length edit (same channels, same rate) keeps one version only:
+    // undo and redo swap it with the buffer. The channels newData leaves
+    // as they are are not stored at all.
+    const int64_t regionLen = region.getLength();
+    bool sameShape = eng.buffer != nullptr && regionLen > 0
+                     && (newChans <= 0 || newChans == eng.numChannels())
+                     && ! (newRate > 0.0 && std::abs (newRate - eng.sampleRate ()) > 1e-9 * std::max (newRate, eng.sampleRate ()))
+                     && (int) newData.size () == eng.numChannels ()
+                     && region.getStart () >= 0 && region.getEnd () <= eng.totalSamples;
+    for (const auto& row : newData)
+        sameShape = sameShape && (int64_t) row.size () == regionLen;
+    if (sameShape)
+    {
+        std::vector<int> changed;
+        for (int ch = 0; ch < eng.numChannels (); ++ch)
+        {
+            const float* cur = eng.buffer->getReadPointer (ch, (int) region.getStart ());
+            if (! std::equal (newData[(size_t) ch].begin (), newData[(size_t) ch].end (), cur))
+                changed.push_back (ch);
+        }
+        eng.recordInPlace (region, changed, description);
+        return;
+    }
+
     Patch p;
     p.oldStart = region.getStart();
     p.oldEnd = region.getEnd();
@@ -1515,40 +1541,68 @@ bool AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vecto
     return true;
 }
 
-// Applies fn to the selected channels only; other channels are copied
-// unchanged so the recorded undo patch stays complete for all channels.
+void AudioEngine::recordInPlace (juce::Range<int64_t> region, const std::vector<int>& channels,
+                                 const juce::String& description)
+{
+    Patch p;
+    p.oldStart = region.getStart();
+    p.oldEnd = region.getEnd();
+    p.description = description;
+    p.inPlace = true;
+    p.swapChannels = channels;
+    const int64_t len = region.getLength();
+    p.oldData.resize (channels.size());
+    for (size_t i = 0; i < channels.size(); ++i)
+    {
+        // assign: one pass, no zero-fill first (resize would write it twice).
+        const float* src = buffer->getReadPointer (channels[i], (int) region.getStart());
+        p.oldData[i].assign (src, src + len);
+    }
+    p.lengthDelta = 0;
+    if (undo) undo->record (std::move (p));
+}
+
+std::vector<int> AudioEngine::affectedChannels (const std::vector<int>* chans) const
+{
+    std::vector<int> out;
+    for (int ch = 0; ch < nchans; ++ch)
+        if (channelAffected (chans, ch)) out.push_back (ch);
+    return out;
+}
+
+// Records the affected channels of `samples` (one version, swapped on undo),
+// then runs fn (data, begin, end, len) over them in the buffer itself, in
+// parallel chunks: data is the region's start, [begin, end) the chunk.
+template <typename Fn>
+void AudioEngine::processInPlace (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                                  const juce::String& description, Fn&& fn)
+{
+    if (!buffer) return;
+    samples = samples.getIntersectionWith ({ 0, totalSamples });
+    const int64_t len = samples.getLength();
+    if (len <= 0) return;
+    const auto channels = affectedChannels (chans);
+    recordInPlace (samples, channels, description);   // BEFORE the buffer changes
+    for (int ch : channels)
+    {
+        float* d = buffer->getWritePointer (ch, (int) samples.getStart());
+        sc::par::forRange (len, [&fn, d, len] (int64_t b, int64_t e) { fn (d, b, e, len); });
+    }
+    unsaved = true;
+    bumpRewrite();
+    rebuildMipmaps();
+}
+
+// Applies fn to the selected channels only (the undo step stores those).
 void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
                             std::function<float (float, int, int)> fn, const std::vector<int>* chans,
                             const juce::String& description)
 {
-    if (!eng.buffer) return;
-    samples = samples.getIntersectionWith ({ 0, eng.totalSamples });
-    if (samples.getLength() <= 0) return;
-
-    // Build the replacement data first (read-only access to the buffer).
-    std::vector<std::vector<float>> newData (eng.numChannels());
-    for (int ch = 0; ch < eng.numChannels(); ++ch)
+    eng.processInPlace (samples, chans, description, [&fn] (float* d, int64_t b, int64_t e, int64_t len)
     {
-        const float* src = eng.buffer->getReadPointer (ch, (int) samples.getStart());
-        newData[ch].resize ((size_t) samples.getLength());
-        if (channelAffected (chans, ch))
-            for (int64_t i = 0; i < samples.getLength(); ++i)
-                newData[ch][i] = fn (src[i], (int) i, (int) samples.getLength());
-        else
-            std::copy (src, src + samples.getLength(), newData[ch].data()); // unchanged copy
-    }
-
-    // Record the patch BEFORE touching the buffer so oldData is pristine.
-    recordReplace (eng, samples, newData, description);
-
-    for (int ch = 0; ch < eng.numChannels(); ++ch)
-        if (channelAffected (chans, ch))
-            std::copy (newData[ch].data(), newData[ch].data() + samples.getLength(),
-                      eng.buffer->getWritePointer (ch, (int) samples.getStart()));
-
-    eng.unsaved = true;
-    eng.bumpRewrite();
-    eng.rebuildMipmaps();
+        for (int64_t i = b; i < e; ++i)
+            d[i] = fn (d[i], (int) i, (int) len);
+    });
 }
 
 bool AudioEngine::ensureEditable (std::string* errOut,
@@ -1736,10 +1790,12 @@ bool AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector
     if (!ensureEditable (errOut)) return false;
     try
     {
-        applyPerSample (*this, samples, [] (float v, int i, int len)
+        processInPlace (samples, chans, "Faded in", [] (float* d, int64_t b, int64_t e, int64_t len)
         {
-            return v * (float) i / (float) std::max (1, len - 1);
-        }, chans, "Faded in");
+            const float k = 1.0f / (float) std::max<int64_t> (1, len - 1);
+            for (int64_t i = b; i < e; ++i)
+                d[i] *= (float) i * k;
+        });
     }
     catch (const std::bad_alloc&)
     {
@@ -1754,10 +1810,12 @@ bool AudioEngine::fadeOutSamples (juce::Range<int64_t> samples, const std::vecto
     if (!ensureEditable (errOut)) return false;
     try
     {
-        applyPerSample (*this, samples, [] (float v, int i, int len)
+        processInPlace (samples, chans, "Faded out", [] (float* d, int64_t b, int64_t e, int64_t len)
         {
-            return v * (1.0f - (float) i / (float) std::max (1, len - 1));
-        }, chans, "Faded out");
+            const float k = 1.0f / (float) std::max<int64_t> (1, len - 1);
+            for (int64_t i = b; i < e; ++i)
+                d[i] *= 1.0f - (float) i * k;
+        });
     }
     catch (const std::bad_alloc&)
     {
@@ -1773,14 +1831,20 @@ bool AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
     samples = samples.getIntersectionWith ({ 0, totalSamples });
     if (samples.getLength() <= 0) return true;   // nothing to normalize
 
-    // Peak is measured over the selected channels only.
+    // Peak is measured over the selected channels only (in parallel chunks).
     float peak = 0.0f;
     for (int ch = 0; ch < nchans; ++ch)
     {
         if (!channelAffected (chans, ch)) continue;
         const float* d = buffer->getReadPointer (ch, (int) samples.getStart());
-        for (int64_t i = 0; i < samples.getLength(); ++i)
-            peak = std::max (peak, std::abs (d[i]));
+        std::mutex peakLock;   // taken once per chunk
+        sc::par::forRange (samples.getLength(), [&] (int64_t b, int64_t e)
+        {
+            float m = 0.0f;
+            for (int64_t i = b; i < e; ++i) m = std::max (m, std::abs (d[i]));
+            const std::lock_guard<std::mutex> l (peakLock);
+            peak = std::max (peak, m);
+        });
     }
     if (peak <= 0.0f)
         return true;   // already at target - not an error
@@ -1788,8 +1852,10 @@ bool AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
     const float g = target / peak;
     try
     {
-        applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
-                       "Normalized");
+        processInPlace (samples, chans, "Normalized", [g] (float* d, int64_t b, int64_t e, int64_t)
+        {
+            for (int64_t i = b; i < e; ++i) d[i] *= g;
+        });
     }
     catch (const std::bad_alloc&)
     {
@@ -1809,10 +1875,14 @@ bool AudioEngine::gainSamples (juce::Range<int64_t> samples, float gainDb,
     const float g = std::pow (10.0f, gainDb / 20.0f);
     try
     {
-        applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
-                       juce::String ("Changed gain by ")
-                           + juce::String (gainDb >= 0.0f ? "+" : "")
-                           + juce::String (gainDb, 2) + " dB");
+        processInPlace (samples, chans,
+                        juce::String ("Changed gain by ")
+                            + juce::String (gainDb >= 0.0f ? "+" : "")
+                            + juce::String (gainDb, 2) + " dB",
+                        [g] (float* d, int64_t b, int64_t e, int64_t)
+                        {
+                            for (int64_t i = b; i < e; ++i) d[i] *= g;
+                        });
     }
     catch (const std::bad_alloc&)
     {
@@ -1828,28 +1898,20 @@ bool AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
     samples = samples.getIntersectionWith ({ 0, totalSamples });
     if (samples.getLength() <= 0) return true;
 
-    // Only the selected channels are reversed; others keep their data.
+    // Only the selected channels are reversed, in place: chunk [b, e) of the
+    // first half swaps with its mirror in the second half.
     try
     {
-        std::vector<std::vector<float>> newData (nchans);
-        for (int ch = 0; ch < nchans; ++ch)
+        const int64_t len = samples.getLength();
+        recordInPlace (samples, affectedChannels (chans), "Reversed selection");   // BEFORE writing
+        for (int ch : affectedChannels (chans))
         {
             float* d = buffer->getWritePointer (ch, (int) samples.getStart());
-            const int64_t len = samples.getLength();
-            newData[ch].resize ((size_t) len);
-            if (channelAffected (chans, ch))
-                for (int64_t i = 0; i < len; ++i)
-                    newData[ch][i] = d[len - 1 - i];
-            else
-                std::copy (d, d + len, newData[ch].begin());
+            sc::par::forRange (len / 2, [d, len] (int64_t b, int64_t e)
+            {
+                for (int64_t i = b; i < e; ++i) std::swap (d[i], d[len - 1 - i]);
+            });
         }
-        // Record BEFORE writing so the patch captures the pre-reverse data.
-        recordReplace (*this, samples, newData, "Reversed selection");
-
-        for (int ch = 0; ch < nchans; ++ch)
-            if (channelAffected (chans, ch))
-                std::copy (newData[ch].begin(), newData[ch].end(),
-                           buffer->getWritePointer (ch, (int) samples.getStart()));
     }
     catch (const std::bad_alloc&)
     {
@@ -1932,25 +1994,12 @@ bool AudioEngine::eqFilterRange (juce::Range<int64_t> samples,
 
     try
     {
-        std::vector<std::vector<float>> newData ((size_t) nchans);
-        for (int ch = 0; ch < nchans; ++ch)
-        {
-            const float* d = buffer->getReadPointer (ch, (int) samples.getStart ());
-            newData[(size_t) ch].resize ((size_t) len);
-            if (channelAffected (chans, ch))
-            {
-                std::copy (d, d + len, newData[(size_t) ch].data ());
-                sc::eq::applyEq (newData[(size_t) ch].data (), (int) len, rate, pts);
-            }
-            else
-                std::copy (d, d + len, newData[(size_t) ch].begin ());   // unchanged copy
-        }
-
-        recordReplace (*this, samples, newData, "Filter EQ applied");
-        for (int ch = 0; ch < nchans; ++ch)
-            if (channelAffected (chans, ch))
-                std::copy (newData[(size_t) ch].data (), newData[(size_t) ch].data () + len,
-                          buffer->getWritePointer (ch, (int) samples.getStart ()));
+        // One version in the history; the filter runs in the buffer itself
+        // (sc::eq::applyEq splits its blocks over the cores).
+        const auto channels = affectedChannels (chans);
+        recordInPlace (samples, channels, "Filter EQ applied");
+        for (int ch : channels)
+            sc::eq::applyEq (buffer->getWritePointer (ch, (int) samples.getStart ()), (int) len, rate, pts);
     }
     catch (const std::bad_alloc&)
     {
@@ -1974,25 +2023,10 @@ bool AudioEngine::envelopeRange (juce::Range<int64_t> samples,
 
     try
     {
-        std::vector<std::vector<float>> newData ((size_t) nchans);
-        for (int ch = 0; ch < nchans; ++ch)
-        {
-            const float* d = buffer->getReadPointer (ch, (int) samples.getStart ());
-            newData[(size_t) ch].resize ((size_t) len);
-            if (channelAffected (chans, ch))
-            {
-                std::copy (d, d + len, newData[(size_t) ch].data ());
-                sc::env::applyEnvelope (newData[(size_t) ch].data (), (int) len, rate, pts);
-            }
-            else
-                std::copy (d, d + len, newData[(size_t) ch].begin ());   // unchanged copy
-        }
-
-        recordReplace (*this, samples, newData, "Envelope applied");
-        for (int ch = 0; ch < nchans; ++ch)
-            if (channelAffected (chans, ch))
-                std::copy (newData[(size_t) ch].data (), newData[(size_t) ch].data () + len,
-                          buffer->getWritePointer (ch, (int) samples.getStart ()));
+        const auto channels = affectedChannels (chans);
+        recordInPlace (samples, channels, "Envelope applied");
+        for (int ch : channels)
+            sc::env::applyEnvelope (buffer->getWritePointer (ch, (int) samples.getStart ()), (int) len, rate, pts);
     }
     catch (const std::bad_alloc&)
     {
@@ -2275,10 +2309,30 @@ bool AudioEngine::appendSamples (const juce::AudioBuffer<float>& append,
     return true;
 }
 
-bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
+bool AudioEngine::applyPatch (Patch& p, bool forward, bool rebuild)
 {
     if (!buffer)
         return false;
+
+    // An in-place step: swap its version with the buffer's (the same in both
+    // directions); no buffer is rebuilt and nothing is copied twice.
+    if (p.inPlace)
+    {
+        const int64_t len = p.oldEnd - p.oldStart;
+        if (p.oldStart < 0 || len < 0 || p.oldEnd > totalSamples || p.lengthDelta != 0
+            || p.swapChannels.size () != p.oldData.size ())
+            return false;
+        for (size_t i = 0; i < p.swapChannels.size (); ++i)
+            if (p.swapChannels[i] < 0 || p.swapChannels[i] >= nchans || (int64_t) p.oldData[i].size () != len)
+                return false;
+        for (size_t i = 0; i < p.swapChannels.size (); ++i)
+            sc::par::swapRanges (buffer->getWritePointer (p.swapChannels[i], (int) p.oldStart), p.oldData[i].data (), len);
+        juce::ignoreUnused (forward);
+        bumpRewrite();   // undo/redo changed the samples
+        if (rebuild)
+            rebuildMipmaps();
+        return true;
+    }
 
     const int64_t oldLen = p.oldEnd - p.oldStart;
     const int64_t newLen = p.newData.empty() ? 0 : (int64_t) p.newData[0].size();
@@ -2492,9 +2546,19 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
                 // write a file whose content changed shape mid-save.
                 const std::shared_lock<std::shared_mutex> bufLock (bufferMutex);
                 ok = buffer != nullptr && nchans == chans && totalSamples == frames;
-                for (int i = 0; ok && i < n; ++i)
-                    for (int ch = 0; ch < chans; ++ch)
-                        tmp[(size_t) i * chans + ch] = buffer->getReadPointer (ch, (int) pos)[i];
+                if (ok)
+                {
+                    // Interleave on the cores, the channel pointers taken once.
+                    std::vector<const float*> src ((size_t) chans);
+                    for (int ch = 0; ch < chans; ++ch) src[(size_t) ch] = buffer->getReadPointer (ch, (int) pos);
+                    float* dst = tmp.data();
+                    sc::par::forRange (n, [&src, dst, chans] (int64_t b, int64_t e)
+                    {
+                        for (int64_t i = b; i < e; ++i)
+                            for (int ch = 0; ch < chans; ++ch)
+                                dst[(size_t) i * chans + ch] = src[(size_t) ch][i];
+                    }, 1 << 16);
+                }
             }
             ok = ok && out->write (tmp.data(), tmp.size() * sizeof (float));
         }

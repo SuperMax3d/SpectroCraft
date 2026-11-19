@@ -1,5 +1,6 @@
 // SpectroCraft - Envelope (graphical amplitude-over-time effect).
 #include "Envelope.h"
+#include "Parallel.h"
 
 #include <cmath>
 #include <algorithm>
@@ -105,11 +106,15 @@ void applyEnvelope (float* data, int len, double rate, const std::vector<EnvPoin
 {
     if (data == nullptr || len <= 0 || rate <= 0.0) return;
 
-    for (int i = 0; i < len; ++i)
+    // Independent samples: chunks on the cores.
+    sc::par::forRange (len, [data, rate, &pts] (int64_t b, int64_t e)
     {
-        const double g = gainAt (pts, (double) i / rate);
-        data[(size_t) i] *= (float) std::pow (10.0, g * 0.05);
-    }
+        for (int64_t i = b; i < e; ++i)
+        {
+            const double g = gainAt (pts, (double) i / rate);
+            data[(size_t) i] *= (float) std::pow (10.0, g * 0.05);
+        }
+    });
 }
 
 juce::String serializePoints (const std::vector<EnvPoint>& pts)

@@ -1,7 +1,9 @@
 // SpectroCraft - Filter EQ (graphical curve equalizer).
 #include "FilterEQ.h"
+#include "Parallel.h"
 
 #include <cmath>
+#include <memory>
 #include <algorithm>
 
 namespace sc { namespace eq {
@@ -139,9 +141,11 @@ void applyEq (float* data, int len, double rate, const std::vector<EqPoint>& pts
         return;   // flat curve is the identity: stay bit-exact
 
     const int N = kFftSize;
-    juce::dsp::FFT fft ((int) std::log2 ((double) N));
     std::vector<float> hRe, hIm;
-    buildFilterFunction (pts, rate, fft, hRe, hIm);
+    {
+        juce::dsp::FFT fft ((int) std::log2 ((double) N));
+        buildFilterFunction (pts, rate, fft, hRe, hIm);
+    }
 
     // Overlap-add: hop L = N - (kFilterLen-1); each window's filtered output is
     // added over its full N-sample span, so consecutive windows overlap by
@@ -150,33 +154,68 @@ void applyEq (float* data, int len, double rate, const std::vector<EqPoint>& pts
     // `half` removes it (zero-phase result).
     const int L = N - (kFilterLen - 1);
     const int half = (kFilterLen - 1) / 2;
+    const int64 numBlocks = ((int64) len + L - 1) / L;
 
-    std::vector<float> out ((size_t) len + (size_t) N, 0.0f);
-    std::vector<float> win ((size_t) 2 * N, 0.0f);
+    // The output, zeroed on the cores (not by a single-threaded vector fill).
+    const int64 outLen = (int64) len + N;
+    std::unique_ptr<float[]> out (new float[(size_t) outLen]);
+    sc::par::forRange (outLen, [&out] (int64 b, int64 e) { std::fill (out.get () + b, out.get () + e, 0.0f); });
 
-    for (int64 start = 0; start < len; start += L)
+    // The blocks are independent: groups of consecutive blocks run on the
+    // cores and add straight into `out`, except where a group's last block
+    // runs into the next group's samples (N - L of them): that part goes to
+    // the group's `tail`, added afterwards. Only consecutive blocks overlap,
+    // so a sample gets at most two terms, and a + b == b + a: the result is
+    // the same, bit for bit, as one pass.
+    const int64 groups = std::max<int64> (1, std::min<int64> (sc::par::workers(), numBlocks / 16));
+    std::vector<std::vector<float>> tails ((size_t) groups);
+    sc::par::forRange (groups, [&] (int64 g0, int64 g1)
     {
-        const int wcopy = std::min (L, len - (int) start);
-        std::copy (data + start, data + start + wcopy, win.begin ());
-        std::fill (win.begin () + wcopy, win.begin () + N, 0.0f);
-        std::fill (win.begin () + N, win.end (), 0.0f);
-
-        fft.performRealOnlyForwardTransform (win.data (), true);
-        for (int i = 0; i <= N / 2; ++i)
+        juce::dsp::FFT fft ((int) std::log2 ((double) N));
+        std::vector<float> win ((size_t) 2 * N, 0.0f);
+        for (int64 g = g0; g < g1; ++g)
         {
-            const float re = win[(size_t) 2 * i];
-            const float im = win[(size_t) 2 * i + 1];
-            win[(size_t) 2 * i]     = re * hRe[(size_t) i] - im * hIm[(size_t) i];
-            win[(size_t) 2 * i + 1] = re * hIm[(size_t) i] + im * hRe[(size_t) i];
-        }
-        fft.performRealOnlyInverseTransform (win.data());
+            const int64 b0 = g * numBlocks / groups, b1 = (g + 1) * numBlocks / groups;
+            const int64 nextStart = (g + 1 < groups) ? b1 * L : outLen;   // first sample of the next group
+            auto& tail = tails[(size_t) g];
+            tail.assign ((size_t) N, 0.0f);
+            for (int64 b = b0; b < b1; ++b)
+            {
+                const int64 start = b * L;
+                const int wcopy = std::min (L, len - (int) start);
+                std::copy (data + start, data + start + wcopy, win.begin ());
+                std::fill (win.begin () + wcopy, win.begin () + N, 0.0f);
+                std::fill (win.begin () + N, win.end (), 0.0f);
 
-        const int64 limit = std::min<int64> ((int64) N, (int64) out.size () - start);
-        for (int j = 0; j < limit; ++j)
-            out[(size_t) (start + j)] += win[(size_t) j];
+                fft.performRealOnlyForwardTransform (win.data (), true);
+                for (int i = 0; i <= N / 2; ++i)
+                {
+                    const float re = win[(size_t) 2 * i];
+                    const float im = win[(size_t) 2 * i + 1];
+                    win[(size_t) 2 * i]     = re * hRe[(size_t) i] - im * hIm[(size_t) i];
+                    win[(size_t) 2 * i + 1] = re * hIm[(size_t) i] + im * hRe[(size_t) i];
+                }
+                fft.performRealOnlyInverseTransform (win.data());
+
+                const int64 limit = std::min<int64> ((int64) N, outLen - start);
+                for (int64 j = 0; j < limit; ++j)
+                {
+                    const int64 x = start + j;
+                    if (x < nextStart) out[(size_t) x] += win[(size_t) j];
+                    else tail[(size_t) (x - nextStart)] += win[(size_t) j];
+                }
+            }
+        }
+    }, 1);
+    for (int64 g = 0; g + 1 < groups; ++g)
+    {
+        const int64 nextStart = ((g + 1) * numBlocks / groups) * L;
+        const auto& tail = tails[(size_t) g];
+        for (int64 j = 0; j < N && nextStart + j < outLen; ++j)
+            out[(size_t) (nextStart + j)] += tail[(size_t) j];
     }
 
-    std::copy (out.begin () + half, out.begin () + half + len, data);
+    sc::par::copy (out.get () + half, data, len);
 }
 
 const std::vector<EqPreset>& presets()

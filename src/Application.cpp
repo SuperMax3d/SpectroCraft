@@ -5051,8 +5051,9 @@ void Application::undoSteps (int n)
     int done = 0;
     while (done < n)
     {
-        Patch p;
-        if (!d->undo.popUndo (p)) break;
+        Patch* pp = d->undo.popUndo ();   // moved to the redo stack, not copied
+        if (pp == nullptr) break;
+        Patch& p = *pp;
         if (!d->engine.applyPatch (p, false, /*rebuild=*/false))
         {
             // The patch was already moved to the other stack but the buffer
@@ -5087,8 +5088,9 @@ void Application::redoSteps (int n)
     int done = 0;
     while (done < n)
     {
-        Patch p;
-        if (!d->undo.popRedo (p)) break;
+        Patch* pp = d->undo.popRedo ();
+        if (pp == nullptr) break;
+        Patch& p = *pp;
         if (!d->engine.applyPatch (p, true, /*rebuild=*/false))
         {
             // The patch was already moved to the other stack but the buffer
