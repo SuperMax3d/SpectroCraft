@@ -131,8 +131,8 @@ static void testAeRecordingAppendStorage()
     // An edit swaps in an owned buffer; undo restores; appending resumes.
     CHECK (eng.deleteSamples ({ 1000, 3000 }), "rec: delete during the document's life");
     CHECK (eng.numSamples () == written - 2000, "rec: delete shortened the document");
-    ::Patch p;
-    CHECK (um.popUndo (p) && eng.applyPatch (p, false), "rec: undo the delete");
+    ::Patch* p = nullptr;
+    CHECK ((p = um.popUndo ()) != nullptr && eng.applyPatch (*p, false), "rec: undo the delete");
     CHECK (eng.numSamples () == written && contentOk (0, written), "rec: undo restored content");
     CHECK (appendTicks (50), "rec: appends after an edit succeed");
     CHECK (eng.numSamples () == written && contentOk (0, written), "rec: content intact after re-growth");
@@ -314,10 +314,10 @@ static void testAeRejectInconsistentPatches()
         return t == 0.5f;
     };
     CHECK (eng.numChannels () == 3 && newChannelSilent (), "W18: new channel silent before the append");
-    ::Patch p;
-    CHECK (um.popUndo (p) && eng.applyPatch (p, false), "W18: undo the append");
+    ::Patch* p = nullptr;
+    CHECK ((p = um.popUndo ()) != nullptr && eng.applyPatch (*p, false), "W18: undo the append");
     CHECK (eng.numChannels () == 2 && eng.numSamples () == 1000, "W18: undo restored the shape");
-    CHECK (um.popRedo (p) && eng.applyPatch (p, true), "W18: redo the append");
+    CHECK ((p = um.popRedo ()) != nullptr && eng.applyPatch (*p, true), "W18: redo the append");
     CHECK (eng.numChannels () == 3 && newChannelSilent (), "W18: redo keeps the new channel silent");
 }
 
@@ -462,10 +462,10 @@ static void testAeContentVersionFollowsEdits ()
            "content version: an in-place edit (same length) bumps");
 
     v = eng.contentVersion ();
-    ::Patch p;
-    CHECK (um.popUndo (p) && eng.applyPatch (p, false) && eng.contentVersion () > v, "content version: undo bumps");
+    ::Patch* p = nullptr;
+    CHECK ((p = um.popUndo ()) != nullptr && eng.applyPatch (*p, false) && eng.contentVersion () > v, "content version: undo bumps");
     v = eng.contentVersion ();
-    CHECK (um.popRedo (p) && eng.applyPatch (p, true) && eng.contentVersion () > v, "content version: redo bumps");
+    CHECK ((p = um.popRedo ()) != nullptr && eng.applyPatch (*p, true) && eng.contentVersion () > v, "content version: redo bumps");
 
     v = eng.contentVersion ();
     CHECK (eng.deleteSamples ({ 0, 10 }, &err) && eng.contentVersion () > v, "content version: delete bumps");

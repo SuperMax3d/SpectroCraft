@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <mutex>
 #include <optional>
+#include <algorithm>
 
 /** Who is editing (AI control journal): the operation context stamped onto
     the next recorded Patch. A scope on the current thread (control commands
@@ -86,6 +87,28 @@ class UndoManager
 public:
     static constexpr size_t kMaxLevels = 64;
 
+    /** The history's memory budget: a quarter of the RAM, between 512 MB and
+        8 GB. Past it the oldest steps are dropped (the newest one is always
+        kept), so a few whole-file edits on a long recording do not push the
+        machine into swap. */
+    static int64_t defaultByteBudget()
+    {
+        const int64_t ramMb = (int64_t) juce::SystemStats::getMemorySizeInMegabytes();
+        return std::clamp<int64_t> (ramMb / 4, 512, 8192) * 1024 * 1024;
+    }
+    void setByteBudget (int64_t bytes) { budget = std::max<int64_t> (0, bytes); trimToBudget(); }
+    int64_t byteBudget() const noexcept { return budget; }
+    /** Audio bytes held by both stacks. */
+    int64_t bytesHeld() const
+    {
+        int64_t b = 0;
+        for (const auto& p : undoStack) b += p.audioBytes();
+        for (const auto& p : redoStack) b += p.audioBytes();
+        return b;
+    }
+    /** Steps dropped to stay within the budget since the last clear. */
+    int64_t droppedForMemory() const noexcept { return dropped; }
+
     void record (Patch&& p)
     {
         p.seq = nextSeq++;
@@ -95,6 +118,7 @@ public:
         redoStack.clear();
         if (undoStack.size() > kMaxLevels)
             undoStack.pop_front();
+        trimToBudget();
     }
 
     bool canUndo() const { return !undoStack.empty(); }
@@ -112,27 +136,28 @@ public:
     size_t redoSize() const { return redoStack.size(); }
     const Patch& redoAt (size_t i) const { return redoStack[(size_t) i]; }
 
-    bool popUndo (Patch& out)
+    /** Moves the most recent step to the redo stack and returns it there
+        (nullptr when there is none). No copy is made: apply the returned
+        step (AudioEngine::applyPatch) - an in-place step swaps its samples
+        with the buffer, so the step kept for redo must be the one applied. */
+    Patch* popUndo()
     {
-        if (undoStack.empty()) return false;
-        Patch p = std::move (undoStack.back());
+        if (undoStack.empty()) return nullptr;
+        redoStack.push_back (std::move (undoStack.back()));
         undoStack.pop_back();
-        redoStack.push_back (p); // keep a copy for redo
-        out = std::move (p);
-        return true;
+        return &redoStack.back();   // a deque keeps references on push_back
     }
 
-    bool popRedo (Patch& out)
+    /** The same towards the undo stack. */
+    Patch* popRedo()
     {
-        if (redoStack.empty()) return false;
-        Patch p = std::move (redoStack.back());
+        if (redoStack.empty()) return nullptr;
+        undoStack.push_back (std::move (redoStack.back()));
         redoStack.pop_back();
-        undoStack.push_back (p); // keep a copy for undo
-        out = std::move (p);
-        return true;
+        return &undoStack.back();
     }
 
-    void clear() { undoStack.clear(); redoStack.clear(); ++clears; }
+    void clear() { undoStack.clear(); redoStack.clear(); dropped = 0; ++clears; }
 
     /** Sequence number the next recorded patch will get (journal polling). */
     int64_t peekNextSeq() const { return nextSeq; }
@@ -142,5 +167,16 @@ public:
 private:
     int64_t nextSeq = 1;
     int64_t clears = 0;
+    int64_t budget = defaultByteBudget();
+    int64_t dropped = 0;
     std::deque<Patch> undoStack, redoStack;
+
+    void trimToBudget()
+    {
+        while (undoStack.size() > 1 && bytesHeld() > budget)
+        {
+            undoStack.pop_front();
+            ++dropped;
+        }
+    }
 };

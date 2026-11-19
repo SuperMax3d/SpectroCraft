@@ -806,13 +806,27 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     changes replace the whole file and are not undoable (like Resample).
   - The work runs on a worker thread behind a progress dialog with cancel;
     multi-GB files stream through in chunks and never load fully into RAM.
-- **Edits** with 50-level undo/redo (patch-based: old/new sample data + length
-  delta — memory efficient): silence, fade in/out, normalize, reverse, gain,
-  cut/copy/paste, delete, insert. The destructive effects (silence/fade/
-  normalize/reverse/gain) apply **only to the currently selected (visible)
-  channels** — e.g. with only Channel 2 visible, a fade never touches the
-  other tracks; undo restores every channel exactly (patches capture the old
-  data *before* the in-place modification).
+- **Edits** with up to 64 levels of undo/redo (patch-based: the samples of
+  the edited region and the length delta): silence, fade in/out, normalize,
+  reverse, gain, cut/copy/paste, delete, insert. The destructive effects
+  (silence/fade/normalize/reverse/gain) apply **only to the currently
+  selected (visible) channels** — e.g. with only Channel 2 visible, a fade
+  never touches the other tracks; undo restores every channel exactly
+  (patches capture the old data *before* the in-place modification).
+  - An edit that keeps the length (gain, normalize, fades, reverse, EQ,
+    envelope, silence, ...) is kept as **one** version of the channels it
+    changed: undo and redo swap it with the audio in place, without
+    rebuilding the file. On a 10-minute stereo file, a whole-file gain takes
+    about 35 ms, and an undo about 20 ms (they took 470 and 480 ms before).
+    Each step holds one copy of the region, not two.
+  - The history has a **memory budget**: a quarter of the RAM, between 512 MB
+    and 8 GB. Past it, the oldest steps are dropped (the newest one always
+    stays), so whole-file edits on a long recording cannot push the machine
+    into swap.
+  - The sample loops of the edits (gain, normalize, fades, reverse, EQ,
+    envelope), the undo swaps and the interleaving of a save run on every
+    core (`include/Parallel.h`); the EQ gives the same samples, bit for bit,
+    on one core or many.
 - **Time-anchored state follows every length-changing edit**: everything that
   references file time is remapped inside the same undo step as the audio —
   markers, named saved spectral selections (Selection panel), the active
@@ -2866,7 +2880,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with six example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
-| `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
+| `UndoManager` / `UndoPatch` | Undo/redo stacks (64 levels, a memory budget) of compact patches instead of full snapshots: a same-length edit keeps one version and swaps it with the audio (`Patch::inPlace`); the stacks move patches, never copy them. |
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, data tables (with their alignment/transform state), axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
 | `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (comma/tab separated, quoted fields, CRLF, boolean cells, first-column-text transpose, time-column auto-detection with duration-based start shift, scattered-gap interpolation, text-only column drop), remove-only downsample decimation, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, document-time normalized cross-correlation auto-align lag (idempotent), and the JSON serialise/parse used by `FileMeta`. |

@@ -59,6 +59,23 @@ struct Patch
     std::vector<std::vector<float>> oldData;  // per-channel data that was removed (for undo)
     std::vector<std::vector<float>> newData;  // per-channel data that was inserted (for redo)
     int64_t lengthDelta = 0;                  // newTotal - oldTotal
+    /** A same-length edit kept as ONE version (undo memory): undo and redo
+        swap oldData with the buffer's [oldStart, oldEnd) instead of storing
+        both the old and the new samples. oldData then holds, for each
+        channel of swapChannels, the version that is not in the buffer (the
+        old samples while the step is done, the new ones once it is undone);
+        newData stays empty and channels the edit left alone are not stored. */
+    bool inPlace = false;
+    std::vector<int> swapChannels;
+
+    /** Bytes of audio the step holds (the undo history's memory budget). */
+    int64_t audioBytes() const
+    {
+        int64_t b = 0;
+        for (const auto& c : oldData) b += (int64_t) c.size() * (int64_t) sizeof (float);
+        for (const auto& c : newData) b += (int64_t) c.size() * (int64_t) sizeof (float);
+        return b;
+    }
     // Channel-count change carried by this patch (both zero => unchanged).
     // Used by edits that add or remove channels, e.g. "Paste to New
     // Channel(s)" adds the clipboard's channels: newData then has one entry
