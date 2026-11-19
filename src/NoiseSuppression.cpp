@@ -4,6 +4,7 @@
 
 #include "AI/DenseUnetModel.h"
 #include "AI/DeepFilter.h"
+#include "AI/ModelCache.h"
 #include "AI/ModelManager.h"
 #include "AI/OvRuntime.h"
 #include "Resampler.h"
@@ -13,32 +14,26 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
-#include <map>
-#include <mutex>
 
 namespace sc {
 
 namespace {
 
-// Compiled models are cached per (modelId, device): the first compile takes
-// 10–30 s; re-applying the effect afterwards should start instantly.
-std::map<std::string, std::unique_ptr<ai::DenseUnetModel>>& modelCache()
+// One compiled model is cached per kind, keyed by (modelId, device): the
+// first compile takes 10-30 s, so re-applying the effect afterwards should
+// start instantly. Only one is kept and it is freed after a few idle minutes
+// (ModelCache).
+ai::ModelCache<ai::DenseUnetModel>& modelCache()
 {
 #if defined(_WIN32)
-    static std::map<std::string, std::unique_ptr<ai::DenseUnetModel>> cache;
+    static ai::ModelCache<ai::DenseUnetModel> cache;
     return cache;
 #else
     // Never destroyed, like the ov::Core (see OvRuntime::instance): compiled
     // models released at exit would call into an already finalised plugin.
-    static auto* cache = new std::map<std::string, std::unique_ptr<ai::DenseUnetModel>> ();
+    static auto* cache = new ai::ModelCache<ai::DenseUnetModel> ();
     return *cache;
 #endif
-}
-
-std::mutex& modelCacheMutex()
-{
-    static std::mutex m;
-    return m;
 }
 
 bool report(std::function<bool(float)>& p, float v)
@@ -58,26 +53,17 @@ bool failFromException(std::string* errOut, const std::string& device, const cha
     return false;
 }
 
-ai::DenseUnetModel* getCachedModel(const std::string& modelId, const std::string& device,
-                                   const juce::File& xmlPath, std::string* errOut)
+std::shared_ptr<ai::DenseUnetModel> getCachedModel(const std::string& modelId, const std::string& device,
+                                                   const juce::File& xmlPath, std::string* errOut)
 {
-    const std::string key = modelId + ":" + device;
-    {
-        std::lock_guard<std::mutex> lock (modelCacheMutex());
-        auto it = modelCache().find (key);
-        if (it != modelCache().end()) return it->second.get();
-    }
-
-    auto model = std::make_unique<ai::DenseUnetModel>();
-    if (!model->load (xmlPath.getFullPathName ().toStdString (), device, errOut))
-        return nullptr;
-
-    // Another thread may have cached the same key meanwhile: keep that
-    // instance (it may be in use) and drop ours instead of replacing it.
-    std::lock_guard<std::mutex> lock (modelCacheMutex());
-    auto& slot = modelCache()[key];
-    if (!slot) slot = std::move (model);
-    return slot.get();
+    return modelCache().acquire (modelId + ":" + device,
+        [&] (std::string* err) -> std::unique_ptr<ai::DenseUnetModel>
+        {
+            auto model = std::make_unique<ai::DenseUnetModel>();
+            if (!model->load (xmlPath.getFullPathName ().toStdString (), device, err)) return nullptr;
+            return model;
+        },
+        errOut);
 }
 
 } // namespace
@@ -136,7 +122,8 @@ static bool runDenseUnetPipelineImpl(const std::string& modelId, const std::stri
         xmlUrl.substr (xmlUrl.find_last_of ('/') + 1));
     if (!report (onProgress, 0.18f)) return false;
 
-    ai::DenseUnetModel* model = getCachedModel (modelId, device, xmlPath, &installErr);
+    const auto model = getCachedModel (   // kept alive for the whole run
+        modelId, device, xmlPath, &installErr);
     if (!model)
         return fail ("failed to load model: " + installErr);
     const double mRate = (double) model->sampleRate();
@@ -201,38 +188,30 @@ static bool runDenseUnetPipelineImpl(const std::string& modelId, const std::stri
 // DeepFilterNet2/3 pipeline (Phase 2).
 // ---------------------------------------------------------------------------
 
-std::map<std::string, std::unique_ptr<ai::DeepFilter>>& dfModelCache()
+ai::ModelCache<ai::DeepFilter>& dfModelCache()
 {
 #if defined(_WIN32)
-    static std::map<std::string, std::unique_ptr<ai::DeepFilter>> cache;
+    static ai::ModelCache<ai::DeepFilter> cache;
     return cache;
 #else
     // Never destroyed (see modelCache above).
-    static auto* cache = new std::map<std::string, std::unique_ptr<ai::DeepFilter>> ();
+    static auto* cache = new ai::ModelCache<ai::DeepFilter> ();
     return *cache;
 #endif
 }
 
-ai::DeepFilter* getCachedDfModel(const std::string& modelId, const std::string& device,
-                                 const juce::File& folder, ai::DeepFilterNetModel::Selection sel,
-                                 std::string* errOut)
+std::shared_ptr<ai::DeepFilter> getCachedDfModel(const std::string& modelId, const std::string& device,
+                                                 const juce::File& folder, ai::DeepFilterNetModel::Selection sel,
+                                                 std::string* errOut)
 {
-    const std::string key = modelId + ":" + device;
-    {
-        std::lock_guard<std::mutex> lock (modelCacheMutex());
-        auto it = dfModelCache().find (key);
-        if (it != dfModelCache().end()) return it->second.get();
-    }
-
-    auto model = std::make_unique<ai::DeepFilter>();
-    if (!model->load (folder.getFullPathName ().toStdString (), device, sel, errOut))
-        return nullptr;
-
-    // Keep an instance another thread may already have cached (and be using).
-    std::lock_guard<std::mutex> lock (modelCacheMutex());
-    auto& slot = dfModelCache()[key];
-    if (!slot) slot = std::move (model);
-    return slot.get();
+    return dfModelCache().acquire (modelId + ":" + device,
+        [&] (std::string* err) -> std::unique_ptr<ai::DeepFilter>
+        {
+            auto model = std::make_unique<ai::DeepFilter>();
+            if (!model->load (folder.getFullPathName ().toStdString (), device, sel, err)) return nullptr;
+            return model;
+        },
+        errOut);
 }
 
 static bool runDeepFilterPipelineImpl(const std::string& modelId, const std::string& device,
@@ -290,7 +269,8 @@ static bool runDeepFilterPipelineImpl(const std::string& modelId, const std::str
     const juce::File folder = mm.dirFor (spec->id);
     if (!report (onProgress, 0.18f)) return false;
 
-    ai::DeepFilter* model = getCachedDfModel (modelId, device, folder, sel, &installErr);
+    const auto model = getCachedDfModel (   // kept alive for the whole run
+        modelId, device, folder, sel, &installErr);
     if (!model)
         return fail ("failed to load model: " + installErr);
     const double mRate = (double) ai::DeepFilter::kModelRate;   // 48 kHz

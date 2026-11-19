@@ -123,8 +123,10 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   so a custom shortcut cannot take it). Test "toolbar: tools, shortcuts 1-9 (#43)".
 - Undo and speed: a same-length edit records an in-place patch (`AudioEngine::recordInPlace`,
   `Patch::inPlace`: one version, swapped by `applyPatch`); `UndoManager::popUndo` / `popRedo`
-  return the patch now on the other stack (apply that one, never a copy); the history has a byte
-  budget. Long sample loops use `sc::par::forRange` (`include/Parallel.h`). Timings:
+  return the patch now on the other stack (apply that one, never a copy); the histories share one byte
+  budget across documents (`UndoManager::globalByteBudget`, oldest step first). Loaded AI models are
+  held by `sc::ai::ModelCache` (`include/AI/ModelCache.h`): one per kind, freed after 5 idle minutes.
+  Long sample loops use `sc::par::forRange` (`include/Parallel.h`). Timings:
   `SC_BENCH=1 SC_TEST_FILTER=bench` (optional `SC_BENCH_MINUTES`), meaningful in a Release build.
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as

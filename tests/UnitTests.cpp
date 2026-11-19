@@ -19,6 +19,7 @@
 #include "SpectralEngine.h"
 #include "MarkerManager.h"
 #include "UndoManager.h"
+#include "AI/ModelCache.h"
 #include "Settings.h"
 #include "PngWriter.h"
 #include "SpectralView.h"
@@ -24975,6 +24976,68 @@ static void testUndoInPlaceAndParallel()
         CHECK (um.undoSize () == 1, "budget: the newest step always stays");
         CHECK (::UndoManager::defaultByteBudget () >= (int64_t) 512 * 1024 * 1024, "budget: at least 512 MB by default");
     }
+
+    // One budget for all documents: the oldest step across them goes first,
+    // and each history keeps its newest step.
+    {
+        const int64_t step = 100000 * (int64_t) sizeof (float);
+        std::vector<std::vector<float>> data (1, std::vector<float> (100000, 0.5f));
+        AudioEngine engA, engB;
+        ::UndoManager umA, umB;
+        engA.setUndoManager (&umA);
+        engB.setUndoManager (&umB);
+        CHECK (engA.initNew (1, 48000.0, &data) && engB.initNew (1, 48000.0, &data), "global budget: documents");
+        for (int i = 0; i < 3; ++i) engA.gainSamples ({ 0, 100000 }, -1.0f, nullptr);   // A: the older steps
+        for (int i = 0; i < 2; ++i) engB.gainSamples ({ 0, 100000 }, -1.0f, nullptr);
+        CHECK (umA.undoSize () == 3 && umB.undoSize () == 2, "global budget: 5 steps recorded");
+        const std::vector<::UndoManager*> both { &umA, &umB };
+        CHECK (::UndoManager::trimGroupToBudget (both, 3 * step) == 2
+                   && umA.undoSize () == 1 && umB.undoSize () == 2 && umA.droppedForMemory () == 2,
+               "global budget: the other document's older steps go first ("
+                   + juce::String ((int) umA.undoSize ()) + ", " + juce::String ((int) umB.undoSize ()) + ")");
+        CHECK (::UndoManager::trimGroupToBudget (both, 1) == 1 && umA.undoSize () == 1 && umB.undoSize () == 1,
+               "global budget: each document keeps its newest step");
+        CHECK (::UndoManager::globalByteBudget () > 0 && ::UndoManager::bytesHeldByAll () >= 2 * step,
+               "global budget: totals over every history");
+    }
+
+    // AI model cache: one model at a time, never released while in use.
+    {
+        struct Model
+        {
+            explicit Model (int& n) : live (n) { ++live; }
+            ~Model() { --live; }
+            int& live;
+        };
+        int live = 0, loads = 0;
+        sc::ai::ModelCache<Model> cache;
+        cache.setIdleMsForTests (1000);
+        auto loader = [&] (std::string*) { ++loads; return std::make_unique<Model> (live); };
+        std::string err;
+        auto a = cache.acquire ("a", loader, &err);
+        CHECK (a != nullptr && live == 1 && loads == 1 && cache.holds ("a"), "model cache: loads");
+        CHECK (cache.acquire ("a", loader, &err) == a && loads == 1, "model cache: reuses the loaded model");
+        auto b = cache.acquire ("b", loader, &err);   // a is in use: it survives until released
+        CHECK (b != nullptr && cache.holds ("b") && ! cache.holds ("a") && live == 2, "model cache: one model kept");
+        a.reset ();
+        CHECK (live == 1, "model cache: the replaced model is freed after its run");
+        const int64_t t0 = juce::Time::currentTimeMillis ();
+        CHECK (! cache.releaseIfIdle (t0 + 5000) && live == 1,
+               "model cache: not released while in use");   // idle time counted from t0 + 5 s
+        b.reset ();
+        CHECK (! cache.releaseIfIdle (t0 + 5500) && live == 1, "model cache: kept while recent");
+        CHECK (cache.releaseIfIdle (t0 + 6500) && live == 0 && cache.empty (),
+               "model cache: released once idle");
+        auto c = cache.acquire ("c", loader, &err);
+        b = cache.acquire ("b", loader, &err);   // c is in use
+        c.reset ();
+        b.reset ();
+        CHECK (cache.acquire ("c", loader, &err) != nullptr && live == 1 && cache.holds ("c"),
+               "model cache: an unused model is released before loading another");
+        CHECK (cache.acquire ("x", [] (std::string* e) { *e = "boom"; return std::unique_ptr<Model> (); }, &err) == nullptr
+                   && err == "boom",
+               "model cache: load errors are reported");
+    }
 }
 
 static void testMainToolbar()
@@ -31919,7 +31982,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
     SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
-    SC_RUN_TEST ("undo in place, history budget, parallel loops", testUndoInPlaceAndParallel);
+    SC_RUN_TEST ("undo in place, history budgets, parallel loops, AI model cache", testUndoInPlaceAndParallel);
     SC_RUN_TEST ("bench: performance timings (SC_BENCH=1 only)", testPerformanceBench);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
