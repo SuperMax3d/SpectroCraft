@@ -105,7 +105,7 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `AudioEngine::setPlaybackRoutes` (set by `FileDoc::applySessionSaveRegion`). While a session is open the
   engine holds the composite and `AudioEngine::setSaveRegion` limits every save to the main
   file's region. Behaviour and limits: `docs/sessions.md`, tests `tests/regression/sessions.inc`.
-- Model panel (issue #40; Window > Model, closed in the built-in workspaces): the sound model is
+- Model panel (issue #40; Window > Model, a tab next to Tables in the default workspace since #51): the sound model is
   `include/SoundModel.h` + `src/SoundModel.cpp` (analysis, synthesis, JSON; no UI dependency),
   kept in `FileDoc::soundModel` (metadata key `soundModel`), driven by `src/ApplicationModel.cpp`
   (`Application::analyseModel` / `compareModel` / `renderModelSelection` / `renderModelCsv` /

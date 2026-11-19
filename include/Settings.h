@@ -54,6 +54,7 @@ enum ContextMenuIDs : int
     CtxSessionAddTrack    = 40,
     CtxSessionRemoveFile  = 41,   // the referenced file under the mouse
     CtxSessionRemoveTrack = 42,   // the empty track under the mouse
+    CtxTableFromSpectralSel = 43, // spectrogram: Tables > Table from Spectral Selection (issue #51)
     CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
     CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };

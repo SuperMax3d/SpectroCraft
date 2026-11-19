@@ -915,6 +915,7 @@ juce::var serialiseTables (const std::vector<TableData>& tables, int mode)
     {
         auto to = new juce::DynamicObject();
         to->setProperty ("name", t.name);
+        if (t.comment.isNotEmpty()) to->setProperty ("comment", t.comment);
         if (!t.visible)      to->setProperty ("hidden", 1);
         // Tables carry no colour of their own - only the parameters do.
         to->setProperty ("rate", t.sampleRate);
@@ -926,6 +927,7 @@ juce::var serialiseTables (const std::vector<TableData>& tables, int mode)
         {
             auto po = new juce::DynamicObject();
             po->setProperty ("name", p.name);
+            if (p.comment.isNotEmpty()) po->setProperty ("comment", p.comment);
             if (!p.visible)      po->setProperty ("hidden", 1);
             po->setProperty ("colour", p.colorIndex % 12);
             po->setProperty ("target", p.alignTarget);
@@ -978,6 +980,7 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
         // This JUCE build's var has no getIntValue/getDoubleValue: use the
         // implicit conversion operators instead.
         t.name       = tp.getWithDefault ("name", "").toString();
+        t.comment    = tp.getWithDefault ("comment", "").toString();
         t.visible    = static_cast<int> (tp.getWithDefault ("hidden", 0)) == 0;
         // Older metadata may carry a table-level "colour": it is ignored now.
         t.sampleRate = std::max (1e-9, static_cast<double> (tp.getWithDefault ("rate", 1000.0)));
@@ -996,6 +999,7 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
             ParamData p;
             const auto& pp = po->getProperties();
             p.name       = pp.getWithDefault ("name", "").toString();
+            p.comment    = pp.getWithDefault ("comment", "").toString();
             p.visible    = static_cast<int> (pp.getWithDefault ("hidden", 0)) == 0;
             p.colorIndex = std::max (0, static_cast<int> (pp.getWithDefault ("colour", 0))) % 12;
             p.alignTarget = std::clamp (static_cast<int> (pp.getWithDefault ("target", 0)), 0, 2);

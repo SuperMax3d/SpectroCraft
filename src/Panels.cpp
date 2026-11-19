@@ -10769,7 +10769,7 @@ void TablesPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int column
                                                         14.0f, 12.0f),
                                 2.0f);
     }
-    else   // name; parameters are indented under their table
+    else if (columnId == 3)   // name; parameters are indented under their table
     {
         const juce::String name = isTable ? t.name
                                           : (ref.paramIdx < (int) t.params.size()
@@ -10856,9 +10856,20 @@ TablesPanel::TablesPanel (Application& appIn)
 {
     auto& header = table.getHeader ();
     const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    // Colour, Name and Comment can be resized by dragging the header edges,
+    // and start wider than they used to (issue #51); the widths are kept.
+    const int sizeFlags = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::resizable;
     header.addColumn ("Show", 1, 40, 30, -1, fixedFlags);
-    header.addColumn ("Colour", 2, 56, 30, -1, fixedFlags);
-    header.addColumn ("Name", 3, 120, 40, -1, fixedFlags);
+    header.addColumn ("Colour", 2, 64, 36, 200, sizeFlags);
+    header.addColumn ("Name", 3, 170, 50, -1, sizeFlags);
+    header.addColumn ("Comment", 4, 160, 40, -1, sizeFlags);
+    if (app.recentStore != nullptr)
+    {
+        const auto saved = juce::StringArray::fromTokens (app.recentStore->getValue ("tables_column_widths"), ",", "");
+        for (int c = 2; c <= 4 && c - 1 < saved.size(); ++c)
+            if (saved[c - 1].getIntValue() > 0)
+                header.setColumnWidth (c, saved[c - 1].getIntValue());
+    }
 
     // Item id = display mode + 1; the default mode comes first (issue #25).
     modeCombo.setComponentID ("tables-mode-combo");
@@ -10938,6 +10949,101 @@ TablesPanel::TablesPanel (Application& appIn)
 TablesPanel::~TablesPanel()
 {
     stopTimer();   // never let the colour-cycle callback outlive the panel
+    if (app.recentStore != nullptr)
+    {
+        app.recentStore->setValue ("tables_column_widths", columnWidths());
+        app.recentStore->saveIfNeeded();
+    }
+}
+
+juce::String TablesPanel::columnWidths() const
+{
+    auto& header = const_cast<juce::TableListBox&> (table).getHeader ();
+    juce::StringArray w;
+    for (int c = 1; c <= 4; ++c)
+        w.add (juce::String (header.getColumnWidth (c)));
+    return w.joinIntoString (",");
+}
+
+juce::String TablesPanel::commentForRow (int row) const
+{
+    auto* d = app.doc ();
+    if (d == nullptr || row < 0 || row >= (int) rows_.size ()) return {};
+    const auto ref = rows_[(size_t) row];
+    if (ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size ()) return {};
+    const auto& t = d->tables[(size_t) ref.tableIdx];
+    if (ref.paramIdx < 0) return t.comment;
+    return ref.paramIdx < (int) t.params.size () ? t.params[(size_t) ref.paramIdx].comment : juce::String ();
+}
+
+void TablesPanel::setCommentForRow (int row, const juce::String& text)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || row < 0 || row >= (int) rows_.size ()) return;
+    const auto ref = rows_[(size_t) row];
+    if (ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size ()) return;
+    auto& t = d->tables[(size_t) ref.tableIdx];
+    juce::String* target = ref.paramIdx < 0 ? &t.comment
+                         : (ref.paramIdx < (int) t.params.size () ? &t.params[(size_t) ref.paramIdx].comment : nullptr);
+    if (target == nullptr || *target == text) return;
+    *target = text;
+    d->metaDirty = true;   // saved with the file metadata
+    table.repaintRow (row);
+}
+
+void TablesPanel::commentCellClicked (int row, const juce::MouseEvent& e)
+{
+    model.cellClicked (row, 4, e);
+}
+
+namespace
+{
+/** The Tables panel's Comment cell: shows the note, double-click edits it,
+    a single click still selects the row like any other cell. */
+class TablesCommentCell : public juce::Label
+{
+public:
+    explicit TablesCommentCell (TablesPanel& p) : panel (p)
+    {
+        setEditable (false, true, false);
+        setFont (juce::Font (juce::FontOptions (11.0f)));
+        setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        setTooltip ("Comment of this table or parameter - double-click to edit");
+        onTextChange = [this] { panel.setCommentForRow (row, getText ()); };
+    }
+    void setRow (int r)
+    {
+        row = r;
+        setText (panel.commentForRow (r), juce::dontSendNotification);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        panel.commentCellClicked (row, e.getEventRelativeTo (&panel.listTable ()));
+        juce::Label::mouseDown (e);
+    }
+
+private:
+    TablesPanel& panel;
+    int row = -1;
+};
+}
+
+juce::Component* TablesPanel::Model::refreshComponentForCell (int rowNumber, int columnId, bool,
+                                                              juce::Component* existing)
+{
+    if (columnId != 4)
+    {
+        delete existing;
+        return nullptr;
+    }
+    auto* cell = dynamic_cast<TablesCommentCell*> (existing);
+    if (cell == nullptr)
+    {
+        delete existing;
+        cell = new TablesCommentCell (*owner);
+    }
+    cell->setRow (rowNumber);
+    return cell;
 }
 
 void TablesPanel::refresh()

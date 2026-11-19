@@ -190,6 +190,13 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
         m.addItem (CtxMoveSelection,  "Move Selection");
         m.addItem (CtxScaleSelection, "Scale Selection");
     }
+    // The Tables panel's "Table from Spectral Selection", one click closer
+    // (issue #51): the tracked frequency and level of the selection, as a table.
+    if (d != nullptr && !d->spectralSel.empty ())
+    {
+        if (! onSpectralSel) m.addSeparator();
+        m.addItem (CtxTableFromSpectralSel, "Table from Spectral Selection");
+    }
 
     m.addSeparator();
     m.addItem (CtxCut,   "Cut\tCtrl+X",   hasSel, false);

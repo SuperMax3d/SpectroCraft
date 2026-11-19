@@ -576,6 +576,30 @@ ThirdOctaveResult thirdOctave (const AudioEngine& eng, const ThirdOctaveParams& 
 
 // -------------------------------------------------------------------- curves
 
+int timeCurveFftSize (double rate, const SpectralSelection* mask, int64_t regionSamples)
+{
+    // A selection whose top frequency is low (a harmonic at 100-300 Hz) needs
+    // finer bins than the 2048-point default (~23 Hz at 48 kHz): there the
+    // tracked frequency moved in visible steps and a thin brush stroke often
+    // held no bin at all (issue #51). The longer window keeps a reasonable time
+    // resolution for such slow tones, and is never longer than the region.
+    int n = kTimeModeFFT;
+    if (mask != nullptr && rate > 0.0)
+    {
+        const auto box = mask->boundingBox();
+        const double fTop = box.getBottom();   // y = lowest frequency, height = span
+        if (! box.isEmpty() && fTop > 0.0)
+        {
+            // At least ~40 bins below the selection's top frequency.
+            while (n < 16384 && (rate / (double) n) * 40.0 > fTop)
+                n *= 2;
+        }
+    }
+    while (n > kTimeModeFFT && (int64_t) n > regionSamples)
+        n /= 2;
+    return n;
+}
+
 bool timeCurve (const AudioEngine& eng, const std::vector<int>& chans,
                 double t0, double t1, int track, const SpectralSelection* mask,
                 std::vector<CurveData>& out, const ProgressFn& progress)
@@ -585,7 +609,7 @@ bool timeCurve (const AudioEngine& eng, const std::vector<int>& chans,
     const int64_t totalSamples = (int64_t) (durS * rate);
     const int64_t s0 = (int64_t) std::clamp (t0 * rate, 0.0, (double) totalSamples);
     const int64_t s1 = (int64_t) std::clamp (t1 * rate, (double) s0, (double) totalSamples);
-    const int fftN = kTimeModeFFT;
+    const int fftN = timeCurveFftSize (rate, mask, s1 - s0);
 
     out.clear();
     for (size_t ci = 0; ci < chans.size(); ++ci)
@@ -625,17 +649,45 @@ bool timeCurve (const AudioEngine& eng, const std::vector<int>& chans,
             scfft::realForward (buf.data(), order);
 
             double maxMag = 0.0, maxF = 0.0, sumLin = 0.0, wsum = 0.0;
-            for (int k = 1; k <= fftN / 2; ++k)
+            int maxK = -1, binsIn = 0;
+            auto magAt = [&buf] (int k)
             {
                 const float re = buf[k * 2], im = buf[k * 2 + 1];
-                const double m = std::sqrt ((double) re * re + (double) im * im);
+                return std::sqrt ((double) re * re + (double) im * im);
+            };
+            for (int k = 1; k <= fftN / 2; ++k)
+            {
+                const double m = magAt (k);
                 if (mask != nullptr
                     && !mask->contains (tMid, (double) k * rate / (double) fftN))
                     continue;   // outside the spectral selection: this bin does not count
+                ++binsIn;
                 const double f = (double) k * rate / (double) fftN;
-                if (m > maxMag) { maxMag = m; maxF = f; }
+                if (m > maxMag) { maxMag = m; maxF = f; maxK = k; }
                 sumLin += m;
                 wsum += m * f;
+            }
+            // No bin of this frame inside the selection (a thin brush stroke
+            // between two bin centres): no point, rather than a drop to 0 Hz
+            // in the curve and the table (issue #51). The mask is the same for
+            // every channel, so the channels keep the same frames.
+            if (mask != nullptr && binsIn == 0)
+                continue;
+            // Max: refine the strongest bin with a parabola through the log
+            // magnitudes of it and its neighbours - a sub-bin frequency, so a
+            // slowly moving harmonic is a smooth line, not a staircase of
+            // bin centres (issue #51).
+            if (track == 0 && maxK > 1 && maxK < fftN / 2)
+            {
+                const double a = std::log (std::max (1e-30, magAt (maxK - 1)));
+                const double b = std::log (std::max (1e-30, maxMag));
+                const double c = std::log (std::max (1e-30, magAt (maxK + 1)));
+                const double den = a - 2.0 * b + c;
+                if (den < 0.0)
+                {
+                    const double delta = std::clamp (0.5 * (a - c) / den, -0.5, 0.5);
+                    maxF = ((double) maxK + delta) * rate / (double) fftN;
+                }
             }
 
             // Max: strongest bin's level + frequency. Total / Weighted:

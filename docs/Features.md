@@ -178,8 +178,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     (level over time) and **Amp vs Freq** (a per-bin spectrum of the analysed
     region; it uses fixed 2048-point Hann frames, so the FFT size / window type
     controls are hidden in that mode). The curve modes analyse the selection
-    frame by frame with fixed 2048-point Hann frames (capped at 2048 points per
+    frame by frame with 2048-point Hann frames (capped at 2048 points per
     curve) and honour a spectral-selection mask — bins outside it do not count.
+    For a spectral selection low enough that 2048-point bins are coarse for it
+    (top below about 40 bins, ~940 Hz at 48 kHz) the time modes use longer
+    frames, up to 16384 points, never longer than the region (issue #51). A
+    frame with no bin inside the selection gives no point instead of 0 Hz, and
+    Track Max refines the strongest bin with a parabolic fit, so a low harmonic
+    no longer reads as a staircase.
     Their options row offers **Smooth** (None / 3 / 5 / 7 / 9 / 11 / 21 / 51-
     frame centred moving average) and **Track** (Max = strongest component per frame/bin with
     its frequency; Total = summed level with amplitude-weighted centroid
@@ -2600,6 +2606,13 @@ The **Tables** tab in the left panel manages any number of imported CSV data
 tables. Each table holds one or more parameters (columns), shown as an indented
 list: a table row followed by its parameter rows.
 
+- Columns: Show, Colour, Name and **Comment** (issue #51). Colour, Name and
+  Comment are resizable by dragging the header separators; the widths are
+  remembered. Double-click a Comment cell to type a free note for that table
+  or parameter; it is saved with the file's metadata.
+- **Table from Spectral Selection** (the panel's menu, and the spectrogram's
+  right-click menu when the file has a spectral selection) creates a table of
+  the selection's Freq vs Time curve.
 - Every row has an eye icon that toggles *that* table's/parameter's
   visibility. Table rows carry no colour of their own; each **parameter** gets
   a unique palette colour when it is imported (colours stay distinct across

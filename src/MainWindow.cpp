@@ -1896,12 +1896,14 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
                   { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }), { "model" });
 
     // "default": the classic arrangement - a left column with two groups
-    // beside the Editor.
+    // beside the Editor. Frequency Analysis is the selected tab, Model sits
+    // next to Tables, History and Actions start closed (issue #51; Window
+    // menu to open them).
     return dockLayout (dockSplit (true, {
         { dockSplit (false, {
-              { dockGroup ({ "fft", "history", "actions", "python", "tables", "video" }, "fft"), 0.52 },
+              { dockGroup ({ "fft", "python", "tables", "model", "video" }, "fft"), 0.52 },
               { dockGroup ({ "controls", "markers", "transcription", "selection", "drawing" }), 0.48 } }), 0.245 },
-        { dockGroup ({ "editor" }), 0.755 } }), { "model" });
+        { dockGroup ({ "editor" }), 0.755 } }), { "history", "actions" });
 }
 
 std::vector<sc::dock::Workspaces::Entry> MainWindow::builtInWorkspaces() const
@@ -6005,6 +6007,22 @@ void MainWindow::handleContextMenuAction (int id)
     {
         case CtxZoomToSelection: zoomToSelection(); break;
         case CtxZoomOutFull:     zoomOutFull(); break;
+        case CtxTableFromSpectralSel:
+            // The same action as in the Tables panel; the panel opens so the
+            // new table is in sight (issue #51).
+            if (tablesPanel != nullptr)
+            {
+                setPanelVisible ("tables", true);
+                tablesPanel->tableFromSpectralSelection();
+            }
+            else
+            {
+                std::string err;
+                if (! app.addTableFromSpectralSelection (&err))
+                    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                        "Table from Spectral Selection", juce::String (err), "", this);
+            }
+            break;
         case CtxSelectAll:       app.selectAll(); break; // notifies via setSelection()
         case CtxCut:             runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
         case CtxCopy:            app.copy();  break;   // read-only

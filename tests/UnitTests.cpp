@@ -3975,13 +3975,14 @@ static void testLeftPanelLayout()
     const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
                                             "Selection", "Drawing" };
 #endif
-    const juce::StringArray defaultTop { "Frequency Analysis", "History",
-                                          "Actions", "Python", "Tables", "Video" };
+    // Since #51: Model next to Tables, History and Actions closed.
+    const juce::StringArray defaultTop { "Frequency Analysis", "Python",
+                                          "Tables", "Model", "Video" };
     juce::StringArray expectBottom = defaultBottom;
     expectBottom.removeString ("Markers");
     const juce::StringArray expectTopFinal { "Frequency Analysis", "Markers",
-                                             "Tables", "History", "Actions",
-                                             "Python", "Video" };
+                                             "Tables", "Python", "Model",
+                                             "Video" };
 
     // 1) Fresh store: the default arrangement.
     {
@@ -4015,8 +4016,8 @@ static void testLeftPanelLayout()
         CHECK (dock.movePanel ("markers", *topLoc.area, topLoc.group->uid, sc::dock::Zone::tabStrip, 1),
                "move across groups accepted");
         const juce::StringArray expectTopAfterMove { "Frequency Analysis",
-                                                     "Markers", "History", "Actions",
-                                                     "Python", "Tables", "Video" };
+                                                     "Markers", "Python", "Tables",
+                                                     "Model", "Video" };
         CHECK (win->panelGroupTitles ("tables") == expectTopAfterMove, "tab moved across groups");
         CHECK (win->panelGroupTitles ("controls") == expectBottom, "source group lost the tab");
 
@@ -4069,9 +4070,9 @@ static void testCrossBarTabMove()
     store.deleteFile ();
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-const int kNumPanels = 11;   // includes the Video tab (top group by default)
-#else
-const int kNumPanels = 10;
+const int kNumPanels = 10;   // includes the Video and Model tabs (top group by default;
+#else                        // History and Actions start closed since #51)
+const int kNumPanels = 9;
 #endif
 
     {
@@ -4250,6 +4251,19 @@ const int kNumPanels = 9;
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "close panel test"));
 
+        // Since #51 History and Actions start closed and Model is open.
+        CHECK (! win->isPanelOpen ("history") && ! win->isPanelOpen ("actions") && win->isPanelOpen ("model"),
+               "History and Actions closed, Model open by default");
+        // The rest of this test starts from every panel open but Model.
+        win->setPanelVisible ("history", true);
+        win->setPanelVisible ("actions", true);
+        win->setPanelVisible ("model", false);
+        {   // ...in the order of the pre-#51 default workspace
+            auto& d = win->dockManager ();
+            const auto tl = d.locate ("fft");
+            d.movePanel ("history", *tl.area, tl.group->uid, sc::dock::Zone::tabStrip, 1);
+            d.movePanel ("actions", *tl.area, tl.group->uid, sc::dock::Zone::tabStrip, 2);
+        }
         const bool allOpen = win->isPanelOpen ("tables") && win->isPanelOpen ("fft")
             && win->isPanelOpen ("history") && win->isPanelOpen ("python")
             && win->isPanelOpen ("tables")
@@ -4259,14 +4273,14 @@ const int kNumPanels = 9;
 #endif
             && win->isPanelOpen ("selection") && win->isPanelOpen ("drawing")
             && win->isPanelOpen ("video");
-        CHECK (allOpen, "all panels open by default");
+        CHECK (allOpen, "all panels open after the setup");
 
         const int wIdx = windowMenuIndex (*win);
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
         // panels, +1: "Video" listed with them (after Drawing, issue #10),
-        // +1: "Model" (last; closed by default, issue #40),
+        // +1: "Model" (last; issue #40),
         // +1 the "Allow multiple instances" toggle,
         // +1 "Allow AI control (localhost)" when the control server is built
         // in (separators are not counted by getNumItems). The Diagnostic Log
@@ -4320,7 +4334,7 @@ const int kNumPanels = 9;
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 4, wIdx);
         CHECK (win->isPanelOpen ("tables"), "Tables reopened from the Window menu");
         CHECK (win->panelGroupTitles ("tables").indexOf ("Tables") == 4,
-              "reopened Tables is back at its canonical position");
+              "reopened Tables is back at its canonical position" + juce::String (": ") + win->panelGroupTitles ("tables").joinIntoString (","));
 
         // 4) Canonical order restored after closing and reopening out of order.
         win->setPanelVisible ("history", false);
@@ -4329,14 +4343,14 @@ const int kNumPanels = 9;
             const juce::StringArray expectTop1 { "Actions", "Python",
                                                  "Tables", "Video" };
             CHECK (win->panelGroupTitles ("tables") == expectTop1,
-                  "two panels closed from the top group");
+                  "two panels closed from the top group" + juce::String (": ") + win->panelGroupTitles ("tables").joinIntoString (","));
         }
         win->setPanelVisible ("history", true);   // before fft canonically
         {
             const juce::StringArray expectTop2 { "History", "Actions", "Python",
                                                  "Tables", "Video" };
             CHECK (win->panelGroupTitles ("tables") == expectTop2,
-                  "History reinserted at its canonical position");
+                  "History reinserted at its canonical position" + juce::String (": ") + win->panelGroupTitles ("tables").joinIntoString (","));
         }
         win->setPanelVisible ("fft", true);
         {
@@ -4344,7 +4358,7 @@ const int kNumPanels = 9;
                                                  "Actions", "Python", "Tables",
                                                  "Video" };
             CHECK (win->panelGroupTitles ("tables") == expectTop3,
-                  "canonical top order fully restored");
+                  "canonical top order fully restored" + juce::String (": ") + win->panelGroupTitles ("tables").joinIntoString (","));
         }
 
         // 5) A panel dragged to the other group is closed from there.

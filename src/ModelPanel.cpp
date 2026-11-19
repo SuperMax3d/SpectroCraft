@@ -220,6 +220,35 @@ private:
 
 // ---------------------------------------------------------------- panel
 
+// The chevron left of the report: hides or shows the plot and the Analysis
+// settings below it, like the Video panel's button over its tracks (issue #51).
+class ModelPanel::CollapseButton : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    bool collapsed = false;
+    std::function<void()> onClick;
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (juce::Colour::fromRGB (38, 42, 50));
+        g.fillRoundedRectangle (getLocalBounds().toFloat(), 3.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.75f));
+        const float cx = getWidth() * 0.5f, cy = getHeight() * 0.5f;
+        // Pointing down while the bottom is shown (a click hides it), up when hidden.
+        g.addTransform (juce::AffineTransform::rotation (collapsed ? -1.5708f : 1.5708f, cx, cy));
+        for (int k = 0; k < 2; ++k)
+        {
+            const float x0 = cx - 4.0f + (float) k * 4.0f;
+            juce::Path p;
+            p.startNewSubPath (x0, cy - 3.5f);
+            p.lineTo (x0 + 3.0f, cy);
+            p.lineTo (x0, cy + 3.5f);
+            g.strokePath (p, juce::PathStrokeType (1.4f));
+        }
+    }
+    void mouseDown (const juce::MouseEvent&) override { if (onClick != nullptr) onClick(); }
+};
+
 ModelPanel::ModelPanel (Application& appIn) : app (appIn)
 {
     struct B { juce::Button* b; const char* id; const char* tip; };
@@ -283,6 +312,16 @@ ModelPanel::ModelPanel (Application& appIn) : app (appIn)
     report.setFont (juce::Font (juce::FontOptions (12.0f)));
     report.setJustificationType (juce::Justification::topLeft);
     report.setTooltip ("What the last analysis found.");
+    collapseBtn = std::make_unique<CollapseButton>();
+    collapseBtn->setComponentID ("model-collapse");
+    collapseBtn->setTooltip ("Hide or show the plot and the analysis settings");
+    collapseBtn->onClick = [this] { setBottomCollapsed (! bottomCollapsed_); };
+    content.addAndMakeVisible (*collapseBtn);
+    if (app.recentStore != nullptr)
+        bottomCollapsed_ = app.recentStore->getBoolValue ("model_bottom_collapsed", false);
+    collapseBtn->collapsed = bottomCollapsed_;
+    // Rows can be dragged to reorder the components.
+    table.addMouseListener (this, true);
     tracksText.setTooltip ("Lines measured inside stored spectral selections.");
     settingsLab.setTooltip ("Analysis settings of the whole model.");
 
@@ -385,6 +424,7 @@ ModelPanel::ModelPanel (Application& appIn) : app (appIn)
     renderSelBtn.onClick = [this] { renderSelection(); };
     renderCsvBtn.onClick = [this]
     {
+        if (! ensureAnalysed()) return;
         chooseFile (false, "Render the model from a CSV", "*.csv;*.tsv;*.txt", [this] (const juce::File& f)
         {
             juce::String err;
@@ -394,6 +434,7 @@ ModelPanel::ModelPanel (Application& appIn) : app (appIn)
     };
     exportBtn.onClick = [this]
     {
+        if (! ensureAnalysed()) return;
         chooseFile (true, "Export the sound model", "*.json", [this] (const juce::File& f)
         {
             juce::String err;
@@ -575,15 +616,21 @@ void ModelPanel::layoutDetail()
     analyseBtn.setBounds (0, y, w, rowH);
     y += rowH + 4;
     const int lines = std::max (1, report.getText().isEmpty() ? 1 : juce::StringArray::fromLines (report.getText()).size());
-    report.setBounds (0, y, w, 15 * lines + 4);
-    y += 15 * lines + 6;
-    plot->setBounds (0, y, w, 150);
-    y += 156;
-    settingsLab.setBounds (0, y, lab, rowH - 2);
-    fftCombo.setBounds (lab, y, 70, rowH - 2);
-    tolEd.setBounds (lab + 74, y, 46, rowH - 2);
-    steadyEd.setBounds (lab + 124, y, 46, rowH - 2);
-    y += rowH + 4;
+    collapseBtn->setBounds (0, y, 18, 18);
+    report.setBounds (22, y, w - 22, 15 * lines + 4);
+    y += std::max (20, 15 * lines + 6);
+    for (auto* comp : std::initializer_list<juce::Component*> { plot.get(), &settingsLab, &fftCombo, &tolEd, &steadyEd })
+        comp->setVisible (! bottomCollapsed_);
+    if (! bottomCollapsed_)
+    {
+        plot->setBounds (0, y, w, 150);
+        y += 156;
+        settingsLab.setBounds (0, y, lab, rowH - 2);
+        fftCombo.setBounds (lab, y, 70, rowH - 2);
+        tolEd.setBounds (lab + 74, y, 46, rowH - 2);
+        steadyEd.setBounds (lab + 124, y, 46, rowH - 2);
+        y += rowH + 4;
+    }
     content.setSize (w, y);
 }
 
@@ -765,6 +812,113 @@ void ModelPanel::deleteKeyPressed (int)
     deleteSelected();
 }
 
+bool ModelPanel::ensureAnalysed()
+{
+    commitEdits();
+    auto* m = model();
+    if (m == nullptr) return false;
+    bool need = false;
+    for (const auto& c : m->components)
+        need = need || (c.enabled && ! c.analysed);
+    if (! need) return true;
+    juce::String err;
+    const bool ok = app.analyseModel (-1, &err);
+    refresh();
+    if (! ok)
+    {
+        showStatus ("The model could not be analysed first: " + err, true);
+        return false;
+    }
+    showStatus ("Every component analysed.");
+    return true;
+}
+
+void ModelPanel::setBottomCollapsed (bool collapsed)
+{
+    bottomCollapsed_ = collapsed;
+    if (collapseBtn != nullptr) { collapseBtn->collapsed = collapsed; collapseBtn->repaint(); }
+    if (app.recentStore != nullptr)
+    {
+        app.recentStore->setValue ("model_bottom_collapsed", collapsed);
+        app.recentStore->saveIfNeeded();
+    }
+    layoutDetail();
+}
+
+void ModelPanel::moveComponent (int from, int to)
+{
+    auto* m = model();
+    if (m == nullptr) return;
+    const int n = (int) m->components.size();
+    if (from < 0 || from >= n) return;
+    to = juce::jlimit (0, n, to);
+    const int dest = to > from ? to - 1 : to;   // index once removed from its place
+    if (dest == from) return;
+    auto c = std::move (m->components[(size_t) from]);
+    m->components.erase (m->components.begin() + from);
+    m->components.insert (m->components.begin() + dest, std::move (c));
+    selectedId_ = m->components[(size_t) dest].id;
+    showStatus ("Order changed: Analyse All to update what each component takes out.");
+    app.soundModelChanged();
+    refresh();
+}
+
+int ModelPanel::insertionIndexAt (juce::Point<int> p) const
+{
+    const int n = const_cast<ModelPanel*> (this)->getNumRows();
+    auto& t = const_cast<juce::TableListBox&> (table);
+    const int row = t.getRowContainingPosition (p.x, p.y);
+    if (row < 0 || row >= n)
+        return p.y < t.getHeaderHeight() ? 0 : n;
+    const auto r = t.getRowPosition (row, true);
+    return p.y > r.getCentreY() ? row + 1 : row;
+}
+
+void ModelPanel::mouseDown (const juce::MouseEvent& e)
+{
+    dragFromRow_ = -1;
+    rowDragging_ = false;
+    if (e.eventComponent == nullptr || ! table.isParentOf (e.eventComponent) || e.mods.isPopupMenu())
+        return;
+    const auto p = e.getEventRelativeTo (&table).getPosition();
+    if (p.y < table.getHeaderHeight()) return;
+    const int row = table.getRowContainingPosition (p.x, p.y);
+    if (row >= 0 && row < getNumRows()) dragFromRow_ = row;
+}
+
+void ModelPanel::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragFromRow_ < 0) return;
+    if (! rowDragging_ && std::abs (e.getDistanceFromDragStartY()) < 6) return;
+    rowDragging_ = true;
+    dropIndex_ = insertionIndexAt (e.getEventRelativeTo (&table).getPosition());
+    repaint();
+}
+
+void ModelPanel::mouseUp (const juce::MouseEvent& e)
+{
+    if (rowDragging_ && dragFromRow_ >= 0)
+        moveComponent (dragFromRow_, insertionIndexAt (e.getEventRelativeTo (&table).getPosition()));
+    dragFromRow_ = -1;
+    dropIndex_ = -1;
+    rowDragging_ = false;
+    repaint();
+}
+
+void ModelPanel::paintOverChildren (juce::Graphics& g)
+{
+    if (! rowDragging_ || dropIndex_ < 0) return;
+    // Where the dragged component will land.
+    const int n = getNumRows();
+    int y = 0;
+    if (dropIndex_ < n) y = table.getRowPosition (dropIndex_, true).getY();
+    else if (n > 0)     y = table.getRowPosition (n - 1, true).getBottom();
+    else                y = table.getHeaderHeight();
+    y += table.getY();
+    g.setColour (juce::Colour::fromRGB (0, 212, 170));
+    g.fillRect (table.getX() + 2, y - 1, table.getWidth() - 4, 2);
+}
+
 void ModelPanel::deleteSelected()
 {
     auto* m = model();
@@ -800,7 +954,7 @@ void ModelPanel::analyseAll()
 
 void ModelPanel::compare()
 {
-    commitEdits();
+    if (! ensureAnalysed()) return;
     juce::String err;
     if (app.compareModel (&err)) showStatus ("Compare: channel 1 = simulation, channel 2 = original.");
     else showStatus (err, true);
@@ -808,7 +962,7 @@ void ModelPanel::compare()
 
 void ModelPanel::renderSelection()
 {
-    commitEdits();
+    if (! ensureAnalysed()) return;
     if (onRenderSelectionRequested) { onRenderSelectionRequested(); return; }
     juce::String err;
     if (app.renderModelSelection (&err)) showStatus ("Rendered into a new channel.");
