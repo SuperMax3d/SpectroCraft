@@ -409,6 +409,21 @@ public:
     bool runMenuCommandPath (const juce::String& path);
     bool isToolbarVisible() const noexcept { return toolbarVisible_; }
     void setToolbarVisible (bool on);
+    /** View > Hide Title Bar (issue #52, Windows): the title bar merges into
+        the menu bar row (app icon, menus, toolbar, workspaces, then the
+        minimise / maximise / close buttons). The row's empty parts move and
+        snap the window like a title bar; the icon opens the window menu.
+        Remembered ("title_bar_hidden"), off by default. */
+    static bool titleBarHidingSupported() noexcept;
+    bool isTitleBarHidden() const noexcept { return titleBarHidden_; }
+    void setTitleBarHidden (bool hidden);
+    /** The merged row's parts, in window coordinates (empty when shown):
+        0 = the icon, 1 = minimise, 2 = maximise, 3 = close. */
+    juce::Rectangle<int> captionPartBounds (int part) const;
+    /** Window hit test: in the merged row, title-bar (caption) for its empty
+        parts, the buttons, a top resize strip; client elsewhere. */
+    WindowControlKind findControlAtPoint (juce::Point<float>) const override;
+    juce::BorderSize<int> getBorderThickness() const override;
     /** Tabs of the group holding a panel, as shown (titles), empty if closed. */
     juce::StringArray panelGroupTitles (const juce::String& id) const;
     void saveDockLayout();                    // persist the arrangement now
@@ -424,7 +439,7 @@ public:
     /** ` (backtick): maximise / restore the panel group under the mouse
         (else the focused one). */
     void toggleMaximizePanelGroup();
-    void setLeftPanelsVisible (bool visible); // View > Panels: false = Editor maximised
+    void setLeftPanelsVisible (bool visible); // View > Side Panels Visible: false = Editor maximised
     bool areLeftPanelsVisible() const;
 
     // Window menu + per-panel "Close Panel" support: open/close state of the
@@ -707,6 +722,7 @@ public:
         // Selection > Move (V; drawings, session files - issues #41, #21), View > Show File Borders.
         SelectionMoveFiles = 2100, ViewShowFileBorders,
         ViewShowToolbar = 2110,   // View > Toolbar (issue #43)
+        ViewHideTitleBar = 2111,  // View > Hide Title Bar (issue #52, Windows)
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
@@ -914,6 +930,12 @@ private:
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
     std::unique_ptr<sc::toolbar::Toolbar> toolbar_;           // left of the workspace bar (issue #43)
     bool toolbarVisible_ = true;
+    bool titleBarHidden_ = false;             // View > Hide Title Bar (issue #52)
+    static constexpr int kCaptionButtonW = 46;   // the window buttons of the merged row
+    class CaptionPart;                        // the icon and the window buttons of the merged row
+    std::unique_ptr<CaptionPart> captionIcon_, captionMin_, captionMax_, captionClose_;
+    juce::Rectangle<int> menuRowBounds_;      // the menu bar row, window coordinates
+    int menuNamesRight_ = 0;                  // x where the menu names end
     bool sendingCustomKeys_ = false;          // a custom shortcut sends its keys: no custom dispatch
     juce::uint32 toolbarRefreshedAt_ = 0;     // the timer refreshes the toolbar a few times a second
     void refreshToolbar();

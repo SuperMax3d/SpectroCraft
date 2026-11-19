@@ -3949,7 +3949,7 @@ static void testTimeScrollBarOnLoad()
 // ------------------------------------------------------- docked panel layout
 // The default workspace keeps the classic arrangement: a left column with two
 // panel groups beside the Editor group. Tabs move within a group or across
-// groups; the arrangement survives an app restart. Also covers View > Panels
+// groups; the arrangement survives an app restart. Also covers View > Side Panels Visible
 // (the Editor's group maximised).
 
 /** The group component showing a panel (nullptr when it is closed). */
@@ -4023,7 +4023,7 @@ static void testLeftPanelLayout()
                "reorder inside a group accepted");
         CHECK (win->panelGroupTitles ("tables") == expectTopFinal, "same-group move");
 
-        // 4) View > Panels: hiding the panels maximises the Editor's group.
+        // 4) View > Side Panels Visible: hiding the panels maximises the Editor's group.
         win->setLeftPanelsVisible (false);
         CHECK (! win->areLeftPanelsVisible (), "panels hidden by the menu toggle");
         CHECK (dockGroupOf (dock, "tables") != nullptr && ! dockGroupOf (dock, "tables")->isVisible ()
@@ -24474,6 +24474,95 @@ static void testItemGroupsSelectionsDrawings()
 // groups, the tooltips with their keys, the commands, the nine custom
 // shortcuts (defined, checked against the keys in use, run by click and by
 // key, remembered after a restart) and View > Toolbar.
+// ------------------------------------------------- Hide Title Bar (#52)
+// View > Side Panels Visible (renamed from Panels) and View > Hide Title Bar:
+// the merged row's layout, its hit test (caption, buttons, resize strip,
+// client parts), persistence. The native drag / snap / window menu are the
+// system's and need Windows to check by hand.
+static void testHideTitleBar()
+{
+    const juce::File store = makeTempFile ("title_bar52.recent");
+    store.deleteFile ();
+    using Kind = juce::Component::WindowControlKind;
+    auto findItem = [] (const juce::PopupMenu& m, const juce::String& text) -> const juce::PopupMenu::Item*
+    {
+        for (juce::PopupMenu::MenuItemIterator it (m, true); it.next ();)
+            if (it.getItem ().text.upToFirstOccurrenceOf ("\t", false, false) == text) return &it.getItem ();
+        return nullptr;
+    };
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "title bar test"));
+        win->setSize (1500, 800);
+        const int vIdx = win->getMenuBarNames ().indexOf ("View");
+        const auto vm = win->getMenuForIndex (vIdx, "View");
+        CHECK (findItem (vm, "Side Panels Visible") != nullptr && findItem (vm, "Panels") == nullptr,
+               "#52: View > Panels is called Side Panels Visible");
+        CHECK ((findItem (vm, "Hide Title Bar") != nullptr) == MainWindow::titleBarHidingSupported (),
+               "#52: Hide Title Bar is offered where it is supported");
+        CHECK (! win->isTitleBarHidden () && win->isUsingNativeTitleBar () && win->captionPartBounds (0).isEmpty (),
+               "#52: the title bar shows by default");
+
+        win->setTitleBarHidden (true);
+        CHECK (win->isTitleBarHidden () && ! win->isUsingNativeTitleBar (), "#52: hidden");
+        CHECK (app.recentStore->getIntValue ("title_bar_hidden", 0) == 1, "#52: the choice is saved");
+        CHECK (win->getBorderThickness ().isEmpty (), "#52: no frame of its own");
+        const auto icon = win->captionPartBounds (0), mn = win->captionPartBounds (1),
+                   mx = win->captionPartBounds (2), cl = win->captionPartBounds (3);
+        CHECK (icon.getX () == 0 && icon.getY () == 0 && icon.getWidth () > 16,
+               "#52: the icon starts the row");
+        CHECK (cl.getRight () == win->getWidth () && mx.getRight () == cl.getX () && mn.getRight () == mx.getX ()
+                   && cl.getY () == 0 && cl.getHeight () == icon.getHeight (),
+               "#52: minimise, maximise, close end the row");
+        auto* ws = win->workspaceBarComp ();
+        CHECK (ws != nullptr && ws->getRight () <= mn.getX (), "#52: the workspaces sit left of the buttons");
+        auto kindAt = [&win] (juce::Point<int> p) { return win->findControlAtPoint (p.toFloat ()); };
+        const int midY = icon.getCentreY ();
+        CHECK (kindAt ({ mn.getCentreX (), midY }) == Kind::minimise && kindAt ({ mx.getCentreX (), midY }) == Kind::maximise
+                   && kindAt ({ cl.getCentreX (), midY }) == Kind::close,
+               "#52: the buttons are the window's controls");
+        CHECK (kindAt ({ cl.getCentreX (), 1 }) == Kind::close, "#52: a button reaches the top edge");
+        CHECK (kindAt (icon.getCentre ()) == Kind::client, "#52: the icon gets its own click (window menu)");
+        CHECK (kindAt ({ icon.getRight () + 6, midY }) == Kind::client, "#52: the first menu name is a menu");
+        CHECK (kindAt ({ 400, 300 }) == Kind::client && kindAt ({ 400, icon.getBottom () + 1 }) == Kind::client,
+               "#52: below the row is the window's content");
+        // An empty part of the row is the caption: right of the menu names,
+        // or a gap between toolbar groups.
+        int captionX = -1;
+        if (auto* tb = win->toolbarComp ())
+        {
+            for (int i = 0; i + 1 < tb->numButtons () && captionX < 0; ++i)
+            {
+                auto* a = tb->buttonAt (i); auto* b = tb->buttonAt (i + 1);
+                if (a != nullptr && b != nullptr && a->isVisible () && b->isVisible () && b->getX () - a->getRight () >= 3)
+                    captionX = tb->getX () + (a->getRight () + b->getX ()) / 2;
+            }
+            if (auto* b0 = tb->buttonAt (0); b0 != nullptr && b0->isVisible ())
+                CHECK (kindAt (b0->getBounds ().getCentre () + tb->getPosition ()) == Kind::client,
+                       "#52: a toolbar button stays a button");
+        }
+        CHECK (captionX > 0 && kindAt ({ captionX, midY }) == Kind::caption, "#52: a gap in the toolbar moves the window");
+        if (ws != nullptr && ! ws->layoutSlots ().empty ())
+            CHECK (kindAt (ws->layoutSlots ()[0].r.getCentre () + ws->getPosition ()) == Kind::client,
+                   "#52: a workspace stays clickable");
+        CHECK (kindAt ({ captionX, 1 }) == Kind::sizeTop && kindAt ({ 1, 1 }) == Kind::sizeTopLeft,
+               "#52: a strip along the top edge resizes");
+        win.reset ();
+    }
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "title bar test 2"));
+        CHECK (win->isTitleBarHidden () == MainWindow::titleBarHidingSupported (),
+               "#52: remembered after a restart where supported");
+        win->setTitleBarHidden (false);
+        CHECK (! win->isTitleBarHidden () && win->isUsingNativeTitleBar () && win->captionPartBounds (3).isEmpty (),
+               "#52: shown again");
+        CHECK (app.recentStore->getIntValue ("title_bar_hidden", 1) == 0, "#52: off is saved too");
+        win.reset ();
+    }
+    store.deleteFile ();
+}
+
 static void testMainToolbar()
 {
     namespace tb = sc::toolbar;
@@ -25125,7 +25214,9 @@ static void testTrackAxisPlacement()
     // menu; the 1/3 octave grid item was added under the frequency grid;
     // Show File Borders for sessions, issue #21; Toolbar, issue #43; channel
     // visibility is still listed per channel).
-    CHECK (viewMenu.getNumItems() == 21, "View menu item count with stereo file");
+    // Hide Title Bar (issue #52) only where it is supported (Windows).
+    CHECK (viewMenu.getNumItems() == 21 + (MainWindow::titleBarHidingSupported() ? 1 : 0),
+           "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
@@ -31409,6 +31500,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("drawing panel", testDrawingPanel);
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
     SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
+    SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);

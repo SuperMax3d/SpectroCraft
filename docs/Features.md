@@ -555,8 +555,20 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       used by a menu, by the main window or by another shortcut is refused with
       what uses it. The shortcuts are remembered after a restart (settings key
       `toolbar_shortcuts`).
-    - **View > Panels** (Ctrl+Shift+Enter) maximises the Editor's group to
-      hide every other panel, and brings them back.
+    - **View > Side Panels Visible** (Ctrl+Shift+Enter; was *Panels*)
+      maximises the Editor's group to hide every other panel, and brings them
+      back.
+    - **View > Hide Title Bar** (Windows; issue #52) removes the window's
+      title bar and merges it with the menu bar row, in this order: the app
+      icon, the menus, the toolbar, the workspaces, then the minimise /
+      maximise / close buttons. Any empty part of the row works like a title
+      bar: drag it to move the window and snap it to a screen edge, double-click
+      it to maximise or restore; hovering Maximise shows the snap layouts. A
+      click on the icon opens the window menu (Restore, Move, Size, Minimize,
+      Maximize, Close). The edges still resize the window. The choice is
+      remembered (settings key `title_bar_hidden`); it is off for a new user.
+      Other platforms do not offer it: only Windows asks the window what lies
+      under the mouse, which is what makes the row a title bar.
     - Individual panels can be closed from their tab menu (**≡**) or the
       **Window** menu, which lists every panel with a checkmark and opens or
       closes each one. Closed panels stay
@@ -2143,7 +2155,7 @@ Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
 | Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
 | Toggle spectrogram harmonic markers (Spectral Controls > "Show harmonics") | Ctrl+H |
-| Show / hide the panels around the Editor (View > Panels: maximises the Editor's group) | Ctrl+Shift+Enter |
+| Show / hide the panels around the Editor (View > Side Panels Visible: maximises the Editor's group) | Ctrl+Shift+Enter |
 | Maximise / restore the panel group under the mouse (also: double-click a tab) | ` (backtick) |
 | While dragging a panel: cancel the drag / undock instead of docking | Esc / hold Ctrl (Cmd on macOS) |
 

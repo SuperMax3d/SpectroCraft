@@ -927,7 +927,7 @@ static void dockTest_editorTabsPerDocument()
         CHECK (app.doc () == nullptr && title ("editor") == "Editor" && viewsIn ("editor"),
                "editor tabs: no file left, the tab is the Editor again");
 
-        // A maximised Editor group (View > Panels off) stays maximised.
+        // A maximised Editor group (View > Side Panels Visible off) stays maximised.
         win->setLeftPanelsVisible (false);
         CHECK (app.openFile (fa) && app.openFile (fb), "editor tabs: two files reopen");
         CHECK (! win->areLeftPanelsVisible () && dock.isMaximized (dock.locate ("editor").group->uid)
