@@ -116,7 +116,7 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip
   in a new splitter.
-- Toolbar (issue #43; menu bar row, left of the workspace bar): buttons, vector icons, key
+- Toolbar (issues #43, #50; menu bar row, right after the menus): buttons, vector icons, the calculator (`sc::toolbar::calc`), key
   helpers and the custom shortcuts' model in `include/MainToolbar.h` + `src/MainToolbar.cpp`;
   wired in `MainWindow` (`runToolbarCommand`, `runCustomShortcut`, `setCustomShortcut`,
   `shortcutUsedBy` - add a key handled in `MainWindow::keyPressed` to `mainWindowKeys()` there

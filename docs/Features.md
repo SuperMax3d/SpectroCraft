@@ -534,27 +534,47 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       menu). The whole arrangement, floating windows included, is restored at
       the next launch; the first launch after the update keeps the
       arrangement of the former two-group left column.
-    - **Toolbar** (issue #43), in the menu bar row left of the workspaces:
-      **Undo, Redo | Time Range, Marquee, Lasso, Paintbrush, Move |
+    - **Toolbar** (issues #43, #50), in the menu bar row right after the
+      menus: **Undo, Redo | Time Range, Marquee, Lasso, Paintbrush, Move |
       Waveform / Spectrogram** (like F9), **Add Marker** (like F8) **| Free
-      Drawing, Text, Arrow, Rectangle, Oval | 1 ... 9**. Every button's
-      tooltip names its keyboard shortcut; the tool in use is lit. The icons
-      are drawn by SpectroCraft itself (vector paths in `src/MainToolbar.cpp`,
-      no third-party icon set). Groups that do not fit a narrow window are
-      left out, the shortcuts first. **View > Toolbar** shows or hides it
-      (remembered).
-    - **Shortcuts 1 to 9** are your own: click an empty one, or right-click
-      any (**Define / Change Shortcut N...**, **Run**, **Clear**, **Hide
-      Toolbar**). A shortcut runs a **menu command** (every command of the
-      menu bar, the effects included), a **recorded action** (Actions panel,
-      by name), a **Python script**, or **sends keys**
-      (Ctrl+H to show the harmonics, F5 to refresh...). It shows a short text
-      (up to 4 characters) or an icon from a small library (star, bolt, gear,
-      play, flag, heart, wave, note, check, cross, plus, eye, magnifier,
-      scissors), and can have a **keyboard shortcut of its own**: a key already
-      used by a menu, by the main window or by another shortcut is refused with
-      what uses it. The shortcuts are remembered after a restart (settings key
+      Drawing, Text, Arrow, Rectangle, Oval |** your custom buttons, then the
+      **calculator**. Every button's tooltip names its keyboard shortcut; the
+      tool in use is lit. The icons are drawn by SpectroCraft itself (vector
+      paths in `src/MainToolbar.cpp`, no third-party icon set). Groups that do
+      not fit a narrow window are left out, the custom buttons first. **View >
+      Toolbar** shows or hides it (remembered).
+    - Right-click any button, or the toolbar between them: **Add Custom
+      Button...**, **Manage Visible Buttons...**, **Hide** *that button*,
+      **Hide Toolbar**; on a custom button also **Edit Custom Button N...**
+      and **Remove Custom Button N**. **Manage Visible Buttons** lists every
+      predetermined button and the calculator with a check box (untick to
+      hide, tick to restore; **Show All Buttons** restores them all), then the
+      custom buttons with **Edit** and **Remove**. The hidden buttons are
+      remembered (settings key `toolbar_hidden`).
+    - **Custom buttons** (up to nine) are your own; only the ones you defined
+      show. **Add Custom Button** opens the form for the first free one
+      (1, then 2...). A custom button runs a **menu command** (every command of
+      the menu bar, the effects included), a **recorded action** (Actions
+      panel, by name), a **Python script**, or **sends keys** (Ctrl+H to show
+      the harmonics, F5 to refresh...). It shows a short text (up to 4
+      characters) or an icon picked on a one-line row (star, bolt, gear, play,
+      flag, heart, wave, note, check, cross, plus, eye, magnifier, scissors;
+      the selected one has a white border, the ones other custom buttons use
+      are darker and can still be picked), has an optional tooltip of your
+      own, and can have a **keyboard shortcut of its own**: a key already used
+      by a menu, by the main window or by another custom button is refused
+      with what uses it. They are remembered after a restart (settings key
       `toolbar_shortcuts`).
+    - The **calculator** (issue #50) evaluates as you type and shows the
+      result beside the field: `+ - * / ^ ( )` and `log` (base 10), `.` for
+      decimals. It completes the input rather than refusing it: a missing
+      operand of `*`, `/` or `^` is 1 (`1/` = 1), of `+` or `-` is 0 (`1+` =
+      1); unmatched parentheses close at the end or open at the start
+      (`(1+2/2` = 2); `2(3)` is `2*3`. A comma makes a list and repeats the
+      equation for each value: `(1,2,3)+1` = 2, 3, 4 (two lists combine
+      element by element). Division by zero, the log of a value <= 0 or an
+      unknown character give **Error**. Enter keeps the result as the new
+      expression, Esc clears it. It can be hidden like a button.
     - **View > Side Panels Visible** (Ctrl+Shift+Enter; was *Panels*)
       maximises the Editor's group to hide every other panel, and brings them
       back.

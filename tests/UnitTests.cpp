@@ -24563,6 +24563,194 @@ static void testHideTitleBar()
     store.deleteFile ();
 }
 
+// ------------------------------------------- Toolbar improvements (#50)
+static void testToolbarIssue50()
+{
+    namespace tb = sc::toolbar;
+    // The calculator's evaluation.
+    {
+        auto is = [] (const juce::String& in, const juce::String& want)
+        {
+            const auto r = tb::calc::evaluate (in);
+            CHECK (r.text == want, "calc: \"" + in + "\" = \"" + want + "\" (got \"" + r.text + "\")");
+        };
+        is ("1/", "1");                 // a missing divisor is 1
+        is ("1+", "1");                 // a missing addend is 0
+        is ("3-", "3");
+        is ("*2", "2");
+        is ("2^", "2");
+        is ("1/0", "Error");
+        is ("(1+2/2", "2");             // the parenthesis closes at the end
+        is ("1+2)*3", "9");             // ... or opens at the start
+        is ("(1,2,3)+1", "2, 3, 4");    // a list repeats the equation
+        is ("(1,2)+(10,20)", "11, 22");
+        is ("(1,2)*(1,2,3)", "Error");
+        is ("1,2", "1, 2");
+        is ("2^3^2", "512");            // right-associative
+        is ("-2^2", "-4");
+        is ("2^-1", "0.5");
+        is ("log(100)", "2");
+        is ("log1000", "3");
+        is ("log(0)", "Error");
+        is ("log(10,100)", "1, 2");
+        is ("2(3)", "6");
+        is ("2log(100)", "4");
+        is ("0.1+0.2", "0.3");
+        is ("1.5*2", "3");
+        is ("1e3/4", "250");
+        is ("1/3", "0.3333333333");
+        is ("2*()", "2");
+        is ("1..2", "Error");
+        is ("abc", "Error");
+        is ("1 + 2 * 3", "7");
+        CHECK (tb::calc::evaluate ("").empty && tb::calc::evaluate ("-").empty && tb::calc::evaluate ("(").empty,
+               "calc: nothing to show yet for an empty input, a lone sign or a lone parenthesis");
+        CHECK (tb::calc::evaluate ("(1,2,3)+1").values == std::vector<double> ({ 2.0, 3.0, 4.0 }), "calc: the values");
+    }
+    // The icon picker.
+    {
+        tb::IconPicker p;
+        const auto ids = tb::IconPicker::cellIds ();
+        CHECK (ids.size () == (int) tb::libraryIcons ().size () + 1 && ids[0].isEmpty () && ids[1] == "star",
+               "toolbar #50: the icon picker shows Text then every library icon");
+        CHECK (p.getHeight () == tb::IconPicker::kCell + 2 && p.getWidth () >= ids.size () * tb::IconPicker::kCell,
+               "toolbar #50: on one line");
+        int changes = 0;
+        p.onChange = [&changes] { ++changes; };
+        const auto c = p.cellBounds (3).getCentre ();
+        p.mouseDown (juce::MouseEvent (juce::Desktop::getInstance ().getMainMouseSource (), c.toFloat (), {}, 0.0f,
+                                       0.0f, 0.0f, 0.0f, 0.0f, &p, &p, juce::Time::getCurrentTime (), c.toFloat (),
+                                       juce::Time::getCurrentTime (), 1, false));
+        CHECK (p.selected == ids[3] && changes == 1, "toolbar #50: a click picks the icon");
+        p.usedElsewhere = { ids[3], ids[4] };
+        juce::Image img (juce::Image::ARGB, p.getWidth (), p.getHeight (), true);
+        juce::Graphics g (img);
+        p.paint (g);
+        CHECK (img.getPixelAt (p.cellBounds (3).getX () + 1, p.cellBounds (3).getCentreY ()).getAlpha () > 0,
+               "toolbar #50: the selected icon has its border");
+    }
+
+    const juce::File wav = makeTempFile ("toolbar50.wav");
+    writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t, double) { return 0.0f; });
+    const juce::File store = makeTempFile ("toolbar50.recent");
+    store.deleteFile ();
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "toolbar #50: open");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar 50"));
+        win->setSize (1600, 800);
+        auto* bar = win->toolbarComp ();
+        auto* calc = win->calculatorComp ();
+        auto* ws = win->workspaceBarComp ();
+        if (bar == nullptr || calc == nullptr || ws == nullptr) { CHECK (false, "toolbar #50: the parts exist"); return; }
+        juce::MenuBarComponent* menuBar = nullptr;
+        for (auto* c : win->getChildren ())
+            if (auto* mb = dynamic_cast<juce::MenuBarComponent*> (c)) menuBar = mb;
+        int namesW = 8;
+        const auto names = win->getMenuBarNames ();
+        for (int i = 0; menuBar != nullptr && i < names.size (); ++i)
+            namesW += win->getLookAndFeel ().getMenuBarItemWidth (*menuBar, i, names[i]);
+        CHECK (menuBar != nullptr && bar->getX () == menuBar->getX () + namesW,
+               "toolbar #50: the toolbar starts right after the Help menu");
+        CHECK (calc->isVisible () && calc->getX () == bar->getRight () + 6 && calc->getRight () <= ws->getX (),
+               "toolbar #50: the calculator follows the toolbar, left of the workspaces");
+        calc->setExpression ("1/");
+        CHECK (calc->resultText () == "= 1", "toolbar #50: the calculator evaluates as one types");
+        calc->setExpression ("1/0");
+        CHECK (calc->resultText () == "= Error", "toolbar #50: ... and says Error");
+        calc->setExpression ("(1,2,3)+1");
+        calc->commit ();
+        CHECK (calc->field ().getText () == "2,3,4", "toolbar #50: Enter keeps the result");
+
+        // Add Custom Button fills the first free slot; empty slots stay hidden.
+        CHECK (bar->firstFreeCustomSlot () == 0, "toolbar #50: Add Custom Button starts with button 1");
+        const int w0 = bar->idealWidth ();
+        tb::CustomShortcut lasso { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "" };
+        lasso.tooltip = "My lasso";
+        CHECK (win->setCustomShortcut (0, lasso).isEmpty () && bar->button ("custom.1")->isVisible ()
+                   && ! bar->button ("custom.2")->isVisible (),
+               "toolbar #50: a defined custom button shows, the next slot does not");
+        CHECK (bar->idealWidth () == w0 + tb::Toolbar::kButtonW + tb::Toolbar::kGapW, "toolbar #50: its group appears");
+        CHECK (bar->button ("custom.1")->getTooltip () == "My lasso", "toolbar #50: the user's own tooltip");
+        CHECK (bar->firstFreeCustomSlot () == 1, "toolbar #50: then button 2");
+        CHECK (tb::parse (tb::serialise (bar->custom ()))[0].tooltip == "My lasso", "toolbar #50: the tooltip is saved");
+
+        // The context menu.
+        auto texts = [] (const juce::PopupMenu& m)
+        {
+            juce::StringArray t;
+            for (juce::PopupMenu::MenuItemIterator it (m); it.next ();)
+                if (it.getItem ().text.isNotEmpty ()) t.add (it.getItem ().text);
+            return t;
+        };
+        {
+            juce::PopupMenu m;
+            win->fillToolbarMenu ("tool.lasso", m);
+            const auto t = texts (m);
+            CHECK (t.contains ("Add Custom Button...") && t.contains ("Manage Visible Buttons...") && t.contains ("Hide Lasso")
+                       && t.contains ("Hide Toolbar") && ! t.contains ("Remove Custom Button 1"),
+                   "toolbar #50: the menu of a predetermined button: " + t.joinIntoString (" | "));
+        }
+        {
+            juce::PopupMenu m;
+            win->fillToolbarMenu ("custom.1", m);
+            const auto t = texts (m);
+            CHECK (t.contains ("Edit Custom Button 1...") && t.contains ("Remove Custom Button 1") && t.contains ("Add Custom Button..."),
+                   "toolbar #50: the menu of a custom button: " + t.joinIntoString (" | "));
+        }
+        {
+            juce::PopupMenu m;
+            win->fillToolbarMenu ("", m);
+            CHECK (texts (m).contains ("Manage Visible Buttons..."), "toolbar #50: the menu between the buttons");
+        }
+        win->runToolbarMenuItem ("tool.lasso", MainWindow::TbHideButton);
+        CHECK (! bar->button ("tool.lasso")->isVisible () && ! win->isToolbarButtonShown ("tool.lasso")
+                   && app.recentStore->getValue ("toolbar_hidden").contains ("tool.lasso"),
+               "toolbar #50: Hide Lasso hides it, remembered");
+
+        // Manage Visible Buttons.
+        auto list = win->createManageButtons ();
+        list->setSize (460, 480);
+        CHECK (list->toggleFor ("tool.lasso") != nullptr && ! list->toggleFor ("tool.lasso")->getToggleState ()
+                   && list->toggleFor ("undo")->getToggleState () && list->toggleFor ("calculator") != nullptr,
+               "toolbar #50: the list ticks the shown buttons, the calculator too");
+        CHECK (list->editButton (0) != nullptr && list->removeButton (0) != nullptr && list->editButton (1) == nullptr,
+               "toolbar #50: the custom buttons are listed with Edit and Remove");
+        list->toggleFor ("tool.lasso")->setToggleState (true, juce::sendNotificationSync);
+        CHECK (bar->button ("tool.lasso")->isVisible (), "toolbar #50: ticking restores Lasso");
+        list->toggleFor ("calculator")->setToggleState (false, juce::sendNotificationSync);
+        CHECK (! calc->isVisible () && ! win->isToolbarButtonShown ("calculator"), "toolbar #50: the calculator hides like a button");
+        list->toggleFor ("draw.oval")->setToggleState (false, juce::sendNotificationSync);
+        list->removeButton (0)->onClick ();
+        CHECK (! bar->custom ()[0].defined () && ! bar->button ("custom.1")->isVisible (), "toolbar #50: Remove");
+        win->runToolbarMenuItem ("", MainWindow::TbHideButton);   // nothing to hide between the buttons
+        CHECK (! bar->button ("draw.oval")->isVisible (), "toolbar #50: Oval hidden from the list");
+        win.reset ();
+    }
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar 50 again"));
+        win->setSize (1600, 800);
+        CHECK (! win->isToolbarButtonShown ("draw.oval") && ! win->isToolbarButtonShown ("calculator")
+                   && win->isToolbarButtonShown ("tool.lasso") && ! win->calculatorComp ()->isVisible (),
+               "toolbar #50: the hidden buttons are remembered after a restart");
+        auto list = win->createManageButtons ();
+        list->showAllButton ()->onClick ();
+        CHECK (win->isToolbarButtonShown ("draw.oval") && win->isToolbarButtonShown ("calculator")
+                   && win->calculatorComp ()->isVisible (),
+               "toolbar #50: Show All Buttons restores them");
+        // The merged title row (#52): the calculator is not a place to drag the window.
+        win->setTitleBarHidden (true);
+        const auto cc = win->calculatorComp ()->getBounds ().getCentre ().toFloat ();
+        CHECK (win->findControlAtPoint (cc) == juce::Component::WindowControlKind::client,
+               "toolbar #50: the calculator stays clickable with the title bar hidden");
+        win->setTitleBarHidden (false);
+        win.reset ();
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+}
+
 static void testMainToolbar()
 {
     namespace tb = sc::toolbar;
@@ -24624,13 +24812,16 @@ static void testMainToolbar()
                    && bar->getRight () <= win->workspaceBarComp ()->getX (),
                "toolbar: in the menu bar row, left of the workspace presets");
         CHECK (bar->numButtons () == 14 + tb::kNumCustom, "toolbar: 14 tools and 9 shortcuts");
-        bool allShown = true, allTips = true;
+        bool allShown = true, allTips = true, emptyHidden = true;
         for (int i = 0; i < bar->numButtons (); ++i)
         {
-            allShown = allShown && bar->buttonAt (i)->isVisible ();
+            const bool custom = bar->buttonAt (i)->getComponentID ().startsWith ("custom.");
+            if (custom) emptyHidden = emptyHidden && ! bar->buttonAt (i)->isVisible ();
+            else allShown = allShown && bar->buttonAt (i)->isVisible ();
             allTips = allTips && bar->buttonAt (i)->getTooltip ().isNotEmpty ();
         }
-        CHECK (allShown, "toolbar: every group fits a 1600 px window");
+        CHECK (allShown, "toolbar: every predetermined button fits a 1600 px window");
+        CHECK (emptyHidden, "toolbar: the custom slots not defined yet do not show (#50)");
         CHECK (allTips, "toolbar: every button has a tooltip");
         win->syncSharedState ();
        #if ! JUCE_MAC
@@ -24681,7 +24872,7 @@ static void testMainToolbar()
                                                            ? "Cmd+Alt+K" : "Ctrl+Alt+K"),
                "toolbar: shortcut 1 shows its text, its tooltip its key (Cmd on macOS)");
         CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "cmd+alt+k" })
-                   .contains ("Shortcut 1"),
+                   .contains ("Custom button 1"),
                "toolbar: two shortcuts cannot share a key");
         CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "" }).isEmpty ()
                    && bar->button ("custom.2")->icon == tb::Icon::star,
@@ -31501,6 +31692,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
     SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
+    SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);
