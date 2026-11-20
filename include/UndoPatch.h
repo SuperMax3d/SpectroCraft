@@ -99,6 +99,9 @@ struct Patch
     // "cli").
     int64_t seq = 0;
     int64_t timestampMs = 0;
+    // Order across all documents (UndoManager's global budget drops the
+    // oldest step first; wall-clock milliseconds can tie).
+    int64_t recordOrder = 0;
     juce::String opId;
     juce::var params;
     juce::String source;

@@ -825,10 +825,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     rebuilding the file. On a 10-minute stereo file, a whole-file gain takes
     about 35 ms, and an undo about 20 ms (they took 470 and 480 ms before).
     Each step holds one copy of the region, not two.
-  - The history has a **memory budget**: a quarter of the RAM, between 512 MB
-    and 8 GB. Past it, the oldest steps are dropped (the newest one always
-    stays), so whole-file edits on a long recording cannot push the machine
-    into swap.
+  - The histories have a **memory budget**: a quarter of the RAM, between
+    512 MB and 8 GB, shared by all open documents (ten open files do not each
+    get a quarter). Past it, the oldest steps across the documents are dropped
+    first (each document keeps its newest step), so whole-file edits on long
+    recordings cannot push the machine into swap.
   - The sample loops of the edits (gain, normalize, fades, reverse, EQ,
     envelope), the undo swaps and the interleaving of a save run on every
     core (`include/Parallel.h`); the EQ gives the same samples, bit for bit,
@@ -1699,6 +1700,11 @@ cmake --build build --target SpectroCraft
 Weights are **never committed to this repository** — they are downloaded on
 first use (SHA-256 verified against the registry in `src/AI/ModelManager.cpp`)
 or installed manually, and cached under `%APPDATA%/SpectroCraft/models/<id>/`.
+
+Once loaded, a model stays in memory so that running the effect again starts
+at once. Only one model of each kind (Whisper, DeepFilterNet, DenseUNet) is
+kept: loading another one replaces it. A model unused for 5 minutes is freed
+(Whisper large holds about 3 GB); the next run loads it again.
 The model weights remain under their upstream licenses (Intel's repositories /
 OpenAI MIT for Whisper); SpectroCraft itself is AGPL-3.0, which is compatible
 with the GPL-licensed DeepFilterNet code this port derives from.

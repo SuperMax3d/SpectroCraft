@@ -2,14 +2,14 @@
 // See include/AI/WhisperPipeline.h for the design notes.
 
 #include "AI/WhisperPipeline.h"
+#include "AI/ModelCache.h"
 
 #include <AudioEngine.h>
 #include <Resampler.h>
 
 #include <algorithm>
 #include <cmath>
-#include <map>
-#include <mutex>
+#include <memory>
 
 namespace sc { namespace ai {
 
@@ -72,53 +72,34 @@ std::vector<VadRegion> detectSpeechRegions(const float* p, int n)
     return out;
 }
 
-// Loaded whisper contexts are cached per model file: loading the ggml
-// weights takes seconds, and users may re-run transcription (different
-// language/mode) without reloading.
-std::map<std::string, std::unique_ptr<WhisperTranscriber>>& whisperCache()
+// One loaded whisper context is cached (keyed by model file): loading the
+// ggml weights takes seconds, and users may re-run transcription (different
+// language/mode) without reloading. Only one is kept (large holds ~3 GB) and
+// it is freed after a few idle minutes (ModelCache).
+ModelCache<WhisperTranscriber>& whisperCache()
 {
 #if defined(_WIN32)
-    static std::map<std::string, std::unique_ptr<WhisperTranscriber>> cache;
+    static ModelCache<WhisperTranscriber> cache;
     return cache;
 #else
     // macOS / Linux: never destroyed, like the OpenVINO objects (see
     // OvRuntime::instance): whisper_free at exit would run after ggml's own
     // static state (Metal device, backend registry) may already be gone.
-    static auto* cache = new std::map<std::string, std::unique_ptr<WhisperTranscriber>> ();
+    static auto* cache = new ModelCache<WhisperTranscriber> ();
     return *cache;
 #endif
 }
 
-std::mutex& whisperCacheMutex()
+std::shared_ptr<WhisperTranscriber> getCachedWhisper(const juce::File& ggmlModel, std::string* errOut)
 {
-    static std::mutex m;
-    return m;
-}
-
-WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, std::string* errOut)
-{
-    const std::string key = ggmlModel.getFullPathName ().toStdString ();
-    {
-        std::lock_guard<std::mutex> lock (whisperCacheMutex ());
-        auto it = whisperCache ().find (key);
-        if (it != whisperCache ().end ()) return it->second.get ();
-    }
-
-    auto* raw = new WhisperTranscriber ();
-    std::string err;
-    if (!raw->load (ggmlModel, &err))
-    {
-        delete raw;
-        if (errOut != nullptr) *errOut = err;
-        return nullptr;
-    }
-
-    WhisperTranscriber* result = raw;
-    {
-        std::lock_guard<std::mutex> lock (whisperCacheMutex ());
-        whisperCache ()[key].reset (raw);
-    }
-    return result;
+    return whisperCache ().acquire (ggmlModel.getFullPathName ().toStdString (),
+        [&ggmlModel] (std::string* err) -> std::unique_ptr<WhisperTranscriber>
+        {
+            auto t = std::make_unique<WhisperTranscriber> ();
+            if (!t->load (ggmlModel, err)) return nullptr;
+            return t;
+        },
+        errOut);
 }
 
 } // namespace
@@ -196,7 +177,7 @@ bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
     // ------------------------------------------------------------------
     // Phase B: load the model and run inference.
     // ------------------------------------------------------------------
-    WhisperTranscriber* wt = getCachedWhisper (ggmlModel, errOut);
+    const auto wt = getCachedWhisper (ggmlModel, errOut);   // kept alive for the whole run
     if (wt == nullptr)
         return false;
 
