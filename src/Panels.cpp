@@ -6945,6 +6945,15 @@ void StatusBar::paint (juce::Graphics& g)
         leftX = chips.back().getRight() + 12;
         g.setFont (12.0f);
     }
+    if (const auto alert = diskAlertBounds(); ! alert.isEmpty())
+    {
+        // The file changed or vanished on disk (issue #70): red, clickable.
+        g.setColour (juce::Colour::fromRGB (255, 85, 85));
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.drawText (diskAlert_, alert, juce::Justification::centredLeft, false);
+        g.setFont (12.0f);
+        leftX = alert.getRight() + 12;
+    }
     if (!modeText.isEmpty() && leftX < b.getWidth() - 8)
     {
         // Live recording indicator: a solid red dot drawn as graphics so it
@@ -7120,9 +7129,34 @@ int StatusBar::channelChipAt (juce::Point<int> p) const
     return -1;
 }
 
+juce::Rectangle<int> StatusBar::diskAlertBounds() const
+{
+    if (diskAlert_.isEmpty())
+        return {};
+    const auto chips = channelChipRects();
+    const int x = chips.empty() ? fileAndRateEnd() : chips.back().getRight() + 12;
+    const juce::Font f (juce::FontOptions (12.0f, juce::Font::bold));   // paint's font
+    const int w = (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, diskAlert_)) + 8;
+    const int limit = rightFits_ ? computeRightLayout (getWidth()).selLabelX - 8 : getWidth() - 8;
+    if (x + w > limit)
+        return {};
+    return { x, 0, w, getHeight() };
+}
+
+void StatusBar::mouseMove (const juce::MouseEvent& e)
+{
+    setMouseCursor (diskAlertBounds().contains (e.getPosition()) ? juce::MouseCursor::PointingHandCursor
+                                                                 : juce::MouseCursor::NormalCursor);
+}
+
 void StatusBar::mouseDown (const juce::MouseEvent& e)
 {
     if (e.mods.isPopupMenu()) return;
+    if (diskAlertBounds().contains (e.getPosition()))
+    {
+        if (onDiskAlertClicked) onDiskAlertClicked();
+        return;
+    }
     const int ch = channelChipAt (e.getPosition());
     // Ctrl/Cmd or Shift asks for "only this channel" - the same modifier the
     // channel list and the track numbers use for soloing.

@@ -112,6 +112,11 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `modelPick*`), shown by `include/ModelPanel.h`; the spectrogram guide is
   `SpectralView::drawModelPickGuide`. Behaviour: `docs/model-panel.md`, tests
   `tests/regression/model.inc`.
+- Files changed on disk (issue #70): `include/FileWatch.h` + `src/FileWatch.cpp` (`DiskStamp`, the pure
+  `diskStateFor`, `ScopedWrite` around every write of an open file by the app - `AudioEngine::saveFile`
+  and `patchRiffChunks` have one: add one to any new writer - and the background `DiskWatcher`);
+  `FileDoc::diskStamp` / `diskState`, `MainWindow::checkDiskStates` / `runDiskChoice`,
+  `Application::reloadDoc`; tests `tests/regression/disk_changes.inc`.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip

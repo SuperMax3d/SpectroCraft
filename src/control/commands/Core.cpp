@@ -261,6 +261,27 @@ Outcome docCloseCmd (Context& ctx)
                                     { "count", app.numDocs() } }));
 }
 
+Outcome docReloadCmd (Context& ctx)
+{
+    // File > Reload File (issue #70): the file read again from disk.
+    Application& app = ctx.app;
+    FileDoc& d = *ctx.doc;
+    if (app.recording.active && app.recDoc() == &d)
+        return Outcome::failure (err::busy, "this document is being recorded into", obj ({ { "recording", true } }));
+    if (d.file.getFullPathName().isEmpty() || ! d.file.existsAsFile())
+        return Outcome::failure (err::failed, "this document has no file on disk to read again",
+                                 obj ({ { "doc", d.id }, { "hint", "doc.save writes it first" } }));
+    if (app.docIsUnsaved (d) && !ctx.confirmed())
+        return Outcome::failure (err::confirmRequired, "Document has unsaved changes",
+                                 obj ({ { "unsaved", true }, { "doc", d.id },
+                                        { "hint", "pass confirm:true to discard them" } }));
+    const int id = d.id;
+    std::string e;
+    if (! app.reloadDoc (indexOf (app, &d), &e))
+        return Outcome::failure (err::failed, juce::String::fromUTF8 (e.c_str()));
+    return Outcome::success (obj ({ { "reloaded", id } }));
+}
+
 Outcome docCloseAllCmd (Context& ctx)
 {
     Application& app = ctx.app;
@@ -398,6 +419,10 @@ void registerCoreCommands (CommandRegistry& r)
     r.add ({ "doc.close", "Close a document (confirm when it has unsaved changes)", "doc",
              { P ("confirm", PType::Boolean).describe ("Discard unsaved changes") },
              {}, NeedsDoc | NoDocSwitch | Destructive, {}, docCloseCmd });
+
+    r.add ({ "doc.reload", "Read a document's file again from disk (confirm when it has unsaved changes)", "doc",
+             { P ("confirm", PType::Boolean).describe ("Discard unsaved changes") },
+             {}, NeedsDoc | NoDocSwitch | Destructive, {}, docReloadCmd });
 
     r.add ({ "doc.closeAll", "Close every document (confirm when some are unsaved)", "doc",
              { P ("confirm", PType::Boolean).describe ("Discard unsaved changes") },

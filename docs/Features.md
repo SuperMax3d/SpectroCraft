@@ -792,6 +792,24 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   application-data folder), survives restarts, deduplicates repeated opens,
   and self-heals: entries whose file was deleted or moved are dropped when
   clicked. "Clear Recent Files" empties the list.
+- **Files changed on disk** (issue #70): every open file is checked in the
+  background every 2 seconds (a slow network drive never blocks the window).
+  When another program rewrites or deletes the active document's file, the
+  footer shows **File Modified On Disk** or **File Deleted On Disk** in red,
+  after the channel numbers. A click on it asks what to do:
+  - modified: **Save File** (this document replaces the file on disk),
+    **Reload File** (the file is read again; unsaved changes are discarded)
+    or **Ignore**;
+  - deleted: **Save File** (writes the document back to its path), **Close
+    File (Discard changes)** or **Ignore**.
+  Ignore keeps quiet until the file changes once more. The app's own writes
+  (Save, Save As, the metadata it embeds in a WAV) are never reported: a check
+  made while the app writes a file, or before its write ended, is not
+  trusted. **File > Reload File** reads the active file again at any time
+  (it asks first when there are unsaved changes). A reload keeps the
+  document's place in the list, its id (AI control), its time window and its
+  playhead; the edit history starts over. AI control: `doc.reload` (confirm
+  when there are unsaved changes).
 - **Drag & drop**: drop one or more audio (or video) files onto the window;
   every valid dropped file becomes its own document.
 - **Merge (Shift + drag & drop)**: dropping files while holding Shift shows a

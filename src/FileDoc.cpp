@@ -14,7 +14,9 @@ static int nextFileDocId ()
     return ++counter;   // documents may be built on worker threads (loadFileAsync)
 }
 
-FileDoc::FileDoc() : id (nextFileDocId ())
+FileDoc::FileDoc() : FileDoc (nextFileDocId ()) {}
+
+FileDoc::FileDoc (int reuseId) : id (reuseId)
 {
     // Wire this document's engine to its own undo history, marker list and
     // transcription data so edits are recorded per file and WAV saves embed
@@ -37,6 +39,10 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     // Diagnostic log: the path is written once here (doc.open), later events
     // refer to the document id.
     const double diagT0 = sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    // The disk's stamp BEFORE reading (issue #70): a change made while the
+    // file loads is reported afterwards rather than missed.
+    const double stampAtMs = sc::files::nowMs();
+    const auto stampAtLoad = sc::files::DiskStamp::of (f);
     if (!engine.loadFile (f, onProgress, cancel))
     {
         if (diagT0 > 0.0)
@@ -53,6 +59,10 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     file = f;
     name = f.getFileName();
     videoFile = sc::isVideoPictureCandidate (f) ? f : juce::File();
+    diskStamp = stampAtLoad;
+    diskStampAtMs = stampAtMs;
+    diskIgnored.reset();
+    diskState = sc::files::DiskState::same;
 
     const bool isWav = f.getFileExtension().equalsIgnoreCase (".wav");
 

@@ -37,6 +37,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/ApplicationModel.cpp   # Model panel: actions on the active file (issue #40)
         ${CMAKE_SOURCE_DIR}/src/ModelPanel.cpp    # Model panel UI (issue #40)
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
+        ${CMAKE_SOURCE_DIR}/src/FileWatch.cpp   # open files changed / deleted on disk (issue #70)
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
         ${CMAKE_SOURCE_DIR}/src/Resampler.cpp
         ${CMAKE_SOURCE_DIR}/src/FFTAvx.cpp

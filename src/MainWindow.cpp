@@ -808,6 +808,16 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     statusBar = std::make_unique<StatusBar>();
     juce::Component::addAndMakeVisible (statusBar.get());
 
+    // Issue #70: the open files are checked on disk in the background; the
+    // footer says when another program changed or deleted one. The tests
+    // scan by hand (scanNow) instead of running the thread.
+    statusBar->onDiskAlertClicked = [this] { showDiskChangeDialog (); };
+    diskWatcher_ = std::make_unique<sc::files::DiskWatcher> ();
+    diskWatcher_->onScanned = [this] { checkDiskStates (); };
+    updateDiskWatchList ();   // documents opened before the window
+    if (! sc::alert::isHeadless ())
+        diskWatcher_->start ();
+
     // One tooltip window for the whole app: it watches for mouse hovers and
     // shows the tip of whichever TooltipClient component is under the cursor
     // (none at all while Help > Show Tooltips is off).
@@ -1136,6 +1146,8 @@ using WorkProgressDialog = sc::WorkProgressDialog;
 
 MainWindow::~MainWindow()
 {
+    diskWatcher_.reset ();   // its thread and pending callbacks first (issue #70)
+
     // A pending arrangement change (saves are debounced by the timer).
     if (dockLayoutDirty_)
         saveDockLayout ();
@@ -2800,6 +2812,8 @@ bool MainWindow::sessionBarWanted() const
 void MainWindow::syncSharedState()
 {
     refreshToolbar ();   // the tools on, Undo / Redo usable
+    updateDiskWatchList ();   // issue #70: the files to check, the footer's alert
+    refreshDiskAlert ();
     // Sessions (issue #21): after an edit of one copy of a file that is in
     // the session several times, the other copies follow (a chained step).
     app.syncLinkedSessionFiles();
@@ -4463,6 +4477,150 @@ void MainWindow::handleSaveMetadataOnly()
         updateTitle();   // the * disappears if nothing else is unsaved
 }
 
+// ---------------------------------------------------------------------------
+// Files changed on disk (issue #70)
+// ---------------------------------------------------------------------------
+
+void MainWindow::updateDiskWatchList ()
+{
+    if (diskWatcher_ == nullptr)
+        return;
+    juce::Array<juce::File> files;
+    for (const auto& d : app.docs)
+        if (d->file.getFullPathName ().isNotEmpty () && ! files.contains (d->file))
+            files.add (d->file);
+    if (files != diskWatchList_)
+    {
+        diskWatchList_ = files;
+        diskWatcher_->setFiles (files);
+    }
+}
+
+void MainWindow::checkDiskStates ()
+{
+    if (diskWatcher_ == nullptr)
+        return;
+    for (const auto& p : app.docs)
+    {
+        FileDoc& d = *p;
+        if (d.file.getFullPathName ().isEmpty ())
+            continue;
+        const auto seen = diskWatcher_->seenOf (d.file);
+        const auto own = sc::files::lastOwnWrite (d.file);
+        // A look older than what the document knows, or taken while the app
+        // was still writing the file, proves nothing: wait for the next one.
+        if (! seen.has_value () || seen->atMs <= d.diskStampAtMs
+            || (own.has_value () && seen->atMs <= own->endMs))
+            continue;
+        auto adopt = d.diskStamp;
+        d.diskState = sc::files::diskStateFor (d.diskStamp, seen->stamp, sc::files::isBeingWritten (d.file),
+                                               own.has_value () ? std::optional (own->stamp) : std::nullopt,
+                                               d.diskIgnored, &adopt);
+        if (adopt != d.diskStamp)
+        {
+            d.diskStamp = adopt;   // the app's own write
+            d.diskStampAtMs = seen->atMs;
+        }
+    }
+    refreshDiskAlert ();
+}
+
+void MainWindow::refreshDiskAlert ()
+{
+    if (statusBar == nullptr)
+        return;
+    const FileDoc* d = app.doc ();
+    juce::String text;
+    if (d != nullptr && d->diskState == sc::files::DiskState::modified)
+        text = "File Modified On Disk";
+    else if (d != nullptr && d->diskState == sc::files::DiskState::deleted)
+        text = "File Deleted On Disk";
+    statusBar->setDiskAlert (text);
+}
+
+void MainWindow::showDiskChangeDialog ()
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr || d->diskState == sc::files::DiskState::same || isBackgroundJobRunning ())
+        return;
+    const bool deleted = d->diskState == sc::files::DiskState::deleted;
+    const juce::String name = d->name.isNotEmpty () ? d->name : d->file.getFileName ();
+    const bool unsaved = app.docIsUnsaved (*d);
+    const juce::String message = deleted
+        ? "\"" + name + "\" was deleted or moved by another program:\n" + d->file.getFullPathName ()
+              + "\n\nSave File writes this document back to that path. Close File closes it"
+              + (unsaved ? " and discards its unsaved changes." : ".")
+        : "\"" + name + "\" was changed on disk by another program:\n" + d->file.getFullPathName ()
+              + "\n\nReload File reads it again" + (unsaved ? " and discards your unsaved changes" : "")
+              + ". Save File replaces it with this document.";
+    juce::AlertWindow dlg (deleted ? "File Deleted On Disk" : "File Modified On Disk", message,
+                           juce::AlertWindow::WarningIcon, this);
+    dlg.addButton ("Save File", DiskSave);
+    dlg.addButton (deleted ? "Close File (Discard changes)" : "Reload File", DiskReloadOrClose);
+    dlg.addButton ("Ignore", DiskIgnore, juce::KeyPress (juce::KeyPress::escapeKey));
+    runDiskChoice (dlg.runModalLoop ());
+}
+
+void MainWindow::runDiskChoice (int choice)
+{
+    FileDoc* d = app.doc ();
+    if (d == nullptr)
+        return;
+    const bool deleted = d->diskState == sc::files::DiskState::deleted;
+    switch (choice)
+    {
+        case DiskSave:
+            runSaveAsync (d->file, false);   // the save refreshes the known stamp
+            break;
+        case DiskReloadOrClose:
+            if (deleted)
+                app.closeFile ();   // discards the changes: the user chose so
+            else
+            {
+                std::string err;
+                if (! app.reloadDoc (app.activeDocIndex, &err))
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Reload File",
+                                               juce::String::fromUTF8 (err.c_str ()), "", this);
+            }
+            break;
+        case DiskIgnore:
+        default:
+            // Not reported again until the file changes once more.
+            if (const auto seen = diskWatcher_ != nullptr ? diskWatcher_->seenOf (d->file) : std::nullopt)
+                d->diskIgnored = seen->stamp;
+            else
+                d->diskIgnored = sc::files::DiskStamp::of (d->file);
+            d->diskState = sc::files::DiskState::same;
+            break;
+    }
+    refreshDiskAlert ();
+    updateTitle ();
+}
+
+void MainWindow::handleReloadFile ()
+{
+    FileDoc* d = app.doc ();
+    if (d == nullptr || ! d->engine.isFileLoaded () || isBackgroundJobRunning ())
+        return;
+    if (app.docIsUnsaved (*d))
+    {
+        const juce::String name = d->name.isNotEmpty () ? d->name : d->file.getFileName ();
+        juce::AlertWindow dlg ("Reload File",
+            "This file has unsaved changes:\n\n" + name
+                + "\n\nReload it from disk and discard the changes?",
+            juce::AlertWindow::WarningIcon, this);
+        dlg.addButton ("Reload", 1);
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (dlg.runModalLoop () != 1)
+            return;
+    }
+    std::string err;
+    if (! app.reloadDoc (app.activeDocIndex, &err))
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Reload File",
+                                   juce::String::fromUTF8 (err.c_str ()), "", this);
+    updateTitle ();
+}
+
 bool MainWindow::isBackgroundJobRunning() const
 {
     const int waits = audioInitDialog != nullptr ? 1 : 0;   // not a job: nothing to protect
@@ -5087,6 +5245,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case FileClose:
             handleCloseFile();   // asks first when the file has unsaved changes
             break;
+        case FileReload: handleReloadFile(); break;
         case FileSave: handleFileSave(); break;
         case FileSaveAs: handleFileSaveAs(); break;
         case MetaEmbedded:
@@ -10056,6 +10215,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         }
 
         menu.addItem (FileClose, "Close\tCtrl+W", app.audioEngine().isFileLoaded(), false);
+        {
+            // Issue #70: read the file again from disk.
+            const FileDoc* d = app.doc ();
+            menu.addItem (FileReload, "Reload File",
+                          d != nullptr && d->engine.isFileLoaded () && d->file.existsAsFile (), false);
+        }
         if (app.numDocs () > 0)
             menu.addItem (FileCloseAll, "Close All", true, false);
         menu.addSeparator();

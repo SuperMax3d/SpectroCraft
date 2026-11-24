@@ -4,6 +4,7 @@
 
 #include "AudioEngine.h"
 #include "Diagnostics.h"
+#include "FileWatch.h"   // the app's own writes (issue #70)
 #include "FilterEQ.h"
 #include "TimeStretch.h"
 #include "VideoAudio.h"
@@ -2675,7 +2676,12 @@ bool AudioEngine::saveFile (const juce::File& file) const
     // Diagnostic log: every save (Save, Save As, export through the engine)
     // ends here; the path is written in clear (internal use).
     const double diagT0 = sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
-    const bool ok = saveFileImpl (file);
+    bool ok = false;
+    {
+        // The app's own write (issue #70): never reported as a change on disk.
+        const sc::files::ScopedWrite own (file);
+        ok = saveFileImpl (file);
+    }
     if (diagT0 > 0.0)
     {
         const double ms = juce::Time::getMillisecondCounterHiRes() - diagT0;
