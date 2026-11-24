@@ -484,6 +484,9 @@ public:
     /** Default buddy: where a panel goes when it has no remembered spot
         (the group of this other panel). */
     void setDefaultBuddy (const juce::String& id, const juce::String& buddy) { buddies_[id] = buddy; }
+    /** A panel a saved layout does not know (added by a newer version) stays
+        closed instead of opening next to its buddy (File Info, issue #67). */
+    void setClosedByDefault (const juce::String& id) { closedByDefault_.addIfNotAlreadyThere (id); }
 
     // ------------------------------------------------------------ layout state
     juce::var saveLayout() const;
@@ -592,6 +595,7 @@ private:
     std::vector<PanelDesc> panels_;
     std::map<juce::String, Memory> memory_;
     std::map<juce::String, juce::String> buddies_;
+    juce::StringArray closedByDefault_;
     std::unique_ptr<DockArea> mainArea_;
     std::vector<std::unique_ptr<FloatingWindow>> floaters_;
     std::vector<std::unique_ptr<juce::Component>> retired_;

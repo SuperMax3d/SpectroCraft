@@ -2468,6 +2468,11 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     const std::string* bkdk = (saveBkdkPayload != nullptr && !saveBkdkPayload->empty ())
                               ? saveBkdkPayload : nullptr;
 
+    // Text metadata (File Info, issue #67): the file's own standard fields,
+    // written in either metadata mode.
+    const std::string infoPayload = saveInfoListBuilder ? saveInfoListBuilder() : std::string();
+    const std::string dispPayload = saveDispBuilder ? saveDispBuilder() : std::string();
+
     // RIFF chunks must be word-aligned: odd-sized payloads get one pad byte.
     auto chunkBytes = [] (const std::string& p) -> int64
     { return p.empty() ? 0 : 8 + (int64_t) p.size () + ((p.size () & 1) ? 1 : 0); };
@@ -2476,6 +2481,8 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     const int64_t scttChunk = sctt != nullptr ? chunkBytes (*sctt) : 0;
     const int64_t scmdChunk = chunkBytes (scmdPayload);
     const int64_t bkdkChunk = bkdk != nullptr ? chunkBytes (*bkdk) : 0;
+    const int64_t infoChunk = chunkBytes (infoPayload);
+    const int64_t dispChunk = chunkBytes (dispPayload);
 
     int64_t riffSize = 4            // "WAVE"
                      + 8 + 16       // fmt chunk
@@ -2484,7 +2491,9 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
                      + listChunk
                      + scttChunk
                      + scmdChunk
-                     + bkdkChunk;
+                     + bkdkChunk
+                     + infoChunk
+                     + dispChunk;
 
     // RIFF sizes are 32-bit: past 4 GiB write RF64 (EBU Tech 3306), whose
     // "ds64" chunk carries the 64-bit RIFF/data sizes and the 32-bit fields
@@ -2626,6 +2635,20 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         ok = writeChunkPayload (*out, *bkdk);
     }
 
+    // LIST/INFO and DISP: the File Info panel's text fields (issue #67).
+    if (infoChunk > 0 && ok)
+    {
+        putFourCC (*out, "LIST");
+        putU32 (*out, (uint32_t) infoPayload.size());
+        ok = writeChunkPayload (*out, infoPayload);
+    }
+    if (dispChunk > 0 && ok)
+    {
+        putFourCC (*out, "DISP");
+        putU32 (*out, (uint32_t) dispPayload.size());
+        ok = writeChunkPayload (*out, dispPayload);
+    }
+
     // Every write error (including the 32/64-bit header writes, whose results
     // are not checked one by one) ends up in the stream status; the final
     // size check also catches short writes that set no error.
@@ -2733,6 +2756,8 @@ bool AudioEngine::saveFileImpl (const juce::File& file) const
         sub.saveMetaMode = saveMetaMode;
         sub.saveScmdBuilder = saveScmdBuilder;
         sub.saveBkdkPayload = saveBkdkPayload;
+        sub.saveInfoListBuilder = saveInfoListBuilder;
+        sub.saveDispBuilder = saveDispBuilder;
         const bool ok = sub.saveFileImpl (file);
         if (ok)
         {

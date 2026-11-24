@@ -112,6 +112,10 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `modelPick*`), shown by `include/ModelPanel.h`; the spectrogram guide is
   `SpectralView::drawModelPickGuide`. Behaviour: `docs/model-panel.md`, tests
   `tests/regression/model.inc`.
+- File Info panel (issue #67; closed by default, `DockManager::setClosedByDefault`): WAV text metadata in
+  `include/RiffInfo.h` + `src/RiffInfo.cpp` (LIST/INFO + DISP payloads, `FileDoc::riffInfo`, written by
+  `AudioEngine::saveWavWithMarkers` and `Application::saveActiveDocMeta`), basic Markdown in
+  `include/Markdown.h`, the panel in `include/FileInfoPanel.h`; tests `tests/regression/file_info.inc`.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip

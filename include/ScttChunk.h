@@ -60,6 +60,7 @@ bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
 struct RiffPatchEntry {
     char fourcc [4] = {'\0', '\0', '\0', '\0'};   // e.g. "cue ", "SCTT", "SCMD" or "LIST"
     bool adtlList = false;      // for LIST chunks: only manage sub-lists of type "adtl"
+    char listType [4] = {'\0', '\0', '\0', '\0'};   // or of this type ("INFO"; issue #67)
     std::string payload;        // new payload (without the 8-byte chunk header)
     bool present = true;        // false => remove this chunk if it exists
 };

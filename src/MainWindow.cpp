@@ -464,6 +464,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     selectionPanel = std::make_unique<SelectionPanel> (app);
     drawingPanel   = std::make_unique<DrawingPanel> (app);
     modelPanel     = std::make_unique<ModelPanel> (app);
+    fileInfoPanel  = std::make_unique<FileInfoPanel> (app);   // issue #67
+    fileInfoPanel->onEdited = [this] { updateTitle (); };
+    fileInfoPanel->onCloseRequested = [this] { setPanelVisible ("fileinfo", false); };
     historyPanel  = std::make_unique<HistoryPanel> (app);
     actionsPanel  = std::make_unique<ActionsPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
@@ -605,6 +608,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     for (const auto& e : leftPanelEntries ())
         if (auto* c = panelForId (e.id))
             dock_->registerPanel ({ e.id, e.name, c, true, 340, 300 });
+    dock_->setClosedByDefault ("fileinfo");   // issue #67: also in layouts saved before it existed
     // A panel with no remembered place joins its default group (the one of
     // Frequency Analysis or Spectral Controls).
     for (const auto& e : leftPanelEntries ())
@@ -1615,6 +1619,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     if (c == drawingPanel.get())        return "drawing";
     if (c == videoDockHost.get())       return "video";
     if (c == modelPanel.get())          return "model";
+    if (c == fileInfoPanel.get())       return "fileinfo";
     return nullptr;
 }
 
@@ -1642,6 +1647,9 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
         // Last, so the Window menu keeps its order; closed in the built-in
         // workspaces (open it from Window > Model).
         { "model",       "Model",              true  },
+        // File Info (issue #67): closed everywhere until opened from the
+        // Window menu.
+        { "fileinfo",    "File Info",          true  },
     };
 }
 
@@ -1662,6 +1670,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
     if (id == "drawing")     return drawingPanel.get ();
     if (id == "video")       return videoDockHost.get ();
     if (id == "model")       return modelPanel.get ();
+    if (id == "fileinfo")    return fileInfoPanel.get ();
     return nullptr;
 }
 
@@ -1870,7 +1879,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
                   { dockGroup ({ "tables", "video" }), 0.26 } }), 0.57 },
             { dockSplit (false, {
                   { dockGroup ({ "controls", "drawing" }), 0.55 },
-                  { dockGroup ({ "fft" }), 0.45 } }), 0.23 } }), { "model" });
+                  { dockGroup ({ "fft" }), 0.45 } }), 0.23 } }), { "model", "fileinfo" });
 
     if (id == "analysis")
         // A wide Frequency Analysis beside the Editor, three groups below.
@@ -1881,7 +1890,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
             { dockSplit (true, {
                   { dockGroup ({ "controls", "selection", "drawing" }), 0.34 },
                   { dockGroup ({ "markers", "transcription", "history" }), 0.33 },
-                  { dockGroup ({ "tables", "actions", "python", "video" }), 0.33 } }), 0.34 } }), { "model" });
+                  { dockGroup ({ "tables", "actions", "python", "video" }), 0.33 } }), 0.34 } }), { "model", "fileinfo" });
 
     if (id == "video")
         // The picture large above the Editor.
@@ -1893,7 +1902,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
                   { dockSplit (true, {
                         { dockGroup ({ "video" }), 0.55 },
                         { dockGroup ({ "controls", "fft" }), 0.45 } }), 0.46 },
-                  { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }), { "model" });
+                  { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }), { "model", "fileinfo" });
 
     // "default": the classic arrangement - a left column with two groups
     // beside the Editor. Frequency Analysis is the selected tab, Model sits
@@ -1903,7 +1912,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
         { dockSplit (false, {
               { dockGroup ({ "fft", "python", "tables", "model", "video" }, "fft"), 0.52 },
               { dockGroup ({ "controls", "markers", "transcription", "selection", "drawing" }), 0.48 } }), 0.245 },
-        { dockGroup ({ "editor" }), 0.755 } }), { "history", "actions" });
+        { dockGroup ({ "editor" }), 0.755 } }), { "history", "actions", "fileinfo" });
 }
 
 std::vector<sc::dock::Workspaces::Entry> MainWindow::builtInWorkspaces() const
@@ -1939,6 +1948,7 @@ juce::var MainWindow::legacyLeftLayout() const
     const int sep = saved.indexOfChar ('|');
     juce::StringArray closed = ids (app.recentStore->getValue ("left_panels_closed"));
     closed.addIfNotAlreadyThere ("model");   // newer than the old column: closed, like in the workspaces
+    closed.addIfNotAlreadyThere ("fileinfo");
     juce::StringArray top = ids (sep < 0 ? saved : saved.substring (0, sep));
     juce::StringArray bottom = ids (sep < 0 ? juce::String () : saved.substring (sep + 1));
     for (const auto& id : closed)
@@ -2930,6 +2940,7 @@ void MainWindow::refreshPanels()
     if (selectionPanel)   selectionPanel->refresh();
     if (drawingPanel)     drawingPanel->refresh();
     if (modelPanel)       modelPanel->refresh();
+    if (fileInfoPanel)    fileInfoPanel->refresh();
     if (tablesPanel)      tablesPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();

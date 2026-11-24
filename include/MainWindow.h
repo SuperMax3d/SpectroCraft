@@ -20,6 +20,7 @@
 #include "ContentAwareTimeScale.h"
 #include "control/UiBridge.h"   // AI control: what commands may ask of this window
 #include "ModelPanel.h"
+#include "FileInfoPanel.h"   // WAV text metadata (issue #67)
 
 class StemSeparationWindow;   // defined in StemSeparation.h
 class VideoWindow;            // defined in VideoWindow.h
@@ -875,6 +876,7 @@ private:
 #endif
     std::unique_ptr<SelectionPanel> selectionPanel;           // named selections + clone & multiply
     std::unique_ptr<DrawingPanel> drawingPanel;               // spectrogram drawings (bottom group)
+    std::unique_ptr<FileInfoPanel> fileInfoPanel;             // WAV text metadata (issue #67); closed by default
     std::unique_ptr<ModelPanel> modelPanel;                   // sound model (issue #40); closed by default
     std::unique_ptr<TablesPanel> tablesPanel;                 // imported CSV tables (top group)
     std::unique_ptr<HistoryPanel> historyPanel;

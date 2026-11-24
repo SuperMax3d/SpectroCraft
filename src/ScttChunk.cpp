@@ -692,22 +692,25 @@ bool patchRiffChunks(const juce::File& wavFile,
 
         const int64_t padded = static_cast<int64_t> (size) + ((size & 1) ? 1 : 0);
 
-        // Does this chunk match a managed entry? (LIST matches only "adtl" type.)
+        // Does this chunk match a managed entry? (A LIST entry matches only
+        // its own list type: "adtl", or e.g. "INFO".)
         bool managed = false;
         for (const auto& e : entries)
         {
             if (std::memcmp (e.fourcc, fourcc, 4) != 0) continue;
-            if (!e.adtlList)
+            const bool typed = e.adtlList || e.listType[0] != '\0';
+            if (!typed)
             {
                 managed = true;
                 break;
             }
             char listType [4];
             const int64_t savePos = in.getPosition();   // at payload start
-            if (size >= 8 && in.read (listType, 4) == 4
-                && std::memcmp (listType, "adtl", 4) == 0)
+            if (size >= 4 && in.read (listType, 4) == 4
+                && std::memcmp (listType, e.adtlList ? "adtl" : e.listType, 4) == 0)
                 managed = true;
             in.setPosition (savePos);   // always restore: the skip below uses it
+            if (managed) break;
         }
 
         if (managed)

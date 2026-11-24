@@ -792,6 +792,27 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   application-data folder), survives restarts, deduplicates repeated opens,
   and self-heals: entries whose file was deleted or moved are dropped when
   clicked. "Clear Recent Files" empties the list.
+- **File Info panel** (issue #67; Window > File Info, closed by default):
+  the WAV's text metadata as Adobe Audition's File Info > Text Fields lists
+  it - Display Title (the `DISP` chunk), Original Artist (`IART`), Name
+  (`INAM`), Genre (`IGNR`), Key Words (`IKEY`), Digitization Source
+  (`ISRF`), Original Medium (`IMED`), Engineers (`IENG`), Digitizer
+  (`ITCH`), Source Supplier (`ISRC`), Copyright (`ICOP`), Software Package
+  (`ISFT`), Creation Date (`ICRD`), and the multi-line **Comments** (`ICMT`)
+  and **Subject** (`ISBJ`). They are read when the file opens, edited in
+  place (the document becomes unsaved) and written inside the WAV (a `LIST`
+  chunk of type `INFO`) by Save, Save As WAV and Save Metadata, in either
+  metadata mode: they are the file's own standard fields, read by other
+  programs. INFO fields the panel does not show (`IPRD`, ...) are kept as
+  they were. Before this, a Save dropped the source file's INFO chunk.
+  Texts are written in UTF-8; a field that is not valid UTF-8 reads as
+  Latin-1. Other formats show the fields read-only with a note.
+  Comments and Subject take **basic Markdown**, stored as typed: `# ` to
+  `### ` headings, `- ` / `* ` bullets, `1. ` numbered items, `---` rules,
+  `**bold**`, `*italic*`, `` `code` ``, `\` to escape a marker. The buttons
+  above the field (B, I, `, H, -, 1.) wrap the selection or prefix its lines
+  (click again to remove); **Preview** shows the text formatted, and a
+  double-click on the preview goes back to editing.
 - **Drag & drop**: drop one or more audio (or video) files onto the window;
   every valid dropped file becomes its own document.
 - **Merge (Shift + drag & drop)**: dropping files while holding Shift shows a

@@ -25,6 +25,8 @@ FileDoc::FileDoc() : id (nextFileDocId ())
     engine.setScttForSave (&scttJson);
     engine.setMetaModeForSave (&metaMode);
     engine.setBkdkForSave (&originalBkdkPayload);   // preserve the source's bkdk chunk on WAV saves
+    engine.setRiffInfoForSave ([this] () { return sc::riffinfo::buildInfoListPayload (riffInfo); },
+                               [this] () { return sc::riffinfo::buildDispPayload (riffInfo); });
     engine.setScmdJsonForSave ([this] () { return buildScmdJson (); });
     markers.onChange = [this] { metaDirty = true; };
 }
@@ -55,6 +57,7 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     videoFile = sc::isVideoPictureCandidate (f) ? f : juce::File();
 
     const bool isWav = f.getFileExtension().equalsIgnoreCase (".wav");
+    riffInfo = sc::riffinfo::readFromWav (f);   // File Info (issue #67); empty for other formats
 
     // ---- Detect where this file's metadata lives --------------------------
     // Priority: unified .meta.json > legacy sidecars (.markers.json /
