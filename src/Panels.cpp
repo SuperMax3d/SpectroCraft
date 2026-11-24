@@ -5259,6 +5259,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         app.settings.specHarmMaxK = 10;
         app.settings.specHarmN = 1;
         app.settings.specHarmNumbers = false;
+        app.settings.readability = false;
+        app.settings.freqBalance = 0.7f;
+        app.settings.timeBalance = 0.0f;
         app.colourMap = ColourMap::Classic;
         app.spectralEngine.setColourMap (app.colourMap);
 
@@ -5271,6 +5274,7 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         syncLevelControls();
         syncHarmControls();
         syncAutoControls();
+        syncReadabilityControls();
         preview.repaint();
 
         // Reset the spectral view's local frequency axis to the defaults.
@@ -5278,6 +5282,48 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         resized();   // the auto parameter rows reappear with Auto selected
         if (app.onStateChange) app.onStateChange();
     };
+
+    // Readability (issue #69): display-only level balancing, off by default.
+    readabilityBtn.setButtonText ("Readability");
+    readabilityBtn.setClickingTogglesState (true);
+    readabilityBtn.onClick = [this]
+    {
+        app.settings.readability = readabilityBtn.getToggleState();
+        syncReadabilityControls();
+        app.saveSettings();
+        if (app.onStateChange) app.onStateChange();
+    };
+    readabilityBtn.setTooltip ("Evens out the spectrogram's levels so quiet and loud parts show at the "
+                               "same time, like an HDR tone map. Only the picture changes, never the audio.");
+    auto setupBalance = [this] (juce::Slider& sl, juce::Label& lab, const char* text, float Settings::* field,
+                                const char* tip)
+    {
+        sl.setSliderStyle (juce::Slider::LinearHorizontal);
+        sl.setRange (0.0, 100.0, 1.0);
+        sl.setTextBoxStyle (juce::Slider::TextBoxRight, false, 44, 18);
+        sl.setTextValueSuffix (" %");
+        sl.onValueChange = [this, &sl, field]
+        {
+            app.settings.*field = (float) (sl.getValue() / 100.0);
+            if (! sl.isMouseButtonDown())
+                app.saveSettings();   // typed or keyboard; a drag saves when it ends
+            if (app.onStateChange) app.onStateChange();
+        };
+        sl.onDragEnd = [this] { app.saveSettings(); };
+        sl.setTooltip (tip);
+        lab.setText (text, juce::dontSendNotification);
+        lab.setFont (juce::FontOptions (12.0f));
+        lab.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        lab.setTooltip (tip);
+    };
+    setupBalance (freqBalanceSlider, freqBalanceLab, "Frequency", &Settings::freqBalance,
+                  "Frequency balance: brings every frequency band toward the same average level "
+                  "(the quiet treble rises, the loud bass comes down; peaks keep their height above "
+                  "their band).");
+    setupBalance (timeBalanceSlider, timeBalanceLab, "Time", &Settings::timeBalance,
+                  "Time balance: brings quiet and loud moments toward the same average level, like an "
+                  "automatic gain control. Silence is never lifted.");
+    syncReadabilityControls();
 
     refreshBtn.setButtonText ("Refresh F5");
     refreshBtn.onClick = [this] { if (onRefresh) onRefresh (); };
@@ -5362,6 +5408,10 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     addAndMakeVisible (&resetFreqBtn);
     addAndMakeVisible (&fftSizeCombo);
     addAndMakeVisible (&refreshBtn);
+    for (juce::Component* c : { (juce::Component*) &readabilityBtn, (juce::Component*) &freqBalanceLab,
+                                (juce::Component*) &freqBalanceSlider, (juce::Component*) &timeBalanceLab,
+                                (juce::Component*) &timeBalanceSlider })
+        addAndMakeVisible (c);
 }
 
 void SpectralControlsPanel::refresh()
@@ -5373,8 +5423,20 @@ void SpectralControlsPanel::refresh()
     syncLevelControls();
     syncHarmControls();
     syncAutoControls();
+    syncReadabilityControls();
     logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
+}
+
+void SpectralControlsPanel::syncReadabilityControls()
+{
+    const bool on = app.settings.readability;
+    readabilityBtn.setToggleState (on, juce::dontSendNotification);
+    freqBalanceSlider.setValue (std::round (app.settings.freqBalance * 100.0), juce::dontSendNotification);
+    timeBalanceSlider.setValue (std::round (app.settings.timeBalance * 100.0), juce::dontSendNotification);
+    for (juce::Component* c : { (juce::Component*) &freqBalanceSlider, (juce::Component*) &timeBalanceSlider,
+                                (juce::Component*) &freqBalanceLab, (juce::Component*) &timeBalanceLab })
+        c->setEnabled (on);
 }
 
 void SpectralControlsPanel::rebuildFftSizeItems (int autoSize, std::array<int, 3> multiResSizes)
@@ -5430,6 +5492,18 @@ void SpectralControlsPanel::resized()
         logToggle.setBounds (row.removeFromLeft (104));
         resetFreqBtn.setBounds (row.removeFromRight (86));
         fftSizeCombo.setBounds (row.reduced (6, 0));
+    }
+
+    {   // Readability (issue #69): the toggle, then one balance slider per row.
+        auto row = b.removeFromTop (26);
+        readabilityBtn.setBounds (row.removeFromLeft (104).reduced (0, 2));
+        row.removeFromLeft (6);
+        freqBalanceLab.setBounds (row.removeFromLeft (62));
+        freqBalanceSlider.setBounds (row);
+        auto row2 = b.removeFromTop (24);
+        row2.removeFromLeft (110);
+        timeBalanceLab.setBounds (row2.removeFromLeft (62));
+        timeBalanceSlider.setBounds (row2);
     }
 
     {   // Auto FFT-size parameter rows: only present while "Auto" is selected.

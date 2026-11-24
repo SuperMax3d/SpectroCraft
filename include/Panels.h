@@ -1107,6 +1107,13 @@ public:
     LevelEdit& autoSlicesEditRef() { return autoSlicesEdit; }
     LevelEdit& autoBinsEditRef() { return autoBinsEdit; }
 
+    // Readability (issue #69): the toggle and the two balance sliders
+    // (percent), enabled only while the toggle is on; synced from settings.
+    void syncReadabilityControls();
+    juce::TextButton& readabilityBtnRef() { return readabilityBtn; }
+    juce::Slider& freqBalanceSliderRef() { return freqBalanceSlider; }
+    juce::Slider& timeBalanceSliderRef() { return timeBalanceSlider; }
+
     // Harmonic marker toggle buttons (unit tests).
     juce::TextButton& showHarmonicsBtnRef() { return showHarmonicsBtn; }
     juce::TextButton& showNumbersBtnRef()   { return showNumbersBtn; }
@@ -1127,6 +1134,9 @@ private:
                 autoSlicesLab, autoBinsLab;
     juce::TextButton resetFreqBtn;
     juce::TextButton refreshBtn;
+    juce::TextButton readabilityBtn;                     // issue #69 (display only)
+    juce::Slider freqBalanceSlider, timeBalanceSlider;
+    juce::Label freqBalanceLab, timeBalanceLab;
 
     class MapPreview : public juce::Component
     {

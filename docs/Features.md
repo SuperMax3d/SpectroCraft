@@ -427,8 +427,32 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     zoom levels, selecting it switches auto mode on — and **Multi-resolution**,
     followed by a checkable
     **Linear / Logarithmic** pair that toggles the axis scale.
+    **Readability** (issue #69), under the dB range: a toggle and two
+    sliders that change only how the spectrogram looks, never the audio. The
+    louder bass usually hides the treble, and a level that varies over the
+    file asks for a new dB window every few seconds; like an HDR tone map,
+    **Frequency** (default 70 %) brings every frequency band of the visible
+    picture toward the same average level: the quiet bands rise, the loud ones
+    come down, and peaks keep their height above their band (each row moves
+    by the gap between its average level and the picture's; the averages
+    go through a running median over about a 24th of the height, so
+    harmonics and other narrow lines still stand out). **Time** (default
+    0 %) does the same over time, like an automatic gain control following
+    the energy (a running median over a 40th of the width: a sudden change
+    of level stays sharp, with no bright or dark band beside it, and short
+    transients keep their height). Levels are read inside the dB window;
+    a band or a moment with nothing above the window's floor (silence, the
+    empty top of a low-rate file) is never lifted, and no lift exceeds half
+    the window. Since it follows the visible picture, the balance changes as
+    you zoom or scroll. The spectrogram export uses it too; the level readout
+    under the mouse and every measurement keep the real levels. Off by
+    default; the toggle and both amounts are remembered (`readability`,
+    `readability_freq`, `readability_time`, also settable through the AI
+    control `settings.set`). Changing them only re-colours the picture: no
+    FFT is recomputed.
     The full-width **Reset** button restores every Spectral Controls setting to
     its defaults at once — Classic colour map, -120..0 dB window, log axis on,
+    Readability off (70 % / 0 %),
     harmonic markers off (with 10 harmonics and N=1 configured, no numbers),
     Auto FFT size
     on with the default parameters (80 time slices / 1.25 bins per pixel),

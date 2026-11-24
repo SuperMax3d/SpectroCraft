@@ -112,6 +112,9 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `modelPick*`), shown by `include/ModelPanel.h`; the spectrogram guide is
   `SpectralView::drawModelPickGuide`. Behaviour: `docs/model-panel.md`, tests
   `tests/regression/model.inc`.
+- Spectrogram Readability (issue #69; Spectral Controls, display only): `SpectralEngine::balanceLevels`
+  evens the dB picture's levels per frequency row / time column before `renderToPixels` colours it
+  (`Settings::readability`, `freqBalance`, `timeBalance`); tests `tests/regression/readability.inc`.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip

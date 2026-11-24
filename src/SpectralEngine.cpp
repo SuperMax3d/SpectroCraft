@@ -20,6 +20,7 @@
 #include "FFTHelpers.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
@@ -612,6 +613,7 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
     std::vector<float> db;
     if (!renderToDb (engine, s, width, height, t0, t1, channels, db, cancel))
         return false;
+    balanceLevels (db, width, height, s);   // Readability (issue #69); display only
 
     // dB -> display value: normalise into the [dbMinDb, dbMaxDb] window,
     // then apply gain/bias.
@@ -627,6 +629,103 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
         rgba[o + 3] = 255;
     }
     return true;
+}
+
+void SpectralEngine::balanceLevels (std::vector<float>& db, int width, int height, const Settings& s)
+{
+    if (! s.readability || width <= 0 || height <= 0 || db.size() < (size_t) width * (size_t) height)
+        return;
+    const float lo = s.dbMinDb, hi = s.dbMaxDb;
+    const double range = std::max (1.0, (double) hi - (double) lo);
+    const double maxLift = 0.5 * range;
+    const double emptyBelow = (double) lo + 0.01 * range;   // average at the floor: nothing there
+    constexpr float kNoData = -299.0f;
+    constexpr double kDbToLog2 = 0.33219280948873623;   // log2 (10) / 10: dB -> power as 2^x
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    // The offset of each line (rows: `byRow`, else columns): its average level
+    // (NaN when empty), median-smoothed over +-radius lines, against the average
+    // of the non-empty lines, times `amount`. Rows average in dB (the
+    // band's usual level, not its loudest moments); columns average in power,
+    // like a gain control following the signal's energy: the loud bins, not
+    // the many quiet ones at the floor, give a moment its level.
+    auto offsets = [&] (bool byRow, double amount, int radius)
+    {
+        const bool power = ! byRow;
+        const int lines = byRow ? height : width, across = byRow ? width : height;
+        std::vector<double> avg ((size_t) lines, nan);
+        double refSum = 0.0;
+        int refN = 0;
+        for (int l = 0; l < lines; ++l)
+        {
+            double sum = 0.0;
+            int n = 0;
+            for (int k = 0; k < across; ++k)
+            {
+                const float v = db[byRow ? (size_t) l * width + k : (size_t) k * width + l];
+                if (v <= kNoData) continue;
+                const double c = (double) std::clamp (v, lo, hi);
+                sum += power ? std::exp2 ((c - (double) hi) * kDbToLog2) : c;
+                ++n;
+            }
+            if (n == 0) continue;
+            const double a = power ? (double) hi + std::log2 (sum / n) / kDbToLog2 : sum / n;
+            if (a > emptyBelow)
+            {
+                avg[(size_t) l] = a;
+                refSum += a;
+                ++refN;
+            }
+        }
+        std::vector<float> out ((size_t) lines, 0.0f);
+        if (refN == 0)
+            return out;
+        const double ref = refSum / refN;
+        // Running median over the non-empty lines within +-radius: a step in
+        // level stays a step (no bright / dark halo on either side), and a
+        // line much louder than its neighbours for less than the radius (a
+        // harmonic, a transient) does not move the level it is measured
+        // against, so it keeps standing out.
+        std::vector<double> win;
+        win.reserve ((size_t) (2 * radius + 1));
+        for (int l = 0; l < lines; ++l)
+        {
+            win.clear();
+            for (int j = std::max (0, l - radius); j < std::min (lines, l + radius + 1); ++j)
+                if (! std::isnan (avg[(size_t) j]))
+                    win.push_back (avg[(size_t) j]);
+            if (win.empty()) continue;
+            const auto mid = win.begin() + (std::ptrdiff_t) (win.size() / 2);
+            std::nth_element (win.begin(), mid, win.end());
+            double off = std::clamp ((ref - *mid) * amount, -range, maxLift);
+            if (std::isnan (avg[(size_t) l]))
+                off = std::min (off, 0.0);   // never lift a line that holds nothing
+            out[(size_t) l] = (float) off;
+        }
+        return out;
+    };
+
+    const double fAmount = std::clamp ((double) s.freqBalance, 0.0, 1.0);
+    const double tAmount = std::clamp ((double) s.timeBalance, 0.0, 1.0);
+    if (fAmount > 0.0)
+    {
+        // About a 24th of the height: broad enough to keep narrow lines
+        // (harmonics, tones) standing out of their band.
+        const auto off = offsets (true, fAmount, std::max (1, height / 24));
+        for (int y = 0; y < height; ++y)
+            if (off[(size_t) y] != 0.0f)
+                for (int x = 0; x < width; ++x)
+                    if (auto& v = db[(size_t) y * width + x]; v > kNoData)
+                        v += off[(size_t) y];
+    }
+    if (tAmount > 0.0)
+    {
+        const auto off = offsets (false, tAmount, std::max (1, width / 40));
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                if (auto& v = db[(size_t) y * width + x]; v > kNoData)
+                    v += off[(size_t) x];
+    }
 }
 
 bool SpectralEngine::renderToDb (const AudioEngine& engine, const Settings& s,

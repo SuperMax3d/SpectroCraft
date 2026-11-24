@@ -92,6 +92,16 @@ struct Settings
     float gain = 1.0f;
     float bias = 0.0f;
     int smoothing = 1;          // 0=off, 1=light box blur on magnitudes
+    // Spectral Controls > Readability (issue #69), display only: the audio
+    // is never changed. Frequency balance brings every frequency band of the
+    // visible picture toward the same average level (like an HDR tone map
+    // across the spectrum: the quiet treble rises, the loud bass comes down,
+    // the peaks keep their height above their band); time balance does the
+    // same over time (like an automatic gain control). Amounts 0..1;
+    // persisted, off by default (SpectralEngine::balanceLevels).
+    bool readability = false;
+    float freqBalance = 0.7f;
+    float timeBalance = 0.0f;
     bool snapToZeroCrossings = false;   // OFF by default; persisted between sessions
 
     // Frequency Analysis tab state (independent of the spectrogram settings).
@@ -212,6 +222,8 @@ struct Settings
         return fftSize == o.fftSize && fftAuto == o.fftAuto && fftMultiRes == o.fftMultiRes
             && autoTargetTimeSlices == o.autoTargetTimeSlices
             && autoBinsPerPixel == o.autoBinsPerPixel
+            && readability == o.readability && freqBalance == o.freqBalance
+            && timeBalance == o.timeBalance
             && hopSize == o.hopSize && windowType == o.windowType
             && logFrequency == o.logFrequency && minFrequency == o.minFrequency
             && maxFrequency == o.maxFrequency
