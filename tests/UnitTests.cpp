@@ -27,6 +27,7 @@
 #include "Panels.h"
 #include "ScrollBars.h"
 #include "MainWindow.h"
+#include "FileDialogs.h"   // issue #71
 #include "ScaleForm.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
@@ -24772,6 +24773,210 @@ static void testToolbarIssue50()
     wav.deleteFile ();
 }
 
+// ------------------------------------ Interface issues #64, #65, #66, #71
+// Transport > Playback Device (#64), the movable toolbar (#65), the hidden
+// title bar's calculator answer and maximised frame (#66), the system file
+// dialogs (#71). The native parts (opening a sound card, the Windows hit
+// test's drag and snap, the DWM frame, the dialogs themselves) need a real
+// machine to check by hand.
+static void testInterfaceIssues64to71()
+{
+    namespace tb = sc::toolbar;
+    using Dock = tb::Placement::Dock;
+    using Align = tb::Placement::Align;
+    using Kind = juce::Component::WindowControlKind;
+    auto P = [] (Dock d, Align a) { return tb::Placement { d, a }; };   // no braces in CHECK's arguments
+
+    // #64: the device a saved name stands for, and the menu's items.
+    {
+        const juce::StringArray names { "Speakers", "Headphones" };
+        CHECK (Application::resolvePlaybackDevice ("", names).isEmpty ()
+                   && Application::resolvePlaybackDevice ("Headphones", names) == "Headphones"
+                   && Application::resolvePlaybackDevice ("USB DAC", names).isEmpty (),
+               "#64: a device that is not connected means the system default");
+        auto items = MainWindow::playbackDeviceItems (names, "");
+        CHECK (items.size () == 3 && items[0].id == MainWindow::PlaybackDeviceDefault && items[0].text == "System Default"
+                   && items[0].checked && items[1].text == "Speakers" && items[1].id == MainWindow::PlaybackDeviceBase
+                   && items[2].id == MainWindow::PlaybackDeviceBase + 1 && ! items[1].checked && ! items[2].checked,
+               "#64: System Default first (ticked by default), then each device");
+        items = MainWindow::playbackDeviceItems (names, "Headphones");
+        CHECK (items.size () == 3 && ! items[0].checked && items[2].checked, "#64: the chosen device is ticked");
+        items = MainWindow::playbackDeviceItems (names, "USB DAC");
+        CHECK (items.size () == 4 && items[0].checked && items[3].text == "USB DAC (not connected)"
+                   && ! items[3].enabled && ! items[1].checked && ! items[2].checked,
+               "#64: a missing device: the default plays, the choice is listed (disabled)");
+        items = MainWindow::playbackDeviceItems ({}, "");
+        CHECK (items.size () == 2 && items[0].checked && ! items[1].enabled, "#64: no devices: a placeholder");
+    }
+
+    // #66: the extended frame, maximised or not.
+    CHECK (MainWindow::extendedFrameFor (true, false) == juce::BorderSize<int> (0, 1, 0, 1)
+               && MainWindow::extendedFrameFor (true, true).isEmpty ()
+               && MainWindow::extendedFrameFor (false, false).isEmpty (),
+           "#66: no frame column in the client while maximised");
+
+    // #71: the system dialogs unless SC_NATIVE_FILE_DIALOGS=0 or the system's cannot be created.
+    CHECK (sc::files::useNativeDialogsFor ("", true) && sc::files::useNativeDialogsFor ("1", true)
+               && ! sc::files::useNativeDialogsFor ("0", true) && ! sc::files::useNativeDialogsFor (" 0 ", true)
+               && ! sc::files::useNativeDialogsFor ("", false),
+           "#71: the rule for the system file dialogs");
+#if JUCE_MAC
+    if (juce::SystemStats::getEnvironmentVariable ("SC_NATIVE_FILE_DIALOGS", {}).trim () != "0")
+        CHECK (sc::files::useNativeDialogs (), "#71: macOS uses its own dialogs");
+#endif
+
+    // #65: the placement model.
+    {
+        const tb::Placement right { Dock::right, Align::end };
+        CHECK (tb::Placement::fromString (right.toString ()) == right && right.toString () == "right:end"
+                   && tb::Placement::fromString ("junk") == tb::Placement {}
+                   && tb::Placement::fromString ("") == tb::Placement {},
+               "#65: the saved form, the default for anything else");
+        const juce::Rectangle<int> menuRow (0, 0, 1500, 24), content (0, 24, 1500, 756);
+        auto at = [&] (int x, int y) { return tb::placementAt ({ x, y }, menuRow, content); };
+        CHECK (at (100, 10) == P (Dock::menuRow, Align::start)
+                   && at (750, 10) == P (Dock::menuRow, Align::centre)
+                   && at (1400, 26) == P (Dock::menuRow, Align::end),
+               "#65: on the menu row, its left, centre or right third");
+        CHECK (at (10, 400) == P (Dock::left, Align::centre)
+                   && at (1490, 100) == P (Dock::right, Align::start)
+                   && at (750, 40) == P (Dock::top, Align::centre)
+                   && at (1300, 770) == P (Dock::bottom, Align::end),
+               "#65: near an edge of the content, a column or a row");
+        CHECK (! at (750, 400).has_value () && ! at (750, 900).has_value (), "#65: elsewhere, nowhere");
+        CHECK (tb::alignedStart (Align::start, 10, 100, 20, 50) == 10 && tb::alignedStart (Align::end, 10, 100, 20, 50) == 80
+                   && tb::alignedStart (Align::centre, 10, 100, 20, 50) == 40
+                   && tb::alignedStart (Align::centre, 10, 100, 20, 0) == 10
+                   && tb::alignedStart (Align::end, 10, 100, 200, 50) == 10,
+               "#65: aligned runs stay inside");
+    }
+
+    const juce::File store = makeTempFile ("interface64_71.recent");
+    store.deleteFile ();
+    {
+        Application app (store);
+        // #64: the choice is saved and read back; the Transport menu lists it.
+        if (Application::audioOutputDisabled ())
+            CHECK (app.setPlaybackDevice ("USB DAC"), "#64: choosing a device (no output in the tests)");
+        else
+        {
+            app.settings.playbackDevice = "USB DAC";
+            app.saveSettings ();
+        }
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "interface 64-71"));
+        win->setSize (2200, 800);   // as wide as the screen allows
+        const int tIdx = win->getMenuBarNames ().indexOf ("Transport");
+        bool hasDefault = false;
+        const auto transport = win->getMenuForIndex (tIdx, "Transport");   // the iterator keeps a reference
+        for (juce::PopupMenu::MenuItemIterator it (transport, true); it.next ();)
+            hasDefault = hasDefault || (it.getItem ().itemID == MainWindow::PlaybackDeviceDefault
+                                        && it.getItem ().text == "System Default");
+        CHECK (hasDefault, "#64: Transport > Playback Device > System Default");
+
+        // #66: the calculator's answer: Copy, and (title bar hidden) it moves the window.
+        auto* calc = win->calculatorComp ();
+        auto* bar = win->toolbarComp ();
+        auto* ws = win->workspaceBarComp ();
+        if (calc == nullptr || bar == nullptr || ws == nullptr) { CHECK (false, "#65/#66: the parts exist"); return; }
+        calc->setExpression ("1+1");
+        auto copyItem = [calc]
+        {
+            const auto menu = calc->answerMenu ();   // the iterator keeps a reference
+            for (juce::PopupMenu::MenuItemIterator it (menu); it.next ();)
+                if (it.getItem ().text == "Copy") return it.getItem ().isEnabled ? 1 : 0;
+            return -1;
+        };
+        CHECK (calc->answerValue () == "2" && copyItem () == 1, "#66: the answer's menu copies its value");
+        calc->setExpression ("1/0");
+        CHECK (calc->answerValue ().isEmpty () && copyItem () == 0, "#66: nothing to copy from an error");
+        calc->setExpression ("2*3");
+        win->setTitleBarHidden (true);
+        const auto answer = calc->answerBounds ().getCentre () + calc->getPosition ();
+        const auto field = calc->field ().getBounds ().getCentre () + calc->getPosition ();
+        CHECK (win->findControlAtPoint (answer.toFloat ()) == Kind::caption
+                   && win->findControlAtPoint (field.toFloat ()) == Kind::client,
+               "#66: the answer moves the window like the empty row; the field types");
+        const auto grip = bar->gripBounds ().getCentre () + bar->getPosition ();
+        CHECK (win->findControlAtPoint (grip.toFloat ()) == Kind::client, "#65: the grip stays the toolbar's");
+        win->setTitleBarHidden (false);
+
+        // #65: the menu row, aligned.
+        CHECK (win->toolbarPlacement () == tb::Placement {} && ! bar->isVertical (), "#65: the menu row by default");
+        const int startX = bar->getX ();
+        win->setToolbarPlacement ({ Dock::menuRow, Align::end });
+        CHECK (calc->isVisible () && calc->getRight () == ws->getX () - 4 && calc->getX () == bar->getRight () + 6,
+               "#65: right-aligned, the calculator ends at the workspaces");
+        win->setToolbarPlacement ({ Dock::menuRow, Align::centre });
+        {
+            // Centred on the window, unless that would cross the menus or
+            // the workspaces (the window is no wider than the screen).
+            const int runW = calc->getRight () - bar->getX ();
+            const int want = tb::alignedStart (Align::centre, startX, ws->getX () - 4, runW, win->getWidth () / 2);
+            CHECK (bar->getX () == want && want >= startX && want + runW <= ws->getX () - 4,
+                   "#65: centred on the window (" + juce::String (bar->getX ()) + ".." + juce::String (calc->getRight ())
+                       + " in " + juce::String (win->getWidth ()) + ", expected from " + juce::String (want) + ")");
+        }
+        win->setToolbarPlacement ({ Dock::menuRow, Align::start });
+        CHECK (bar->getX () == startX, "#65: back after the menus");
+
+        // A column: buttons top to bottom, the calculator stays after the menus.
+        auto* strip = win->findChildWithID ("toolbar-strip");
+        win->setToolbarPlacement ({ Dock::left, Align::start });
+        auto* b0 = bar->buttonAt (0);
+        auto* b1 = bar->buttonAt (1);
+        CHECK (bar->isVertical () && bar->getX () < 10 && bar->getY () > 24 && bar->getWidth () == tb::Toolbar::kButtonW
+                   && b0 != nullptr && b1 != nullptr && b1->getY () > b0->getY () && b1->getX () == b0->getX (),
+               "#65: a column on the left, buttons stacked");
+        CHECK (strip != nullptr && strip->isVisible () && strip->getX () == 0 && strip->getBounds ().contains (bar->getBounds ())
+                   && calc->isVisible () && calc->getY () == 0,
+               "#65: its strip, and the calculator in the menu row");
+        CHECK (app.recentStore->getValue ("toolbar_placement") == "left:start", "#65: saved");
+        win->setToolbarPlacement ({ Dock::top, Align::start });
+        CHECK (! bar->isVertical () && strip != nullptr && strip->getY () == 24 && strip->getWidth () == win->getWidth ()
+                   && bar->getY () > 24 && calc->getY () == bar->getY (),
+               "#65: a row of its own under the menus");
+
+        // A drag of the grip: the hint, then the drop.
+        win->toolbarDragMoved ({ 10, 400 });
+        auto* hint = win->findChildWithID ("toolbar-drop-hint");
+        CHECK (win->toolbarDragTarget () == P (Dock::left, Align::centre)
+                   && hint != nullptr && hint->isVisible () && hint->getX () < 10,
+               "#65: dragging near the left edge shows a column there");
+        win->toolbarDragMoved ({ 1100, 400 });
+        CHECK (! win->toolbarDragTarget ().has_value () && hint != nullptr && ! hint->isVisible (),
+               "#65: no hint in the middle");
+        win->toolbarDragEnded ({ win->getWidth () - 10, 100 });
+        CHECK (win->toolbarPlacement () == P (Dock::right, Align::start) && bar->isVertical ()
+                   && bar->getRight () > win->getWidth () - 10 && hint != nullptr && ! hint->isVisible (),
+               "#65: dropped on the right edge");
+
+        // The Position submenu.
+        juce::StringArray texts;
+        juce::PopupMenu m;
+        win->fillToolbarMenu ("", m);
+        for (juce::PopupMenu::MenuItemIterator it (m, true); it.next ();)
+            texts.add (it.getItem ().text);
+        CHECK (texts.contains ("Position") && texts.contains ("Right Column") && texts.contains ("Align Top"),
+               "#65: the toolbar menu's Position submenu: " + texts.joinIntoString (" | "));
+        win->runToolbarMenuItem ("", MainWindow::TbDockBase + (int) Dock::bottom);
+        win->runToolbarMenuItem ("", MainWindow::TbAlignBase + (int) Align::end);
+        CHECK (win->toolbarPlacement () == P (Dock::bottom, Align::end) && strip != nullptr
+                   && strip->getBottom () == win->getHeight () - 20,
+               "#65: Bottom Row, Align Right, above the status bar");
+        win.reset ();
+    }
+    {
+        Application app (store);
+        CHECK (app.settings.playbackDevice == "USB DAC", "#64: the choice is remembered");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "interface 64-71 again"));
+        win->setSize (1600, 800);
+        CHECK (win->toolbarPlacement () == P (Dock::bottom, Align::end),
+               "#65: the place is remembered after a restart");
+        win.reset ();
+    }
+    store.deleteFile ();
+}
+
 // ------------------------------------------------------- performance bench
 // Not a test: timings of the common operations on a long file, to see where
 // the app is slow. Runs only with SC_BENCH=1 (SC_TEST_FILTER=bench);
@@ -27019,10 +27224,10 @@ static void testTransportRecordingMenu()
     CHECK (tIdx >= 0, "Transport menu exists in the menu bar");
 
     // Play, Stop, Pause, separator, Loop, Play Spectral Selection,
-    // separator, Record, Recording Options, Recording Device.
-    // getNumItems() excludes separators.
+    // separator, Record, Recording Options, Recording Device, separator,
+    // Playback Device (issue #64). getNumItems() excludes separators.
     const juce::PopupMenu tm = win->getMenuForIndex (tIdx, "Transport");
-    CHECK (tm.getNumItems () == 8, "Record + Recording Options + device added to Transport");
+    CHECK (tm.getNumItems () == 9, "Record + Recording Options + devices added to Transport");
 
     // The Recording Options submenu items: Unlimited is the default and
     // ticked; Loop/Timed show their configured duration once set.
@@ -31982,6 +32187,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
     SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
+    SC_RUN_TEST ("interface: playback device, movable toolbar, title bar, file dialogs (#64-#71)", testInterfaceIssues64to71);
     SC_RUN_TEST ("undo in place, history budgets, parallel loops, AI model cache", testUndoInPlaceAndParallel);
     SC_RUN_TEST ("bench: performance timings (SC_BENCH=1 only)", testPerformanceBench);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);

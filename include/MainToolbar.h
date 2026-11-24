@@ -21,6 +21,7 @@
 // wires the commands and saves the shortcuts in the settings store.
 
 #include <JuceHeader.h>
+#include <optional>
 
 #include <array>
 #include <functional>
@@ -194,7 +195,17 @@ public:
     void setExpression (const juce::String& text);   // as if typed
     /** Enter: the result becomes the expression (when there is one). */
     void commit();
-    /** A right-click beside the field: the toolbar menu. */
+    /** The value of the answer, as shown without "= " ("" when there is no
+        result or it is an error): what its Copy item copies (issue #66). */
+    juce::String answerValue() const;
+    /** The answer's area, right of the field (local coordinates). With the
+        title bar hidden it moves the window like the empty row (issue #66). */
+    juce::Rectangle<int> answerBounds() const;
+    /** Right-click on the answer: "Copy" (issue #66). */
+    juce::PopupMenu answerMenu() const;
+    void copyAnswer() const;
+    enum { kCopyAnswerId = 1 };
+    /** A right-click beside the field with no answer: the toolbar menu. */
     std::function<void()> onContextMenu;
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -207,6 +218,38 @@ private:
     bool error_ = false;
     void update();
 };
+
+// ---------------------------------------------------------------- placement
+
+/** Where the toolbar sits (issue #65): in the menu bar row (its first home),
+    in a row of its own under the menus or above the status bar, or in a
+    column along the left or right edge; aligned at the start (left / top),
+    the centre or the end of that place. */
+struct Placement
+{
+    enum class Dock { menuRow, top, bottom, left, right };
+    enum class Align { start, centre, end };
+    Dock dock = Dock::menuRow;
+    Align align = Align::start;
+    bool vertical() const noexcept { return dock == Dock::left || dock == Dock::right; }
+    bool operator== (const Placement& o) const noexcept { return dock == o.dock && align == o.align; }
+    bool operator!= (const Placement& o) const noexcept { return ! (*this == o); }
+    /** "menuRow:start" ... "right:end": the saved form ("toolbar_placement"). */
+    juce::String toString() const;
+    /** The saved form back; the default (menu row, start) for anything else. */
+    static Placement fromString (const juce::String& s);
+};
+
+/** Where a toolbar dropped at `p` goes (window coordinates): on the menu
+    row, its left, centre or right third; within kDropZone of the content
+    area's left / right edge, a column; of its top / bottom edge, a row (the
+    third under the mouse gives the alignment). Elsewhere nothing. */
+std::optional<Placement> placementAt (juce::Point<int> p, juce::Rectangle<int> menuRow,
+                                      juce::Rectangle<int> content);
+inline constexpr int kDropZone = 48;
+/** Start of a run of `length` placed in [lo, hi): at lo, at hi - length, or
+    centred on `centre` (the window's middle); always kept inside. */
+int alignedStart (Placement::Align a, int lo, int hi, int length, int centre);
 
 class Toolbar : public juce::Component
 {
@@ -247,11 +290,23 @@ public:
     /** Re-reads the state of every button (tools on, enabled, tooltips). */
     void refresh();
 
-    /** Width that shows every group. */
+    /** Length along the bar that shows every group (its width, or its
+        height when vertical), the grip included. */
     int idealWidth() const;
+    /** Buttons top to bottom (a column: issue #65) instead of left to right. */
+    void setVertical (bool v);
+    bool isVertical() const noexcept { return vertical_; }
+    /** The grip at the start of the bar: drag it to move the toolbar. */
+    juce::Rectangle<int> gripBounds() const;
+    /** Grip drags, in screen coordinates: each move once the mouse has moved
+        a few pixels, then the release. */
+    std::function<void (juce::Point<int> screen)> onDragMove, onDragEnd;
     void resized() override;
     void paint (juce::Graphics& g) override;
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
+    void mouseMove (const juce::MouseEvent& e) override;
 
     IconButton* button (const juce::String& id) const;
     int numButtons() const noexcept { return (int) buttons_.size(); }
@@ -259,11 +314,14 @@ public:
 
     static constexpr int kButtonW = 24;
     static constexpr int kGapW = 9;
+    static constexpr int kGripW = 9;   // the grip's length along the bar
 
 private:
     std::vector<std::unique_ptr<IconButton>> buttons_;
     std::vector<int> groupOf_;   // group index of each button (the custom slots: the last group)
-    std::vector<int> separatorsX_;
+    std::vector<int> separatorsX_;   // along the bar (y when vertical)
+    bool vertical_ = false;
+    bool gripDown_ = false, gripDragging_ = false;
     CustomSet custom_;
     juce::StringArray hidden_;
     int numGroups() const;

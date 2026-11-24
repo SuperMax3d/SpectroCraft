@@ -116,8 +116,9 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip
   in a new splitter.
-- Toolbar (issues #43, #50; menu bar row, right after the menus): buttons, vector icons, the calculator (`sc::toolbar::calc`), key
-  helpers and the custom shortcuts' model in `include/MainToolbar.h` + `src/MainToolbar.cpp`;
+- Toolbar (issues #43, #50, #65; menu bar row after the menus by default, movable by its grip): buttons, vector icons, the calculator (`sc::toolbar::calc`), key
+  helpers, the placement model (`sc::toolbar::Placement`, `placementAt`; laid out by `MainWindow::toolbarLayoutFor`)
+  and the custom shortcuts' model in `include/MainToolbar.h` + `src/MainToolbar.cpp`;
   wired in `MainWindow` (`runToolbarCommand`, `runCustomShortcut`, `setCustomShortcut`,
   `shortcutUsedBy` - add a key handled in `MainWindow::keyPressed` to `mainWindowKeys()` there
   so a custom shortcut cannot take it). Test "toolbar: tools, shortcuts 1-9 (#43)".
@@ -128,6 +129,8 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   held by `sc::ai::ModelCache` (`include/AI/ModelCache.h`): one per kind, freed after 5 idle minutes.
   Long sample loops use `sc::par::forRange` (`include/Parallel.h`). Timings:
   `SC_BENCH=1 SC_TEST_FILTER=bench` (optional `SC_BENCH_MINUTES`), meaningful in a Release build.
+- File dialogs: pass `sc::files::useNativeDialogs()` (`include/FileDialogs.h`) as every `juce::FileChooser`'s
+  `useOSNativeDialogBox` (issue #71): the system's dialog, JUCE's where Windows cannot create it.
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as
   a garbage glyph. Use `...` in menus, or `juce::String::fromUTF8 (u8"…")` when a real

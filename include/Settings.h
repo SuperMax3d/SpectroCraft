@@ -137,6 +137,11 @@ struct Settings
     // Help > Show Tooltips (issue #12): the hover tips of every control. On by
     // default; off removes the app's tooltip window, so none shows anywhere.
     bool showTooltips = true;
+    // Transport > Playback Device (issue #64): the output device's name, or
+    // "" for the system default. Persisted; a device that is not connected
+    // when the app opens its output falls back to the system default (the
+    // choice is kept, so it is used again once the device is back).
+    juce::String playbackDevice;
 
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
@@ -237,6 +242,7 @@ struct Settings
             && diagLogEnabled == o.diagLogEnabled
             && checkUpdatesAtStartup == o.checkUpdatesAtStartup
             && showTooltips == o.showTooltips
+            && playbackDevice == o.playbackDevice
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid
