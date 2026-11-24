@@ -24864,7 +24864,10 @@ static void testInterfaceIssues64to71()
             app.saveSettings ();
         }
         std::unique_ptr<MainWindow> win (new MainWindow (app, "interface 64-71"));
-        win->setSize (2200, 800);   // as wide as the screen allows
+        // Narrower than any screen: the system never resizes it (the CI
+        // runner's screen is 1024 px; hiding the title bar recreates the
+        // native window, which the system then fits to the screen).
+        win->setSize (1000, 700);
         const int tIdx = win->getMenuBarNames ().indexOf ("Transport");
         bool hasDefault = false;
         const auto transport = win->getMenuForIndex (tIdx, "Transport");   // the iterator keeps a reference
@@ -24878,8 +24881,10 @@ static void testInterfaceIssues64to71()
         auto* bar = win->toolbarComp ();
         auto* ws = win->workspaceBarComp ();
         if (calc == nullptr || bar == nullptr || ws == nullptr) { CHECK (false, "#65/#66: the parts exist"); return; }
-        // A narrow screen (the CI's is 1024 px) leaves no room for the
-        // calculator after the menus: hide buttons from the end until it fits.
+        // A narrow window leaves no room for the calculator after the menus
+        // (more so with the title bar's icon and buttons in the row): hide
+        // buttons from the end until it fits.
+        auto makeRoom = [&win, calc]
         {
             juce::StringArray ids;
             for (const auto& group : tb::Toolbar::groups ())
@@ -24887,8 +24892,9 @@ static void testInterfaceIssues64to71()
                     ids.add (spec.id);
             for (int i = ids.size () - 1; i >= 2 && ! calc->isVisible (); --i)
                 win->setToolbarButtonShown (ids[i], false);
-        }
-        CHECK (calc->isVisible (), "#65/#66: the calculator has room (window " + juce::String (win->getWidth ()) + " px)");
+            return calc->isVisible ();
+        };
+        CHECK (makeRoom (), "#65/#66: the calculator has room (window " + juce::String (win->getWidth ()) + " px)");
         calc->setExpression ("1+1");
         auto copyItem = [calc]
         {
@@ -24902,14 +24908,26 @@ static void testInterfaceIssues64to71()
         CHECK (calc->answerValue ().isEmpty () && copyItem () == 0, "#66: nothing to copy from an error");
         calc->setExpression ("2*3");
         win->setTitleBarHidden (true);
-        const auto answer = calc->answerBounds ().getCentre () + calc->getPosition ();
-        const auto field = calc->field ().getBounds ().getCentre () + calc->getPosition ();
-        CHECK (win->findControlAtPoint (answer.toFloat ()) == Kind::caption
-                   && win->findControlAtPoint (field.toFloat ()) == Kind::client,
-               "#66: the answer moves the window like the empty row; the field types");
+        // The merged row also holds the icon and the window buttons: as wide
+        // as the screen allows (the CI runner's is 1024 px, too narrow).
+        if (const auto* disp = juce::Desktop::getInstance ().getDisplays ().getPrimaryDisplay ())
+            win->setSize (juce::jmin (1400, disp->userArea.getWidth ()), 700);
+        if (makeRoom ())
+        {
+            const auto answer = calc->answerBounds ().getCentre () + calc->getPosition ();
+            const auto field = calc->field ().getBounds ().getCentre () + calc->getPosition ();
+            CHECK (win->findControlAtPoint (answer.toFloat ()) == Kind::caption
+                       && win->findControlAtPoint (field.toFloat ()) == Kind::client,
+                   "#66: the answer moves the window like the empty row; the field types");
+        }
+        else
+            scSkip ("#66: no room for the calculator in the merged row on this screen ("
+                    + juce::String (win->getWidth ()) + " px)");
         const auto grip = bar->gripBounds ().getCentre () + bar->getPosition ();
         CHECK (win->findControlAtPoint (grip.toFloat ()) == Kind::client, "#65: the grip stays the toolbar's");
         win->setTitleBarHidden (false);
+        win->setSize (1000, 700);
+        CHECK (makeRoom (), "#65: the calculator has room again");
 
         // #65: the menu row, aligned.
         CHECK (win->toolbarPlacement () == tb::Placement {} && ! bar->isVertical (), "#65: the menu row by default");
@@ -24956,7 +24974,7 @@ static void testInterfaceIssues64to71()
         CHECK (win->toolbarDragTarget () == P (Dock::left, Align::centre)
                    && hint != nullptr && hint->isVisible () && hint->getX () < 10,
                "#65: dragging near the left edge shows a column there");
-        win->toolbarDragMoved ({ 1100, 400 });
+        win->toolbarDragMoved ({ 500, 350 });
         CHECK (! win->toolbarDragTarget ().has_value () && hint != nullptr && ! hint->isVisible (),
                "#65: no hint in the middle");
         win->toolbarDragEnded ({ win->getWidth () - 10, 100 });
