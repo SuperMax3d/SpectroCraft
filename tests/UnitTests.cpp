@@ -24878,6 +24878,17 @@ static void testInterfaceIssues64to71()
         auto* bar = win->toolbarComp ();
         auto* ws = win->workspaceBarComp ();
         if (calc == nullptr || bar == nullptr || ws == nullptr) { CHECK (false, "#65/#66: the parts exist"); return; }
+        // A narrow screen (the CI's is 1024 px) leaves no room for the
+        // calculator after the menus: hide buttons from the end until it fits.
+        {
+            juce::StringArray ids;
+            for (const auto& group : tb::Toolbar::groups ())
+                for (const auto& spec : group)
+                    ids.add (spec.id);
+            for (int i = ids.size () - 1; i >= 2 && ! calc->isVisible (); --i)
+                win->setToolbarButtonShown (ids[i], false);
+        }
+        CHECK (calc->isVisible (), "#65/#66: the calculator has room (window " + juce::String (win->getWidth ()) + " px)");
         calc->setExpression ("1+1");
         auto copyItem = [calc]
         {
@@ -24922,8 +24933,11 @@ static void testInterfaceIssues64to71()
         // A column: buttons top to bottom, the calculator stays after the menus.
         auto* strip = win->findChildWithID ("toolbar-strip");
         win->setToolbarPlacement ({ Dock::left, Align::start });
-        auto* b0 = bar->buttonAt (0);
-        auto* b1 = bar->buttonAt (1);
+        juce::Component* b0 = nullptr;
+        juce::Component* b1 = nullptr;   // the first two buttons shown
+        for (int i = 0; i < bar->numButtons () && b1 == nullptr; ++i)
+            if (auto* b = bar->buttonAt (i); b != nullptr && b->isVisible ())
+                (b0 == nullptr ? b0 : b1) = b;
         CHECK (bar->isVertical () && bar->getX () < 10 && bar->getY () > 24 && bar->getWidth () == tb::Toolbar::kButtonW
                    && b0 != nullptr && b1 != nullptr && b1->getY () > b0->getY () && b1->getX () == b0->getX (),
                "#65: a column on the left, buttons stacked");
