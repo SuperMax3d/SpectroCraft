@@ -24,6 +24,11 @@ void startCrashReports (const juce::String& dsn, const juce::String& release, co
         options.environment = e;
         options.sendDefaultPii = NO;
         options.enableAutoSessionTracking = YES;
+        // Every trace while developing, one in ten in production.
+        options.tracesSampleRate = [e isEqualToString: @"development"] ? @1.0 : @0.1;
+        options.enableLogs = YES;
+        // No Session Replay: JUCE draws all text itself (file names included),
+        // which the SDK's masking cannot see.
     }];
    #else
     juce::ignoreUnused (dsn, release, environment);

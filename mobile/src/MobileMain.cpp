@@ -77,6 +77,21 @@ public:
         telemetry::initialise (*props);
         telemetry::capture ("app_opened", {});
 
+        // TEMPORARY (Sentry setup check, issue #73): SC_MOBILE_SENTRY_TEST=message
+        // sends "Sentry test error <time>" from the running app, =crash crashes it
+        // (the report goes out at the next launch). Remove once both are confirmed.
+        if (const auto test = juce::SystemStats::getEnvironmentVariable ("SC_MOBILE_SENTRY_TEST", {});
+            test.isNotEmpty() && telemetry::enabled())
+            juce::Timer::callAfterDelay (3000, [test]
+            {
+                if (test == "crash")
+                {
+                    volatile int* nowhere = nullptr;
+                    *nowhere = 1;
+                }
+                telemetry::reportError ("Sentry test error " + juce::String (juce::Time::currentTimeMillis() / 1000));
+            });
+
         audio = std::make_unique<LiveAudio>();
         document = std::make_unique<MobileDocument>();
         recorder = std::make_unique<Recorder> (*audio, *document);

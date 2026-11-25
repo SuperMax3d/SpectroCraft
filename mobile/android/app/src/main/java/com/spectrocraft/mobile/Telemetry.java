@@ -26,6 +26,11 @@ public final class Telemetry
             options.setAttachScreenshot (false);
             options.setAttachViewHierarchy (false);
             options.setEnableAutoSessionTracking (true);
+            // Every trace while developing, one in ten in production.
+            options.setTracesSampleRate ("development".equals (environment) ? 1.0 : 0.1);
+            options.getLogs().setEnabled (true);
+            // No Session Replay: JUCE draws all text itself (file names included),
+            // which the SDK's masking cannot see.
         });
     }
 
