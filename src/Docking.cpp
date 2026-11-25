@@ -3443,7 +3443,8 @@ bool DockManager::loadLayout (const juce::var& v)
     // the layout made active. (The Model panel, new in a release, used to
     // become the selected tab of Frequency Analysis's group, issue #51.)
     for (const auto& p : panels_)
-        if (std::find (placed.begin(), placed.end(), p.id) == placed.end() && ! closed.contains (p.id))
+        if (std::find (placed.begin(), placed.end(), p.id) == placed.end() && ! closed.contains (p.id)
+            && ! closedByDefault_.contains (p.id))
         {
             Node* buddyGroup = nullptr;
             juce::String keepActive;

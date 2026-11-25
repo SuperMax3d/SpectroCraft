@@ -45,6 +45,9 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/SoundModel.cpp    # Model panel: sound model analysis / rendering (issue #40)
         ${CMAKE_CURRENT_SOURCE_DIR}/ApplicationModel.cpp   # Model panel: actions on the active file (issue #40)
         ${CMAKE_CURRENT_SOURCE_DIR}/ModelPanel.cpp    # Model panel UI (issue #40)
+        ${CMAKE_CURRENT_SOURCE_DIR}/RiffInfo.cpp   # WAV text metadata: LIST/INFO + DISP (issue #67)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Markdown.cpp   # basic Markdown of the File Info panel (issue #67)
+        ${CMAKE_CURRENT_SOURCE_DIR}/FileInfoPanel.cpp   # File Info panel (issue #67)
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)

@@ -28,6 +28,7 @@
 #include "ScrollBars.h"
 #include "MainWindow.h"
 #include "FileDialogs.h"   // issue #71
+#include "Markdown.h"   // issue #67
 #include "ScaleForm.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
@@ -4282,12 +4283,12 @@ const int kNumPanels = 9;
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
         // panels, +1: "Video" listed with them (after Drawing, issue #10),
-        // +1: "Model" (last; issue #40),
+        // +1: "Model" (issue #40), +1: "File Info" (last; issue #67),
         // +1 the "Allow multiple instances" toggle,
         // +1 "Allow AI control (localhost)" when the control server is built
         // in (separators are not counted by getNumItems). The Diagnostic Log
         // toggle moved to the Help menu (issue #11).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + kScControlMenuItems, "Window menu lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4422,7 +4423,7 @@ const int kNumPanels = 9;
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + kScControlMenuItems, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 4, wIdx);   // tables
@@ -31735,6 +31736,7 @@ static void testWriteDataToNewChannels()
 #include "regression/model.inc"         // Model panel: sound model analysis / rendering (issue #40)
 #include "regression/readability.inc"   // Spectral Controls > Readability (issue #69)
 #include "regression/disk_changes.inc"  // files changed / deleted on disk (issue #70)
+#include "regression/file_info.inc"     // File Info panel: WAV text metadata, Markdown (issue #67)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -32224,6 +32226,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
     SC_RUN_TEST ("interface: playback device, movable toolbar, title bar, file dialogs (#64-#71)", testInterfaceIssues64to71);
     SC_RUN_TEST ("files changed on disk: footer, reload, ignore, save (#70)", testFileChangedOnDisk);
+    SC_RUN_TEST ("file info: RIFF INFO fields, Markdown, panel (#67)", testFileInfoPanel);
     SC_RUN_TEST ("undo in place, history budgets, parallel loops, AI model cache", testUndoInPlaceAndParallel);
     SC_RUN_TEST ("bench: performance timings (SC_BENCH=1 only)", testPerformanceBench);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);

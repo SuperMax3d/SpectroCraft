@@ -12,6 +12,7 @@
 #include "Session.h"
 #include "SoundModel.h"
 #include "FileWatch.h"
+#include "RiffInfo.h"
 
 /** FileDoc::metaDirty: a bool that also counts how often it was set. Every
     assignment of true bumps a change counter, so an asynchronous save can
@@ -109,6 +110,11 @@ public:
         each channel's Calibration field, when every channel has a readable
         one (see src/FileDoc.cpp). */
     std::string originalBkdkPayload;
+
+    /** WAV text metadata (File Info panel, issue #67): the LIST/INFO fields
+        and the DISP title, read from the file and written back by every WAV
+        save (and by Save Metadata). Editing them marks the document dirty. */
+    sc::riffinfo::Values riffInfo;
 
     // Named spectral selections (Selection panel). Persisted automatically with
     // the file's metadata bundle (embedded SCMD chunk or .meta.json sidecar).

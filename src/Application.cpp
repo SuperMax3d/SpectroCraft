@@ -1078,6 +1078,22 @@ bool Application::saveActiveDocMeta (std::string* errOut)
         deleteLegacySidecars ();
     }
 
+    // File Info (issue #67): the WAV's own text fields, in either mode;
+    // rewritten only when they differ from the file's.
+    if (isWav && ! sc::riffinfo::sameText (sc::riffinfo::readFromWav (d->file), d->riffInfo))
+    {
+        std::vector<RiffPatchEntry> info (2);
+        std::memcpy (info[0].fourcc, "LIST", 4);
+        std::memcpy (info[0].listType, "INFO", 4);
+        info[0].payload = sc::riffinfo::buildInfoListPayload (d->riffInfo);
+        info[0].present = ! info[0].payload.empty ();
+        std::memcpy (info[1].fourcc, "DISP", 4);
+        info[1].payload = sc::riffinfo::buildDispPayload (d->riffInfo);
+        info[1].present = ! info[1].payload.empty ();
+        if (!patchRiffChunks (d->file, info, errOut))
+            return false;
+    }
+
     d->metaDirty = false;   // disk now matches the in-memory state
     return true;
 }

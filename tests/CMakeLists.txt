@@ -37,6 +37,9 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SoundModel.cpp    # Model panel: sound model analysis / rendering (issue #40)
         ${CMAKE_SOURCE_DIR}/src/ApplicationModel.cpp   # Model panel: actions on the active file (issue #40)
         ${CMAKE_SOURCE_DIR}/src/ModelPanel.cpp    # Model panel UI (issue #40)
+        ${CMAKE_SOURCE_DIR}/src/RiffInfo.cpp   # WAV text metadata: LIST/INFO + DISP (issue #67)
+        ${CMAKE_SOURCE_DIR}/src/Markdown.cpp   # basic Markdown of the File Info panel (issue #67)
+        ${CMAKE_SOURCE_DIR}/src/FileInfoPanel.cpp   # File Info panel (issue #67)
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/FileWatch.cpp   # open files changed / deleted on disk (issue #70)
         ${CMAKE_SOURCE_DIR}/src/Application.cpp

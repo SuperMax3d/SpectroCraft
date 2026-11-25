@@ -383,6 +383,16 @@ public:
     // byte-for-byte in WAV saves. nullptr or empty string = no chunk.
     void setBkdkForSave (const std::string* raw) { saveBkdkPayload = raw; }
 
+    // WAV text metadata (File Info panel, issue #67): builders of the
+    // "LIST"/INFO and "DISP" chunk payloads, written in every WAV save
+    // whatever the metadata mode (they are the file's own, standard fields).
+    // An empty payload = no chunk.
+    void setRiffInfoForSave (std::function<std::string()> infoList, std::function<std::string()> disp)
+    {
+        saveInfoListBuilder = std::move (infoList);
+        saveDispBuilder = std::move (disp);
+    }
+
     /** Session composite (issue #21): when channels > 0, every save writes only
         channels [0, channels) over samples [start, start + length) - the main
         file's own region, wherever it sits on the timeline - whichever path
@@ -526,6 +536,7 @@ private:
     const sc::MetaMode* saveMetaMode = nullptr;         // for WAV metadata mode
     std::function<std::string()> saveScmdBuilder;       // SCMD bundle JSON builder
     const std::string* saveBkdkPayload = nullptr;       // raw "bkdk" chunk to preserve
+    std::function<std::string()> saveInfoListBuilder, saveDispBuilder;   // LIST/INFO, DISP (issue #67)
 
     void clearMipmaps();
     bool saveFileImpl (const juce::File& file) const;   // saveFile() without the diagnostic event
