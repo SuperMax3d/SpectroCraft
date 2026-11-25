@@ -2401,7 +2401,20 @@ public:
     juce::String channelChipLabel (int ch) const;
     bool channelChipShown (int ch) const { return ch >= 0 && ch < (int) chanShown_.size() && chanShown_[(size_t) ch]; }
     bool channelChipMuted (int ch) const { return ch >= 0 && ch < (int) chanMuted_.size() && chanMuted_[(size_t) ch]; }
+
+    // File reload from disk (issue #70): "File Modified On Disk" or "File
+    // Deleted On Disk" in red, after the channel numbers ("" = nothing to
+    // report). A click on it calls onDiskAlertClicked.
+    void setDiskAlert (const juce::String& s)
+    {
+        if (s != diskAlert_) { diskAlert_ = s; repaint(); }
+    }
+    juce::String getDiskAlert() const { return diskAlert_; }
+    /** Where the alert is drawn (empty when there is none or no room). */
+    juce::Rectangle<int> diskAlertBounds() const;
+    std::function<void()> onDiskAlertClicked;
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseMove (const juce::MouseEvent& e) override;
 
     // TextEditor::Listener: normalise a field when it loses focus.
     void textEditorFocusLost (juce::TextEditor& ed) override;
@@ -2411,6 +2424,7 @@ private:
     // rate, measured exactly as paint() lays them out.
     int fileAndRateEnd() const;
     int chanCount_ = 0;
+    juce::String diskAlert_;   // issue #70
     std::vector<bool> chanShown_, chanMuted_;
     std::vector<juce::String> chanNames_;
 

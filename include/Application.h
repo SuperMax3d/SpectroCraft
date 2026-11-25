@@ -559,6 +559,12 @@ public:
 
     void closeFile();                  // closes the ACTIVE document
     void closeDoc (int index);         // closes one specific loaded document
+    /** File > Reload File (issue #70): reads document `index`'s file again
+        from disk, discarding its unsaved changes and its edit history. The
+        document keeps its place in the list, its id, its time window and its
+        playhead (clamped to the new length). Returns false with errOut set,
+        and leaves the document as it was, when the file cannot be read. */
+    bool reloadDoc (int index, std::string* errOut = nullptr);
     void activate (int index);         // make a loaded document active
     void cycleActiveDoc (bool forward);// Ctrl+Tab / Ctrl+Shift+Tab
     // Copy the current UI state (playhead/selection/channels) into the active doc.

@@ -164,6 +164,24 @@ public:
         first when it has unsaved changes (same prompt style as Close All /
         Quit). Returns true if a document was closed. */
     bool handleCloseFile();
+
+    // ---- Files changed on disk (issue #70) -------------------------------
+    /** Compares every document with what the disk watcher last saw (another
+        program changed or deleted its file?) and shows the active one's state
+        in the footer, in red. Runs after each background scan. */
+    void checkDiskStates();
+    /** A click on the footer's alert: for a modified file Save File / Reload
+        File / Ignore, for a deleted one Save File / Close File (Discard
+        changes) / Ignore. */
+    void showDiskChangeDialog();
+    enum DiskChoice { DiskIgnore = 0, DiskSave = 1, DiskReloadOrClose = 2 };
+    /** Runs a choice of that dialog on the active document (the tests call it
+        directly). Reload discards the unsaved changes without asking again. */
+    void runDiskChoice (int choice);
+    /** File > Reload File: asks first when the document has unsaved changes. */
+    void handleReloadFile();
+    sc::files::DiskWatcher* diskWatcherComp() const noexcept { return diskWatcher_.get(); }
+
     /** True while a background job is running (a progress dialog other than
         the "Preparing audio" wait is alive; its worker deletes it when done).
         Documents must not be closed or switched, nor the app quit, until then. */
@@ -757,6 +775,7 @@ public:
         FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs,
         FileExportSpectral, FileSnapshot, ExpAxes, ExpMarkers, ExpSelections, ExpDrawings, FileQuit,
         ExpFilenameHeader,   // after FileQuit: the existing ids keep their values
+        FileReload,          // File > Reload File (issue #70)
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
@@ -854,6 +873,11 @@ private:
     // The Playback Device menu's names when it was last built: a pick maps its
     // index back to the same name even if a device was plugged in since.
     juce::StringArray playbackMenuNames_;
+    // Issue #70: checks the open files on disk in the background.
+    std::unique_ptr<sc::files::DiskWatcher> diskWatcher_;
+    juce::Array<juce::File> diskWatchList_;
+    void updateDiskWatchList();    // the documents' files, when they change
+    void refreshDiskAlert();       // the footer, from the active document's state
 
     juce::MenuBarComponent menuBar;
     std::unique_ptr<WaveformView> waveformView;

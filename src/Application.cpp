@@ -456,6 +456,14 @@ bool Application::completeSave (FileDoc& d, const juce::File& file, bool saveAs,
         d.name = file.getFileName ();
         addRecentFile (file);
     }
+    if (file == d.file)
+    {
+        // The disk now holds this document (issue #70): no change to report.
+        d.diskStampAtMs = sc::files::nowMs ();
+        d.diskStamp = sc::files::DiskStamp::of (file);
+        d.diskIgnored.reset ();
+        d.diskState = sc::files::DiskState::same;
+    }
 
     // External mode: the sidecar travels with the saved file and the legacy
     // per-category sidecars are consolidated into it.
@@ -1146,6 +1154,62 @@ void Application::closeDoc (int index)
         sourcePlayer.setSource (&emptyEngine);
         if (onActiveDocChanged) onActiveDocChanged ();
     }
+}
+
+bool Application::reloadDoc (int index, std::string* errOut)
+{
+    if (index < 0 || index >= (int) docs.size())
+        return false;
+    FileDoc& old = *docs[(size_t) index];
+    const juce::File file = old.file;
+    if (! file.existsAsFile())
+    {
+        if (errOut != nullptr)
+            *errOut = ("The file is no longer on disk: " + file.getFullPathName()).toStdString();
+        return false;
+    }
+    // Read first: when that fails the document stays exactly as it was.
+    auto fresh = std::make_unique<FileDoc> (old.id);
+    if (! fresh->load (file))
+    {
+        if (errOut != nullptr)
+            *errOut = ("Could not read " + file.getFullPathName()).toStdString();
+        return false;
+    }
+    inheritSessionMeta (*fresh);
+    openSessionOfLoaded (*fresh);
+
+    const bool wasActive = (index == activeDocIndex);
+    if (wasActive)
+        syncActiveDoc();   // the window and the playhead the user had
+    const double dur = fresh->engine.duration();
+    fresh->viewStart = std::clamp (old.viewStart, 0.0, dur);
+    fresh->viewEnd = old.viewEnd < 0.0 ? -1.0 : std::clamp (old.viewEnd, fresh->viewStart, dur);
+    if (fresh->viewEnd >= 0.0 && fresh->viewEnd - fresh->viewStart < 1e-6)
+        fresh->viewEnd = -1.0;   // nothing left of the old window: show the whole file
+    fresh->playhead = std::clamp (old.playhead, 0.0, dur);
+
+    // Let go of the old document the way closeDoc does.
+    if (recording.active && recDoc_ == &old)
+        stopRecording();
+    endClonePick();
+    cancelSelGesture();
+    old.engine.stop();
+    if (onFileClosed) onFileClosed (old);
+    if (wasActive)
+        sourcePlayer.setSource (&emptyEngine);   // before the old engine goes
+
+    docs[(size_t) index] = std::move (fresh);
+    if (sc::diag::enabled())
+        sc::diag::event ("doc.reload", sc::diag::Level::info, { { "doc", docs[(size_t) index]->id } });
+    if (wasActive)
+    {
+        activeDocIndex = -1;   // the doc being left is gone (see closeDoc)
+        activate (index);
+    }
+    else if (onStateChange)
+        onStateChange();
+    return true;
 }
 
 // ============================================================================

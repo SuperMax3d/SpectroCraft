@@ -31734,6 +31734,7 @@ static void testWriteDataToNewChannels()
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 #include "regression/model.inc"         // Model panel: sound model analysis / rendering (issue #40)
 #include "regression/readability.inc"   // Spectral Controls > Readability (issue #69)
+#include "regression/disk_changes.inc"  // files changed / deleted on disk (issue #70)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -32222,6 +32223,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("title bar: hide, merged row, side panels (#52)", testHideTitleBar);
     SC_RUN_TEST ("toolbar: custom buttons, visible buttons, calculator (#50)", testToolbarIssue50);
     SC_RUN_TEST ("interface: playback device, movable toolbar, title bar, file dialogs (#64-#71)", testInterfaceIssues64to71);
+    SC_RUN_TEST ("files changed on disk: footer, reload, ignore, save (#70)", testFileChangedOnDisk);
     SC_RUN_TEST ("undo in place, history budgets, parallel loops, AI model cache", testUndoInPlaceAndParallel);
     SC_RUN_TEST ("bench: performance timings (SC_BENCH=1 only)", testPerformanceBench);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);

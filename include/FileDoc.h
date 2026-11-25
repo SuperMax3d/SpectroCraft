@@ -11,6 +11,7 @@
 #include "UndoManager.h"
 #include "Session.h"
 #include "SoundModel.h"
+#include "FileWatch.h"
 
 /** FileDoc::metaDirty: a bool that also counts how often it was set. Every
     assignment of true bumps a change counter, so an asynchronous save can
@@ -49,6 +50,9 @@ class FileDoc
 {
 public:
     FileDoc();
+    /** A document that takes over `reuseId` (File > Reload File keeps the
+        document's id for the AI control's clients). */
+    explicit FileDoc (int reuseId);
 
     /** Stable, process-unique document id (AI control protocol "doc"):
         never reused, unlike the index in Application::docs, which shifts
@@ -57,6 +61,13 @@ public:
 
     juce::String name;                 // display name (file name)
     juce::File file;                   // full path
+    /** The file on disk (issue #70): its stamp when the app last read or
+        wrote it, a change the user chose to ignore (that exact stamp), and
+        what the last check found (MainWindow::checkDiskStates). */
+    sc::files::DiskStamp diskStamp;
+    double diskStampAtMs = 0.0;        // when it was taken (sc::files::nowMs): older checks are stale
+    std::optional<sc::files::DiskStamp> diskIgnored;
+    sc::files::DiskState diskState = sc::files::DiskState::same;
     /** Movie whose picture the Video window shows for this document: the
         opened file when it may carry video (sc::isVideoPictureCandidate).
         Kept when the audio is saved under another name, so the picture

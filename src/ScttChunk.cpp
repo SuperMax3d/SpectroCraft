@@ -1,6 +1,7 @@
 // SpectroCraft — SCTT RIFF chunk (see include/ScttChunk.h for the design notes).
 
 #include "ScttChunk.h"
+#include "FileWatch.h"   // the app's own writes (issue #70)
 
 #include <algorithm>
 #include <cctype>
@@ -650,6 +651,8 @@ bool patchRiffChunks(const juce::File& wavFile,
                      const std::vector<RiffPatchEntry>& entries,
                      std::string* errOut)
 {
+    // The app's own write (issue #70): never reported as a change on disk.
+    const sc::files::ScopedWrite own (wavFile);
     auto fail = [&] (const char* msg) -> bool
     {
         if (errOut != nullptr) *errOut = msg;

@@ -14,6 +14,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/SingleInstance.cpp   # single-instance mode + file forwarding pipe
         ${CMAKE_CURRENT_SOURCE_DIR}/Application.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FileDoc.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/FileWatch.cpp   # open files changed / deleted on disk (issue #70)
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioEngine.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralEngine.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Measures.cpp      # headless measurements (FFT panel + measure.* commands)
