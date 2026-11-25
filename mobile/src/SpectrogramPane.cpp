@@ -451,7 +451,19 @@ void SpectrogramPane::mouseUp (const juce::MouseEvent& e)
     if (axisPress)
     {
         axisPress = false;
-        if (e.position.x < kAxisW && e.getDistanceFromDragStart() < 12) showAxisMenu();
+        if (e.position.x >= kAxisW || e.getDistanceFromDragStart() >= 12) return;
+        const int serial = ++axisTapSerial;
+        if (e.getNumberOfClicks() >= 2)
+        {
+            setFrequencyRange (20.0, nyquist());   // double tap: the whole range
+            return;
+        }
+        // One tap: the menu, unless a second tap follows (double tap).
+        juce::Component::SafePointer<SpectrogramPane> safe (this);
+        juce::Timer::callAfterDelay (320, [safe, serial]
+        {
+            if (safe != nullptr && safe->axisTapSerial == serial) safe->showAxisMenu();
+        });
         return;
     }
     gestures.mouseUp (e);

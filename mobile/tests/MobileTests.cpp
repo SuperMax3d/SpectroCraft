@@ -660,6 +660,65 @@ public:
     }
 };
 
+
+class CropTests : public juce::UnitTest
+{
+public:
+    CropTests() : juce::UnitTest ("crop", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                             .getChildFile ("scm-crop-" + juce::String (juce::Random::getSystemRandom().nextInt (1 << 30)));
+        dir.createDirectory();
+        setenv ("SC_MOBILE_RECORDINGS", dir.getFullPathName().toRawUTF8(), 1);
+        const auto wav = dir.getChildFile ("Take.wav");
+        {
+            FileDoc d;
+            std::vector<std::vector<float>> data (1, std::vector<float> (48000 * 4));
+            for (size_t i = 0; i < data[0].size(); ++i) data[0][i] = (float) i / 1.0e6f;   // each sample = its index
+            d.engine.initNew (1, 48000.0, &data);
+            d.scale.unit = ScaleCalibration::Unit::Pascal;
+            d.scale.fullScaleValue = 12.0;
+            d.engine.saveFileAs (wav);
+        }
+        scm::MobileDocument doc;
+        juce::String err;
+        expect (doc.open (wav, err), err);
+
+        beginTest ("crop to a new recording keeps the selection and the calibration");
+        {
+            doc.setSelection ({ 1.0, 2.5 });
+            const auto f = doc.cropToNewFile (err);
+            expect (f.existsAsFile(), err);
+            expectEquals (f.getFileName(), juce::String ("Take crop.wav"));
+            FileDoc c;
+            expect (c.load (f));
+            expectEquals ((int64_t) c.engine.numSamples(), (int64_t) 72000);
+            float first = 0.0f;
+            c.engine.readSamples (0, 0, 1, &first);
+            expectWithinAbsoluteError (first, 48000.0f / 1.0e6f, 1e-6f);
+            expect (c.scale.unit == ScaleCalibration::Unit::Pascal && c.scale.fullScaleValue == 12.0);
+            expectWithinAbsoluteError (doc.duration(), 4.0, 1e-6, "the open file is unchanged");
+        }
+
+        beginTest ("crop in place keeps the selection and can be undone");
+        {
+            doc.setSelection ({ 1.0, 2.5 });
+            expect (doc.cropToSelection (err), err);
+            expectWithinAbsoluteError (doc.duration(), 1.5, 1e-6);
+            float first = 0.0f;
+            doc.doc()->engine.readSamples (0, 0, 1, &first);
+            expectWithinAbsoluteError (first, 48000.0f / 1.0e6f, 1e-6f);
+            expect (doc.undo());
+            expectWithinAbsoluteError (doc.duration(), 4.0, 1e-6, "undo restores the whole take");
+        }
+
+        unsetenv ("SC_MOBILE_RECORDINGS");
+        dir.deleteRecursively();
+    }
+};
+
 static GeneratorTests generatorTests;
 static CalibrationTests calibrationTests;
 static StoredPlotsTests storedPlotsTests;
@@ -668,6 +727,7 @@ static FileRoundTripTests fileRoundTripTests;
 static RecordingPathTests recordingPathTests;
 static TelemetryTests telemetryTests;
 static PlaybackEndTests playbackEndTests;
+static CropTests cropTests;
 
 int main()
 {

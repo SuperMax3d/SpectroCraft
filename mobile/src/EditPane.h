@@ -18,6 +18,9 @@ public:
     std::function<void (bool log)> onLogFrequencyChanged;
     std::function<void()> onDisplayChanged;   // dB range / colour map
     std::function<void()> onZoomToSelection;
+    /** A crop was written to a new file: open it (the screen saves pending
+        edits of the current file first). */
+    std::function<void (const juce::File&)> onOpenFile;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -27,6 +30,7 @@ private:
     juce::Label selLabel;
     juce::TextButton selectAll { "Select all" }, zoomSel { "Zoom to selection" },
                      deleteButton { "Delete" }, undoButton { "Undo" }, redoButton { "Redo" },
+                     cropButton { "Crop" }, cropNewButton { "Crop to new recording" },
                      gainButton { "Apply gain" };
     juce::Slider gain;
     juce::Label displayTitle { {}, "Display" };

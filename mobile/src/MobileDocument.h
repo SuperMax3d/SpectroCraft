@@ -61,6 +61,12 @@ public:
     // ---- edits (undoable)
     bool deleteSelection (juce::String& error);
     bool gainSelection (float db, juce::String& error);
+    /** Keeps only the selection (one undoable step). */
+    bool cropToSelection (juce::String& error);
+    /** Writes the selection to a new WAV in the recordings folder ("<name>
+        crop.wav", with this file's calibration) and returns it ({} on error).
+        The open document does not change. */
+    juce::File cropToNewFile (juce::String& error);
     bool canUndo() const;
     bool canRedo() const;
     bool undo();

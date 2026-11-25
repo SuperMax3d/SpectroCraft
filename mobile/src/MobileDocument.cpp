@@ -198,6 +198,61 @@ bool MobileDocument::gainSelection (float db, juce::String& error)
     return true;
 }
 
+bool MobileDocument::cropToSelection (juce::String& error)
+{
+    if (! hasAudio() || sel.isEmpty()) { error = "Select a time range first."; return false; }
+    auto& eng = current->engine;
+    const auto keep = selectionSamples();
+    const double a = sel.getStart(), b = sel.getEnd(), dur = duration();
+    std::string err;
+    eng.stop();
+    if (! eng.ensureEditable (&err) || ! eng.trimToRange (keep, &err))
+    {
+        error = err.empty() ? juce::String ("Crop failed.") : juce::String (err);
+        return false;
+    }
+    // Markers, stored selections and drawings follow the kept range.
+    current->remapForDeletion (b, dur);
+    current->remapForDeletion (0.0, a);
+    sel = { 0.0, duration() };
+    head = 0.0;
+    spectralEngine.clearCache();
+    changed();
+    return true;
+}
+
+juce::File MobileDocument::cropToNewFile (juce::String& error)
+{
+    if (! hasAudio() || sel.isEmpty()) { error = "Select a time range first."; return {}; }
+    auto& eng = current->engine;
+    const auto range = selectionSamples();
+    const int64_t len = range.getLength();
+    std::vector<std::vector<float>> data ((size_t) eng.numChannels(), std::vector<float> ((size_t) len));
+    for (int c = 0; c < eng.numChannels(); ++c)
+        if (! eng.readSamples (c, range.getStart(), len, data[(size_t) c].data()))
+        {
+            error = "The selection could not be read.";
+            return {};
+        }
+    FileDoc crop;
+    if (! crop.engine.initNew (eng.numChannels(), eng.sampleRate(), &data))
+    {
+        error = "Not enough memory for the new recording.";
+        return {};
+    }
+    crop.scale = current->scale;   // same microphone, same calibration
+    crop.axes = current->axes;
+    const auto base = current->file != juce::File() ? current->file.getFileNameWithoutExtension()
+                                                    : juce::String ("Recording");
+    const auto target = recordingsFolder().getNonexistentChildFile (base + " crop", ".wav", false);
+    if (! crop.engine.saveFileAs (target))
+    {
+        error = "Could not write " + target.getFileName() + ".";
+        return {};
+    }
+    return target;
+}
+
 bool MobileDocument::canUndo() const { return current != nullptr && current->undo.canUndo(); }
 bool MobileDocument::canRedo() const { return current != nullptr && current->undo.canRedo(); }
 

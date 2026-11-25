@@ -92,6 +92,15 @@ MainScreen::MainScreen (AppContext& c)
     editPane->onLogFrequencyChanged = [this] (bool log) { spectrogram.setLogFrequency (log); };
     editPane->onDisplayChanged = [this] { ctx.document.spectral().clearCache(); spectrogram.contentChanged(); };
     editPane->onZoomToSelection = [this] { zoomToSelection(); };
+    editPane->onOpenFile = [this] (const juce::File& f)
+    {
+        juce::String err;
+        if (ctx.document.hasUnsavedChanges() && ctx.document.file() != juce::File())
+            ctx.document.save (err);   // keep the edits of the file we leave
+        if (! ctx.document.open (f, err)) { showMessage ("Crop", err); return; }
+        if (filesPane) filesPane->refresh();
+        showMessage ("Crop", "The selection is now a new recording: " + f.getFileNameWithoutExtension() + ".");
+    };
 
     const char* names[] = { "Files", "Analyse", "Generate", "Calibrate", "Input", "Edit" };
     for (int t = 0; t < NumTabs; ++t)

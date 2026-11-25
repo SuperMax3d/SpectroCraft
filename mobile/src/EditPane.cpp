@@ -20,6 +20,20 @@ EditPane::EditPane (AppContext& c) : ctx (c)
         if (! ctx.document.deleteSelection (err)) showMessage ("Delete", err);
         else telemetry::capture ("edit", { { "op", "delete" } });
     };
+    cropButton.onClick = [this]
+    {
+        juce::String err;
+        if (! ctx.document.cropToSelection (err)) showMessage ("Crop", err);
+        else telemetry::capture ("edit", { { "op", "crop" } });
+    };
+    cropNewButton.onClick = [this]
+    {
+        juce::String err;
+        const auto f = ctx.document.cropToNewFile (err);
+        if (f == juce::File()) { showMessage ("Crop", err); return; }
+        telemetry::capture ("edit", { { "op", "crop_new" } });
+        if (onOpenFile) onOpenFile (f);
+    };
     undoButton.onClick = [this] { if (ctx.document.undo()) telemetry::capture ("edit", { { "op", "undo" } }); };
     redoButton.onClick = [this] { if (ctx.document.redo()) telemetry::capture ("edit", { { "op", "redo" } }); };
     gainButton.onClick = [this]
@@ -33,7 +47,7 @@ EditPane::EditPane (AppContext& c) : ctx (c)
     gain.setRange (-40.0, 40.0, 0.1);
     gain.setValue (-6.0, juce::dontSendNotification);
     gain.setTextValueSuffix (" dB");
-    for (auto* comp : std::initializer_list<juce::Component*> { &selectAll, &zoomSel, &deleteButton, &undoButton,
+    for (auto* comp : std::initializer_list<juce::Component*> { &selectAll, &zoomSel, &deleteButton, &cropButton, &cropNewButton, &undoButton,
                                                                 &redoButton, &gainButton, &gain })
         content.addAndMakeVisible (comp);
 
@@ -86,6 +100,8 @@ void EditPane::refresh()
     selectAll.setEnabled (audio);
     zoomSel.setEnabled (audio && ! s.isEmpty());
     deleteButton.setEnabled (audio && ! s.isEmpty());
+    cropButton.setEnabled (audio && ! s.isEmpty());
+    cropNewButton.setEnabled (audio && ! s.isEmpty());
     gainButton.setEnabled (audio);
     gainButton.setButtonText (s.isEmpty() ? "Gain (whole file)" : "Apply gain");
     undoButton.setEnabled (audio && ctx.document.canUndo());
@@ -116,6 +132,9 @@ void EditPane::resized()
     selectAll.setBounds (x, y, third, style::kTouch);
     zoomSel.setBounds (x + third + 4, y, third, style::kTouch);
     deleteButton.setBounds (x + 2 * (third + 4), y, third, style::kTouch);
+    y += style::kTouch + 4;
+    cropButton.setBounds (x, y, third, style::kTouch);
+    cropNewButton.setBounds (x + third + 4, y, w - third - 4, style::kTouch);
     y += style::kTouch + 4;
     gain.setBounds (x, y, w - 150, style::kTouch);
     gainButton.setBounds (x + w - 146, y, 146, style::kTouch);

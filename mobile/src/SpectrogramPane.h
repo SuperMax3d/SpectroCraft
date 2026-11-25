@@ -82,6 +82,7 @@ private:
     bool logAxis = true;
     double writeHead = -1.0;
     bool axisPress = false;   // the current touch started on the scale
+    int axisTapSerial = 0;    // a second tap cancels the first one's menu
 
     // pinch start state
     double pinchT0 = 0, pinchT1 = 0, pinchFLo = 0, pinchFHi = 0;
