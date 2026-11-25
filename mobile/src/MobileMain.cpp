@@ -77,20 +77,6 @@ public:
         telemetry::initialise (*props);
         telemetry::capture ("app_opened", {});
 
-        // TEMPORARY (Sentry setup check, issue #73): SC_MOBILE_SENTRY_TEST=message
-        // sends "Sentry test error <time>" from the running app, =crash crashes it
-        // (the report goes out at the next launch). Remove once both are confirmed.
-        if (const auto test = juce::SystemStats::getEnvironmentVariable ("SC_MOBILE_SENTRY_TEST", {});
-            test.isNotEmpty() && telemetry::enabled())
-            juce::Timer::callAfterDelay (3000, [test]
-            {
-                if (test == "crash")
-                {
-                    volatile int* nowhere = nullptr;
-                    *nowhere = 1;
-                }
-                telemetry::reportError ("Sentry test error " + juce::String (juce::Time::currentTimeMillis() / 1000));
-            });
 
         audio = std::make_unique<LiveAudio>();
         document = std::make_unique<MobileDocument>();
@@ -142,9 +128,15 @@ public:
         if (env ("SC_MOBILE_NO_AUDIO") == "1")
             return;
        #endif
-        audio->open (props->getIntValue ("inputChannels", 1), [screen] (juce::String err)
+        // Open the microphone once the window is up: the audio session can take
+        // a moment (or, in the iOS simulator without the Mac's microphone
+        // permission, block), and the screen should not stay black meanwhile.
+        juce::MessageManager::callAsync ([this, screen]
         {
-            screen->audioReady (err);
+            audio->open (props->getIntValue ("inputChannels", 1), [screen] (juce::String err)
+            {
+                screen->audioReady (err);
+            });
         });
     }
 
