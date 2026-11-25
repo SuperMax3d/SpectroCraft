@@ -12,7 +12,8 @@
 #   iOS:     SC_APPLE_TEAM_ID, SC_APPSTORE_KEY_ID, SC_APPSTORE_ISSUER_ID,
 #            SC_APPSTORE_KEY_P8 -> archive signed by Xcode (automatic signing
 #            through the App Store Connect API key) and uploaded to TestFlight
-#            (manual runs and main only).
+#            (manual runs and main only; any push when the repository variable
+#            SC_MOBILE_UPLOAD is "true").
 # The bundle / application id comes from the repository variable
 # SC_MOBILE_BUNDLE_ID (default com.spectrocraft.mobile).
 #
@@ -62,7 +63,10 @@ env:
   SENTRY_DSN: ${{ vars.SC_SENTRY_DSN }}
   POSTHOG_KEY: ${{ vars.SC_POSTHOG_KEY }}
   POSTHOG_HOST: ${{ vars.SC_POSTHOG_HOST || 'https://us.i.posthog.com' }}
-  UPLOAD: ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+  # Store uploads: manual runs with "upload", pushes to main, and pushes to any
+  # branch of a repository whose variable SC_MOBILE_UPLOAD is "true" (a fork
+  # building test versions from its mobile-* branches).
+  UPLOAD: ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || vars.SC_MOBILE_UPLOAD == 'true')) }}
 
 jobs:
   tests:
@@ -206,6 +210,23 @@ jobs:
           key="$RUNNER_TEMP/AuthKey_$KEY_ID.p8"
           printf '%s' "$KEY_P8" > "$key"
           auth=(-allowProvisioningUpdates -authenticationKeyPath "$key" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER")
+          # The app must exist in App Store Connect (it cannot be created through
+          # the API): without it, say so instead of failing the upload.
+          token="$(ruby -ropenssl -rjson -rbase64 -e '
+            key = OpenSSL::PKey::EC.new(File.read(ARGV[0]))
+            b64 = ->(s) { Base64.urlsafe_encode64(s, padding: false) }
+            h = b64.(JSON.generate({ alg: "ES256", kid: ARGV[1], typ: "JWT" }))
+            now = Time.now.to_i
+            p = b64.(JSON.generate({ iss: ARGV[2], iat: now, exp: now + 900, aud: "appstoreconnect-v1" }))
+            der = key.sign(OpenSSL::Digest::SHA256.new, "#{h}.#{p}")
+            raw = OpenSSL::ASN1.decode(der).value.map { |i| i.value.to_s(2).rjust(32, "\x00") }.join
+            puts "#{h}.#{p}.#{b64.(raw)}"' "$key" "$KEY_ID" "$ISSUER")"
+          apps="$(curl -s -H "Authorization: Bearer $token" \
+            "https://api.appstoreconnect.apple.com/v1/apps?filter%5BbundleId%5D=$BUNDLE_ID&fields%5Bapps%5D=bundleId")"
+          if ! python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("data") else 1)' <<< "$apps"; then
+            echo "::warning::No app with bundle id $BUNDLE_ID in App Store Connect yet: create it (My Apps > + > New App), then push again. Upload skipped."
+            exit 0
+          fi
           xcodebuild -project build-ios/SpectroCraftMobile.xcodeproj -scheme SpectroCraftMobile \
             -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
             -archivePath build-ios/SpectroCraftMobile.xcarchive \

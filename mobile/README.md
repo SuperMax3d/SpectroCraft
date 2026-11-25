@@ -94,7 +94,9 @@ Desktop development hooks (macOS / Linux builds only): `SC_MOBILE_RECORDINGS=<fo
 the debug key: it installs by hand ("install unknown apps"), not on Google Play.
 
 Store builds need these repository secrets (Settings > Secrets and variables > Actions) and run on
-*Run workflow* with *upload* ticked, or on pushes to main:
+*Run workflow* with *upload* ticked, on pushes to main, or on every push when the repository variable
+`SC_MOBILE_UPLOAD` is `true` (GitHub offers *Run workflow* only once the workflow is on the default
+branch, so a fork testing a branch uses the variable):
 
 | Secret | |
 |---|---|
