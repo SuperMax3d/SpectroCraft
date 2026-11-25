@@ -144,7 +144,7 @@ struct MetaBundle
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
          haveTranscription = false, haveTables = false, haveVideoTracks = false,
          haveAxes = false, haveSession = false, haveSoundModel = false,
-         haveStoredPlots = false;
+         haveStoredPlots = false, haveSoundMapPoint = false;
 
     /** Session (issue #21): the referenced files with their lanes and
         offsets, as written by sc::session::toVar (kept as JSON here; the
@@ -158,6 +158,10 @@ struct MetaBundle
         keeps with a recording, as written by its StoredPlots::toVar (an array,
         kept as JSON here). The desktop carries them through its saves. */
     juce::var storedPlots;
+    /** Sound map (mobile app): where the recording was made, as the map that
+        located it wrote it (map, point, x, y, z in metres, uncertainty; an
+        object, kept as JSON here). The desktop carries it through its saves. */
+    juce::var soundMapPoint;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
@@ -167,7 +171,8 @@ struct MetaBundle
             || !freqAnalysis.isDefault() || !tables.empty()
             || !videoTracks.empty() || !axes.empty() || session.isObject()
             || soundModel.isObject()
-            || (storedPlots.isArray() && storedPlots.size() > 0);
+            || (storedPlots.isArray() && storedPlots.size() > 0)
+            || soundMapPoint.isObject();
     }
 };
 

@@ -15,6 +15,8 @@
 #include "SmSurvey.h"
 #include <optional>
 
+class FileDoc;
+
 namespace scm::smap
 {
 struct MapSettings
@@ -147,6 +149,25 @@ public:
         in time order (takes in the first one's unit): the source's drift.
         band 0 = the 250 Hz-2 kHz bands summed. */
     std::vector<std::pair<juce::Time, double>> drift (double band) const;
+
+    // ---- the position inside each take's WAV
+    // Metadata key "soundMapPoint" (JSON: map, point, kind, x, y, z in metres,
+    // sigma, checked, moved, frame) and one line of the WAV's INFO comment
+    // ("Sound map ..."), so a WAV alone says where it was recorded.
+
+    juce::var positionVar (const MapPoint& p) const;
+    /** "Sound map <name>, P012 (point): x 1.234 m, y -0.456 m, z -1.800 m, +/- 6 mm" */
+    juce::String positionText (const MapPoint& p) const;
+    /** Puts the point's position into a document (before it is saved). */
+    void stampDocument (FileDoc& d, const MapPoint& p) const;
+    /** Rewrites the position in the point's WAV in place (metadata chunks
+        only, the audio is not touched; into the .meta.json sidecar instead of
+        the SCMD chunk when the file keeps its metadata there). Safe on a
+        background thread; never on the WAV the app has open (see writeStamp). */
+    bool stampWav (const MapPoint& p, juce::String& error) const;
+    /** Writes an already stamped document's metadata into `wav` in place (the
+        same rules as stampWav): for the open document, on the message thread. */
+    static bool writeStamp (const FileDoc& d, const juce::File& wav, juce::String& error);
 
     /** One row per take: number, kind, x, y, z (m), checks, LZeq, LAeq, then every band. */
     juce::String toCsv() const;

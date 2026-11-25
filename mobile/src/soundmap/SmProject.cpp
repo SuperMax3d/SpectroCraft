@@ -1,5 +1,11 @@
 #include "SmProject.h"
+#include "FileDoc.h"
 #include "MobileDocument.h"
+#include "RiffInfo.h"
+#include "FileMeta.h"
+#include "FileWatch.h"
+#include "ScttChunk.h"
+#include <cstring>
 #include <limits>
 #include <set>
 
@@ -414,6 +420,101 @@ Fix SoundMapProject::locate (const std::vector<TagObservation>& tags, int width,
         f.mic = r.camFromWorld.inverse() * offsetCam;
     }
     return f;
+}
+
+juce::var SoundMapProject::positionVar (const MapPoint& p) const
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("map", name);
+    o->setProperty ("point", p.number);
+    o->setProperty ("kind", p.kind == PointKind::Background ? "background" : p.kind == PointKind::Reference ? "reference" : "point");
+    o->setProperty ("located", p.located);
+    if (p.located)   // no position: no numbers that could pass for one
+    {
+        o->setProperty ("x", p.position.x);
+        o->setProperty ("y", p.position.y);
+        o->setProperty ("z", p.position.z);
+        o->setProperty ("sigma", p.sigmaM);
+        o->setProperty ("checked", p.checked());
+        o->setProperty ("moved", p.movedM);
+    }
+    o->setProperty ("unit", "m");
+    juce::String frame = map.radius > 0.0 ? "origin at the centre of the tags' circle" : "origin at the centroid of the tags";
+    frame << ", z up (z = 0 at the deck when the tag height is set)";
+    if (! map.tags.empty()) frame << ", x toward tag " << map.tags.begin()->first;
+    o->setProperty ("frame", frame);
+    o->setProperty ("updated", juce::Time::getCurrentTime().toISO8601 (true));
+    return o;
+}
+
+juce::String SoundMapProject::positionText (const MapPoint& p) const
+{
+    juce::String s = "Sound map " + name + ", P" + juce::String (p.number).paddedLeft ('0', 3) + " ("
+                     + (p.kind == PointKind::Background ? "background" : p.kind == PointKind::Reference ? "reference" : "point") + "): ";
+    if (! p.located) return s + "no position";
+    s << "x " << juce::String (p.position.x, 3) << " m, y " << juce::String (p.position.y, 3) << " m, z "
+      << juce::String (p.position.z, 3) << " m, +/- " << juce::roundToInt (p.sigmaM * 1000.0) << " mm";
+    if (! p.checked()) s << ", not checked";
+    else if (p.moved()) s << ", moved " << juce::String (p.movedM * 100.0, 1) << " cm";
+    return s;
+}
+
+void SoundMapProject::stampDocument (FileDoc& d, const MapPoint& p) const
+{
+    d.soundMapPoint = positionVar (p);
+    // the app's line is the comment's first line: replace it, keep the rest as it is
+    juce::String rest = d.riffInfo["ICMT"];
+    if (rest.startsWith ("Sound map " + name + ", P")) rest = rest.fromFirstOccurrenceOf ("\n", false, false);
+    d.riffInfo["ICMT"] = positionText (p) + (rest.isNotEmpty() ? "\n" + rest : juce::String());
+}
+
+bool SoundMapProject::writeStamp (const FileDoc& d, const juce::File& wav, juce::String& error)
+{
+    // a .meta.json sidecar holds the metadata when it exists (it wins on load)
+    const auto sidecar = sc::fileMetaSidecarPath (wav);
+    const bool external = sidecar.existsAsFile();
+    if (external)
+    {
+        sc::files::ScopedWrite guard (sidecar);
+        if (! d.writeMetaSidecar (wav)) { error = "The take's metadata file could not be written."; return false; }
+    }
+    std::vector<RiffPatchEntry> entries;
+    if (! external)
+    {
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, "SCMD", 4);
+        e.payload = d.buildScmdJson();
+        e.present = ! e.payload.empty();
+        entries.push_back (e);
+    }
+    RiffPatchEntry info;
+    std::memcpy (info.fourcc, "LIST", 4);
+    std::memcpy (info.listType, "INFO", 4);
+    info.payload = sc::riffinfo::buildInfoListPayload (d.riffInfo);
+    info.present = ! info.payload.empty();
+    entries.push_back (info);
+    RiffPatchEntry disp;
+    std::memcpy (disp.fourcc, "DISP", 4);
+    disp.payload = sc::riffinfo::buildDispPayload (d.riffInfo);
+    disp.present = ! disp.payload.empty();
+    entries.push_back (disp);
+    std::string err;
+    if (! patchRiffChunks (wav, entries, &err))
+    {
+        error = "The take's metadata could not be written.";
+        return false;
+    }
+    return true;
+}
+
+bool SoundMapProject::stampWav (const MapPoint& p, juce::String& error) const
+{
+    const auto wav = file (p.wav);
+    if (! wav.existsAsFile()) { error = "The take is missing."; return false; }
+    FileDoc d;
+    if (! d.load (wav)) { error = "The take could not be read."; return false; }
+    stampDocument (d, p);
+    return writeStamp (d, wav, error);
 }
 
 juce::String SoundMapProject::toCsv() const

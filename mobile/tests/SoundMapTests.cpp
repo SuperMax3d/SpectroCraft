@@ -902,6 +902,116 @@ public:
             }
         }
 
+        beginTest ("every take carries its x, y, z: in the document it is saved from, and rewritten in place");
+        {
+            SoundMapProject p;
+            p.folder = dir.getChildFile ("stamp-map");
+            p.folder.getChildFile ("points").createDirectory();
+            p.name = "stamp-map";
+            MapPoint q;
+            q.number = 12;
+            q.pending = false;
+            q.wav = "points/P012.wav";
+            q.before.ok = true; q.before.sigmaM = 0.006; q.before.mic = { 1.234, -0.456, -1.8 };
+            q.after = q.before;
+            q.updatePosition();
+
+            // the take is saved with its position (as the pane does before stopping the take)
+            const auto wav = p.file (q.wav);
+            {
+                FileDoc d;
+                std::vector<std::vector<float>> data (1, std::vector<float> (48000 * 3, 0.0f));
+                for (size_t i = 0; i < data[0].size(); ++i) data[0][i] = 0.1f * (float) std::sin (0.13 * (double) i);
+                expect (d.engine.initNew (1, 48000.0, &data));
+                d.scale.unit = ScaleCalibration::Unit::Pascal;
+                d.scale.fullScaleValue = 20.0;
+                d.riffInfo["ICMT"] = "Windy day.";
+                p.stampDocument (d, q);
+                expect (d.engine.saveFileAs (wav), "save");
+            }
+            {
+                FileDoc e;
+                expect (e.load (wav));
+                expect (e.soundMapPoint.isObject(), "soundMapPoint in the WAV");
+                expectWithinAbsoluteError ((double) e.soundMapPoint["x"], 1.234, 1e-9);
+                expectWithinAbsoluteError ((double) e.soundMapPoint["y"], -0.456, 1e-9);
+                expectWithinAbsoluteError ((double) e.soundMapPoint["z"], -1.8, 1e-9);
+                expectEquals ((int) e.soundMapPoint["point"], 12);
+                expectEquals (e.soundMapPoint["map"].toString(), juce::String ("stamp-map"));
+                expect (e.riffInfo["ICMT"].startsWith ("Sound map stamp-map, P012 (point): x 1.234 m, y -0.456 m, z -1.800 m"),
+                        e.riffInfo["ICMT"]);
+                expect (e.riffInfo["ICMT"].contains ("Windy day."), "the user's comment stays");
+            }
+
+            // the map was rebuilt: the position is rewritten in place
+            q.before.mic = { 1.25, -0.44, -1.79 };
+            q.after = q.before;
+            q.updatePosition();
+            juce::String err;
+            expect (p.stampWav (q, err), err);
+            FileDoc f;
+            expect (f.load (wav));
+            expectWithinAbsoluteError ((double) f.soundMapPoint["x"], 1.25, 1e-9);
+            expectEquals (f.engine.numSamples(), (int64_t) 48000 * 3, "audio untouched");
+            expect (f.scale.unit == ScaleCalibration::Unit::Pascal && f.scale.fullScaleValue == 20.0, "calibration kept");
+            juce::StringArray lines;
+            lines.addLines (f.riffInfo["ICMT"]);
+            int ours = 0;
+            for (const auto& l : lines) if (l.startsWith ("Sound map ")) ++ours;
+            expectEquals (ours, 1, "one position line, replaced: " + f.riffInfo["ICMT"]);
+            expect (f.riffInfo["ICMT"].contains ("x 1.250 m") && f.riffInfo["ICMT"].contains ("Windy day."), f.riffInfo["ICMT"]);
+            float s0 = 0.0f;
+            f.engine.readSamples (0, 1000, 1, &s0);
+            expectWithinAbsoluteError (s0, 0.1f * (float) std::sin (0.13 * 1000.0), 1e-4f);
+
+            // and the desktop's metadata bundle carries it
+            const auto json = f.buildMetaJson();
+            expect (juce::String (json).contains ("\"soundMapPoint\""), "in the bundle");
+
+            // the rest of the comment is kept as it is (blank lines, line ends, the user's own "Sound map" notes)
+            {
+                FileDoc g;
+                g.riffInfo["ICMT"] = "Windy day.\r\n\r\nSecond paragraph.\r\nSound map notes: redo P3";
+                p.stampDocument (g, q);
+                p.stampDocument (g, q);
+                expect (g.riffInfo["ICMT"].fromFirstOccurrenceOf ("\n", false, false)
+                            == "Windy day.\r\n\r\nSecond paragraph.\r\nSound map notes: redo P3", g.riffInfo["ICMT"]);
+            }
+
+            // a take without a position says so, with no numbers that could pass for one
+            {
+                MapPoint lost = q;
+                lost.before = {}; lost.after = {};
+                lost.updatePosition();
+                FileDoc g;
+                p.stampDocument (g, lost);
+                expect (! (bool) g.soundMapPoint["located"] && ! g.soundMapPoint.hasProperty ("x"));
+                expect (g.riffInfo["ICMT"].endsWith ("no position"), g.riffInfo["ICMT"]);
+            }
+
+            // metadata kept in a .meta.json sidecar (the desktop's External mode): the sidecar gets the position
+            {
+                const auto wav2 = p.file ("points/P013.wav");
+                FileDoc d2;
+                std::vector<std::vector<float>> data (1, std::vector<float> (48000, 0.01f));
+                expect (d2.engine.initNew (1, 48000.0, &data));
+                expect (d2.engine.saveFileAs (wav2));
+                d2.soundMapPoint = p.positionVar (q);   // the old position
+                expect (d2.writeMetaSidecar (wav2));
+                MapPoint q13 = q;
+                q13.number = 13;
+                q13.wav = "points/P013.wav";
+                q13.before.mic = { -2.0, 0.5, -1.5 };
+                q13.after = q13.before;
+                q13.updatePosition();
+                expect (p.stampWav (q13, err), err);
+                FileDoc e2;
+                expect (e2.load (wav2));
+                expectWithinAbsoluteError ((double) e2.soundMapPoint["x"], -2.0, 1e-9, "the sidecar holds the new position");
+                expectEquals ((int) e2.soundMapPoint["point"], 13);
+            }
+        }
+
         beginTest ("marker sheets: a valid PDF, one page per tag, at the exact size");
         {
             juce::MemoryBlock mb;

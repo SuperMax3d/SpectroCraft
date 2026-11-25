@@ -159,6 +159,7 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
 
     // Stored analysis plots (mobile app, issue #73): unified > SCMD.
     storedPlots = unifiedB.haveStoredPlots ? unifiedB.storedPlots : scmdB.storedPlots;
+    soundMapPoint = unifiedB.haveSoundMapPoint ? unifiedB.soundMapPoint : scmdB.soundMapPoint;
 
     // Sound model (Model panel): unified > SCMD.
     soundModel = {};
@@ -295,6 +296,7 @@ std::string FileDoc::buildScmdJson () const
     if (!soundModel.empty ())
         b.soundModel = soundModel.toVar ();
     b.storedPlots = storedPlots;
+    b.soundMapPoint = soundMapPoint;
 
     if (!b.hasContent ())
         return {};   // nothing worth embedding: omit the SCMD chunk entirely
@@ -326,6 +328,7 @@ std::string FileDoc::buildMetaJson () const
     if (!soundModel.empty ())
         b.soundModel = soundModel.toVar ();
     b.storedPlots = storedPlots;
+    b.soundMapPoint = soundMapPoint;
 
     return sc::serialiseBundle (b, true);
 }
@@ -344,6 +347,7 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     soundModel = {};
     if (b.soundModel.isObject ()) sc::model::Model::fromVar (b.soundModel, soundModel);
     if (b.haveStoredPlots) storedPlots = b.storedPlots;
+    if (b.haveSoundMapPoint) soundMapPoint = b.soundMapPoint;
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;

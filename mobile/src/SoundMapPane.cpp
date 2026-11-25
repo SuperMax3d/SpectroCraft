@@ -1,6 +1,7 @@
 #include "SoundMapPane.h"
 #include "LiveAudio.h"
 #include "MobileStyle.h"
+#include "MobileDocument.h"
 #include "Recorder.h"
 #include "Telemetry.h"
 #include "VideoCapture.h"
@@ -111,7 +112,7 @@ SoundMapPane::SoundMapPane (AppContext& c) : ctx (c)
     };
     deletePointButton.onClick = [this]
     {
-        if (! project || step != Step::Idle) return;
+        if (! project || step != Step::Idle || restampPending > 0) return;   // a rewrite of the takes is running
         const int n = view.selected();
         if (project->point (n) == nullptr) return;
         auto options = juce::MessageBoxOptions::makeOptionsOkCancel (juce::MessageBoxIconType::WarningIcon, "Delete point",
@@ -441,12 +442,12 @@ void SoundMapPane::updateControls()
 
     photoButton.setEnabled (project.has_value() && settled && idle);
     buildButton.setEnabled (project.has_value() && ! project->survey.empty() && idle);
-    goButton.setEnabled (project.has_value() && settled && idle
-                         && (project->map.built || kindBox.getSelectedId() == 2));
+    goButton.setEnabled (project.has_value() && settled && idle && project->map.built);
     cancelButton.setEnabled (step == Step::Countdown || step == Step::Recording);
     kindBox.setEnabled (idle);
     mapBox.setEnabled (idle);
     menuButton.setEnabled (idle);
+    deletePointButton.setEnabled (idle && restampPending == 0);
     viewButton.setEnabled (idle);
     surveyButton.setEnabled (idle && project.has_value());
     measureButton.setEnabled (idle && project.has_value());
@@ -678,6 +679,7 @@ void SoundMapPane::buildMap()
             }
             self->project->setMap (result);
             self->saveProject();
+            self->restampAll();
             self->view.refresh();
             juce::String s;
             s << (int) result.tags.size() << " tags mapped from " << self->project->map.picturesUsed << " pictures, error "
@@ -697,7 +699,7 @@ void SoundMapPane::startMeasure()
 {
     if (! project || step != Step::Idle || ! cameraOn) return;
     nextKind = (PointKind) juce::jlimit (0, 2, kindBox.getSelectedId() - 1);
-    if (nextKind != PointKind::Background && ! project->map.built)
+    if (! project->map.built)
     {
         info.setText ("Build the map first (Survey).", juce::dontSendNotification);
         return;
@@ -782,8 +784,8 @@ void SoundMapPane::beforeLocated (const juce::Image&, const std::vector<TagObser
                                   const juce::String& picture)
 {
     const Fix fix = project->locate (tags, w, h, hold);
-    if (nextKind == PointKind::Point)
     {
+        // every take of a map has its x, y, z: background and reference takes too
         juce::String why;
         if (! fix.ok)
             why = "No position (" + (fix.problem.isNotEmpty() ? fix.problem : juce::String ("no tag")) + "). Aim at three tags or more.";
@@ -832,6 +834,10 @@ void SoundMapPane::beforeLocated (const juce::Image&, const std::vector<TagObser
 
 void SoundMapPane::finishTake()
 {
+    // the take is saved with its position (the picture before it) in its metadata
+    if (project)
+        if (auto* pt = project->point (currentPoint); pt != nullptr && ctx.recorder.isRecording())
+            if (auto* d = ctx.document.doc()) project->stampDocument (*d, *pt);
     const auto saved = stopTake ? stopTake() : juce::File();
     auto* p = project ? project->point (currentPoint) : nullptr;
     if (p == nullptr) { measureFailed ("The point is gone."); return; }
@@ -897,12 +903,18 @@ void SoundMapPane::analyse()
     const auto wav = project->file (point->wav);
     const auto folder = project->folder;
     const int number = currentPoint;
+    const SoundMapProject snapshot = *project;   // for the position's final value (both pictures)
+    const MapPoint finalPoint = *point;
+    juce::String openStampErr;
+    const bool stampedHere = stampIfOpen (finalPoint, openStampErr);
     juce::WeakReference<SoundMapPane> weak (this);
-    worker.addJob ([weak, wav, folder, number]
+    worker.addJob ([weak, wav, folder, number, snapshot, finalPoint, stampedHere, openStampErr]
     {
+        juce::String stampErr = openStampErr;
+        if (! stampedHere) snapshot.stampWav (finalPoint, stampErr);
         juce::String why;
         auto measured = analyseTake (wav, 0.5, 0.3, why);
-        juce::MessageManager::callAsync ([weak, levels = std::move (measured), err = why, folder, number]
+        juce::MessageManager::callAsync ([weak, levels = std::move (measured), err = why, stampErr, folder, number]
         {
             auto* self = weak.get();
             if (self == nullptr) return;
@@ -913,6 +925,8 @@ void SoundMapPane::analyse()
             p->levels = levels;
             p->pending = false;
             if (! levels.valid()) p->note = (p->note.isNotEmpty() ? p->note + " " : juce::String()) + err;
+            if (stampErr.isNotEmpty())
+                p->note = (p->note.isNotEmpty() ? p->note + " " : juce::String()) + "Position not written into the take: " + stampErr;
             self->saveProject();
             self->updateBands();
             self->view.setSelected (number);
@@ -930,6 +944,57 @@ void SoundMapPane::analyse()
             telemetry::capture ("soundmap_point", { { "kind", kindName (p->kind) }, { "located", p->located },
                                                    { "tags", p->before.tags }, { "moved", p->moved() } });
             self->updateControls();
+        });
+    });
+}
+
+// ------------------------------------------------------- positions in WAVs
+
+bool SoundMapPane::stampIfOpen (const MapPoint& p, juce::String& error)
+{
+    if (! project || p.pending || p.wav.isEmpty() || ctx.recorder.isRecording()) return false;
+    const auto wav = project->file (p.wav);
+    auto* d = ctx.document.doc();
+    if (d == nullptr || ctx.document.file() != wav) return false;
+    project->stampDocument (*d, p);
+    if (! ctx.document.hasUnsavedChanges())
+        SoundMapProject::writeStamp (*d, wav, error);
+    // with unsaved edits the document's next save writes the position with them
+    return true;
+}
+
+void SoundMapPane::restampAll()
+{
+    if (! project || project->points.empty()) return;
+    juce::File skip;
+    juce::String openErr;
+    for (const auto& p : project->points)
+        if (stampIfOpen (p, openErr)) { skip = project->file (p.wav); break; }
+    const SoundMapProject snapshot = *project;
+    const auto folder = project->folder;
+    ++restampPending;
+    updateControls();
+    juce::WeakReference<SoundMapPane> weak (this);
+    worker.addJob ([weak, snapshot, folder, skip, openErr]
+    {
+        int failed = openErr.isNotEmpty() ? 1 : 0;
+        for (const auto& p : snapshot.points)
+        {
+            if (p.pending || p.wav.isEmpty() || snapshot.file (p.wav) == skip) continue;
+            juce::String err;
+            if (! snapshot.stampWav (p, err)) ++failed;
+        }
+        juce::MessageManager::callAsync ([weak, folder, failed]
+        {
+            auto* self = weak.get();
+            if (self == nullptr) return;
+            self->restampPending = std::max (0, self->restampPending - 1);
+            self->updateControls();
+            if (! self->project || self->project->folder != folder) return;
+            if (failed > 0)
+                self->info.setText (self->info.getText() + "\n" + juce::String (failed)
+                                    + " takes could not get their new position (missing or read-only).",
+                                    juce::dontSendNotification);
         });
     });
 }
@@ -956,7 +1021,7 @@ void SoundMapPane::showMenu()
     m.addItem (5, "Export CSV...", project.has_value() && ! project->points.empty());
     m.addItem (6, "Locate the points again", project.has_value() && project->map.built);
     m.addSeparator();
-    m.addItem (7, "Delete this map...", project.has_value());
+    m.addItem (7, "Delete this map...", project.has_value() && restampPending == 0);
     juce::WeakReference<SoundMapPane> weak (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton), [weak] (int r)
     {
@@ -1008,6 +1073,7 @@ void SoundMapPane::showMenu()
             case 6:
                 pr->relocatePoints();
                 self->saveProject();
+                self->restampAll();
                 self->view.refresh();
                 self->showPoint (-1);
                 break;
@@ -1018,7 +1084,7 @@ void SoundMapPane::showMenu()
                 self->confirmBox = juce::AlertWindow::showScopedAsync (options, [weak] (int answer)
                 {
                     auto* me = weak.get();
-                    if (me == nullptr || answer != 1 || ! me->project || me->step != Step::Idle) return;
+                    if (me == nullptr || answer != 1 || ! me->project || me->step != Step::Idle || me->restampPending > 0) return;
                     const auto folder = me->project->folder;
                     me->view.setProject (nullptr);
                     me->project.reset();
@@ -1083,6 +1149,7 @@ void SoundMapPane::showSettings()
             else if ((s.micOffsetCm - old.micOffsetCm).norm() > 1e-9 && self->project->map.built)
             {
                 self->project->relocatePoints();
+                self->restampAll();
                 note = "The points were located again with the new microphone offset.";
             }
             self->saveProject();

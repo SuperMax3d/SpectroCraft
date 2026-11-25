@@ -153,7 +153,7 @@ Kinds of take:
 | Kind | Use |
 |---|---|
 | Point | A map point. |
-| Background | The source off: the background per band. Bands of the points less than 10 dB above it are drawn hollow; less than 3 dB, left off the surface. |
+| Background | The source off: the background per band (at a known position, like every take). Bands of the points less than 10 dB above it are drawn hollow; less than 3 dB, left off the surface. |
 | Reference | The same fixed spot again and again (a marked tripod spot): the source's drift. The View summary gives it for the 250 Hz-2 kHz bands. |
 
 The microphone is not at the camera. Settings > Microphone offset (from the
@@ -283,6 +283,27 @@ The Map tab (after Edit) takes the screen below the top bar:
 
 A point is written to project.json ("pending") before its take starts, so a
 crash leaves a trace rather than an unknown file.
+
+Every take has its position (a take without one is refused, background and
+reference takes included), and its WAV carries it, so a WAV alone says where
+it was recorded:
+
+- metadata key `soundMapPoint` (JSON in the WAV's SpectroCraft metadata, or
+  in its `.meta.json` sidecar when the file keeps its metadata there; kept by
+  the desktop through its saves): `map`, `point`, `kind`, `located`, `x`, `y`,
+  `z` (metres, the map's frame), `sigma` (m), `checked`, `moved` (m), `unit`,
+  `frame` (how the frame was built), `updated`. A take that a rebuilt map can
+  no longer locate gets `located: false` and no numbers;
+- the first line of the WAV's INFO comment (the desktop's File Info panel,
+  other audio tools): `Sound map <map>, P012 (point): x 1.234 m, y -0.456 m,
+  z -1.800 m, +/- 6 mm`. The rest of the comment is kept.
+
+The take is saved with the position of its first picture; the position of
+both pictures replaces it once the second picture is in, and every take's
+position is rewritten in place (metadata chunks only) when Build map, Locate
+the points again or a new microphone offset moves the points. The take open in
+the app gets it at once in memory too; if it has unsaved edits, its next save
+writes the position with them.
 
 ## 7. Code
 

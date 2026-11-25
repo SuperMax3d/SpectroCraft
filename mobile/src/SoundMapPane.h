@@ -81,6 +81,14 @@ private:
     void finishTake();
     void photoAfter();
     void analyse();
+    /** Rewrites every take's position in its WAV (after the map or the offset changed). */
+    void restampAll();
+    /** When the open document is this take: its position, in memory and (no
+        unsaved edits) in its file, here on the message thread, never from the
+        worker, so a save of the document cannot race the worker. False when
+        the take is not the open document. */
+    bool stampIfOpen (const smap::MapPoint& p, juce::String& error);
+    int restampPending = 0;   // restamp jobs queued: no deletion meanwhile
     void measureFailed (const juce::String& why);
 
     /** Saves the picture (JPEG) and finds its tags on the worker thread; `done` runs on the message thread. */
