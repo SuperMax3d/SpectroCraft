@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- SpectroCraft Mobile (issue #73). JUCE's bootstrap: the application class
-     com.rmsl.juce.JuceApp loads libjuce_jni.so, the activity hosts the JUCE
+     com.rmsl.juce.JuceApp loads libjuce_jni.so, MainActivity hosts the JUCE
      window, the provider serves files to the share sheet. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -24,8 +24,10 @@
         android:hardwareAccelerated="false"
         android:requestLegacyExternalStorage="false">
 
+        <!-- Our own activity: JuceActivity needs natives JUCE registers only for
+             push notifications / in-app purchases (see MainActivity.java). -->
         <activity
-            android:name="com.rmsl.juce.JuceActivity"
+            android:name="com.spectrocraft.mobile.MainActivity"
             android:label="SpectroCraft"
             android:exported="true"
             android:launchMode="singleTask"
