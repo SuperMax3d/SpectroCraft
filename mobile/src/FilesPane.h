@@ -18,7 +18,7 @@ public:
     void refresh();
 
     /** Opens a file, asking first when the open one has unsaved changes. */
-    void openFile (const juce::File& f);
+    void openFile (const juce::File& f, const char* source = "list");
 
 private:
     int getNumRows() override;
@@ -36,6 +36,7 @@ private:
     juce::TextButton openButton { "Open..." }, saveButton { "Save" }, shareButton { "Share" },
                      deleteButton { "Delete" };
     juce::ListBox list;
+    juce::ToggleButton privacy { "Send anonymous crash reports and usage statistics" };
     juce::Array<juce::File> files;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::ScopedMessageBox shareBox;

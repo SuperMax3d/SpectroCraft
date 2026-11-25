@@ -15,6 +15,13 @@
 #            (manual runs and main only).
 # The bundle / application id comes from the repository variable
 # SC_MOBILE_BUNDLE_ID (default com.spectrocraft.mobile).
+#
+# Crash reports and statistics (mobile/src/Telemetry.h) are compiled in only
+# when the repository variables SC_SENTRY_DSN / SC_POSTHOG_KEY (and optionally
+# SC_POSTHOG_HOST) are set - so pull-request builds from forks send nothing.
+# With the secret SC_SENTRY_AUTH_TOKEN and the variables SC_SENTRY_ORG /
+# SC_SENTRY_PROJECT, the debug symbols are uploaded to Sentry so native crashes
+# show file and line.
 name: mobile
 
 on:
@@ -52,6 +59,9 @@ concurrency:
 
 env:
   BUNDLE_ID: ${{ vars.SC_MOBILE_BUNDLE_ID || 'com.spectrocraft.mobile' }}
+  SENTRY_DSN: ${{ vars.SC_SENTRY_DSN }}
+  POSTHOG_KEY: ${{ vars.SC_POSTHOG_KEY }}
+  POSTHOG_HOST: ${{ vars.SC_POSTHOG_HOST || 'https://us.i.posthog.com' }}
   UPLOAD: ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
@@ -101,7 +111,8 @@ jobs:
           tasks="assembleRelease"
           if [ "${SIGNED:-}" = "1" ]; then tasks="$tasks bundleRelease"; fi
           gradle -p mobile/android $tasks --stacktrace \
-            -PappId="$BUNDLE_ID" -PversionCode="${{ github.run_number }}" -PndkVersion="$NDK_VERSION"
+            -PappId="$BUNDLE_ID" -PversionCode="${{ github.run_number }}" -PndkVersion="$NDK_VERSION" \
+            -PsentryDsn="$SENTRY_DSN" -PposthogKey="$POSTHOG_KEY" -PposthogHost="$POSTHOG_HOST"
       - name: Collect
         run: |
           mkdir -p out
@@ -114,6 +125,16 @@ jobs:
         with:
           name: SpectroCraftMobile-android
           path: out/
+      - name: Sentry debug symbols (Android)
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SC_SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SC_SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SC_SENTRY_PROJECT }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_DSN" ]; then echo "No Sentry token or DSN: skipped."; exit 0; fi
+          curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION=3.8.2 sh
+          # The unstripped libjuce_jni.so (the APK ships the stripped one).
+          sentry-cli debug-files upload --include-sources mobile/android/app/build/intermediates/merged_native_libs
       - name: Google Play (internal testing)
         if: env.UPLOAD == 'true' && env.SIGNED == '1'
         env:
@@ -141,6 +162,7 @@ jobs:
         run: |
           cmake -S mobile -B build-ios -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
+            -DSC_SENTRY_DSN="$SENTRY_DSN" -DSC_POSTHOG_KEY="$POSTHOG_KEY" -DSC_POSTHOG_HOST="$POSTHOG_HOST" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DCMAKE_XCODE_GENERATE_SCHEME=ON \
             -DSC_MOBILE_BUNDLE_ID="$BUNDLE_ID" \
@@ -188,3 +210,15 @@ jobs:
           EOF
           xcodebuild -exportArchive -archivePath build-ios/SpectroCraftMobile.xcarchive \
             -exportOptionsPlist build-ios/ExportOptions.plist -exportPath build-ios/export "${auth[@]}"
+      - name: Sentry debug symbols (iOS)
+        if: env.UPLOAD == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SC_SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SC_SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SC_SENTRY_PROJECT }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_DSN" ] || [ ! -d build-ios/SpectroCraftMobile.xcarchive/dSYMs ]; then
+            echo "No Sentry token, DSN or archive: skipped."; exit 0
+          fi
+          curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION=3.8.2 sh
+          sentry-cli debug-files upload --include-sources build-ios/SpectroCraftMobile.xcarchive/dSYMs

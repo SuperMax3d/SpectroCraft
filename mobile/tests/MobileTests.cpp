@@ -15,7 +15,10 @@
 #include "LiveAudio.h"
 #include "MobileDocument.h"
 #include "Recorder.h"
+#include "Telemetry.h"
 #include <cmath>
+#include <cstring>
+#include <thread>
 
 namespace
 {
@@ -504,12 +507,114 @@ public:
     }
 };
 
+
+class TelemetryTests : public juce::UnitTest
+{
+public:
+    TelemetryTests() : juce::UnitTest ("telemetry", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        beginTest ("PostHog batch: api key, event, anonymous id, no person profile");
+        {
+            auto* props = new juce::DynamicObject();
+            props->setProperty ("mode", "loop");
+            props->setProperty ("loop_s", 30);
+            const auto ev = scm::telemetry::makeEvent ("recording_started", juce::var (props), "id-123",
+                                                       juce::Time (2026, 10, 24, 18, 30, 0, 0, false));
+            const auto body = juce::JSON::parse (scm::telemetry::buildBatchJson ("phc_test", { ev }));
+            expectEquals (body.getProperty ("api_key", {}).toString(), juce::String ("phc_test"));
+            const auto* batch = body.getProperty ("batch", {}).getArray();
+            expect (batch != nullptr && batch->size() == 1);
+            if (batch != nullptr && batch->size() == 1)
+            {
+                const auto e = (*batch)[0];
+                expectEquals (e.getProperty ("event", {}).toString(), juce::String ("recording_started"));
+                expectEquals (juce::Time::fromISO8601 (e.getProperty ("timestamp", {}).toString()).toMilliseconds(),
+                              juce::Time (2026, 10, 24, 18, 30, 0, 0, false).toMilliseconds());
+                const auto p = e.getProperty ("properties", {});
+                expectEquals (p.getProperty ("distinct_id", {}).toString(), juce::String ("id-123"));
+                expect (! (bool) p.getProperty ("$process_person_profile", true));
+                expectEquals (p.getProperty ("mode", {}).toString(), juce::String ("loop"));
+                expectEquals ((int) p.getProperty ("loop_s", 0), 30);
+                expect (p.getProperty ("$os", {}).toString().isNotEmpty());
+                expect (p.getProperty ("$app_version", {}).toString().isNotEmpty());
+            }
+        }
+
+        beginTest ("the batch reaches an HTTP server as a JSON POST to /batch/");
+        {
+            // A one-shot local server standing in for PostHog.
+            juce::StreamingSocket server;
+            int port = 0;
+            for (int p = 47311; p < 47330 && port == 0; ++p)
+                if (server.createListener (p, "127.0.0.1")) port = p;
+            expect (port != 0, "local listener");
+            juce::String request;
+            std::thread serve ([&server, &request]
+            {
+                std::unique_ptr<juce::StreamingSocket> c (server.waitForNextConnection());
+                if (c == nullptr) return;
+                char buf[8192];
+                for (int tries = 0; tries < 50; ++tries)
+                {
+                    if (c->waitUntilReady (true, 200) <= 0) continue;
+                    const int n = c->read (buf, (int) sizeof (buf), false);
+                    if (n <= 0) break;
+                    request += juce::String::fromUTF8 (buf, n);
+                    const int headerEnd = request.indexOf ("\r\n\r\n");
+                    if (headerEnd > 0)
+                    {
+                        const int len = request.fromFirstOccurrenceOf ("Content-Length:", false, true)
+                                               .upToFirstOccurrenceOf ("\r\n", false, false).trim().getIntValue();
+                        if (request.getNumBytesAsUTF8() >= (size_t) (headerEnd + 4 + len)) break;
+                    }
+                }
+                const char* reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"status\":1}";
+                c->write (reply, (int) std::strlen (reply));
+            });
+            const auto ev = scm::telemetry::makeEvent ("app_opened", {}, "id-9", juce::Time::getCurrentTime());
+            const bool ok = port != 0 && scm::telemetry::postBatch ("http://127.0.0.1:" + juce::String (port), "phc_local", { ev });
+            serve.join();
+            server.close();
+            expect (ok, "2xx answer");
+            expect (request.startsWith ("POST /batch/"), request.substring (0, 40));
+            expect (request.containsIgnoreCase ("Content-Type: application/json"));
+            const auto body = juce::JSON::parse (request.fromFirstOccurrenceOf ("\r\n\r\n", false, false));
+            expectEquals (body.getProperty ("api_key", {}).toString(), juce::String ("phc_local"));
+        }
+
+        beginTest ("a build without keys sends nothing and cannot be switched on");
+        {
+            expect (! scm::telemetry::available());
+            juce::PropertiesFile::Options o;
+            o.applicationName = "scm-telemetry-test";
+            o.filenameSuffix = ".settings";
+            o.folderName = "scm-telemetry-test";
+            o.osxLibrarySubFolder = "Application Support";
+            juce::PropertiesFile props (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                            .getChildFile ("scm-telemetry-test.settings"), o);
+            scm::telemetry::initialise (props);
+            expect (! scm::telemetry::enabled());
+            scm::telemetry::setEnabled (true);
+            expect (! scm::telemetry::enabled());
+            expect (! scm::telemetry::takeFirstLaunchNotice());
+            scm::telemetry::capture ("x", { { "a", 1 } });   // no sender: a no-op
+            scm::telemetry::reportError ("y");
+            expect (props.getValue ("telemetryId").length() >= 32, "an install id is still kept");
+            scm::telemetry::shutdown();
+            props.getFile().deleteFile();
+        }
+    }
+};
+
 static GeneratorTests generatorTests;
 static CalibrationTests calibrationTests;
 static StoredPlotsTests storedPlotsTests;
 static LoopTests loopTests;
 static FileRoundTripTests fileRoundTripTests;
 static RecordingPathTests recordingPathTests;
+static TelemetryTests telemetryTests;
 
 int main()
 {

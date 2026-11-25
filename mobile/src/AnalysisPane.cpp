@@ -1,6 +1,7 @@
 #include "AnalysisPane.h"
 #include "MobileStyle.h"
 #include "Measures.h"
+#include "Telemetry.h"
 #include <cmath>
 
 namespace scm
@@ -169,13 +170,23 @@ AnalysisPane::AnalysisPane (MobileDocument& d, TimeViewport& v) : document (d), 
     modeBox.addItem ("FFT Log", 2);
     modeBox.addItem ("1/3 Octave", 3);
     modeBox.setSelectedId (2, juce::dontSendNotification);
-    modeBox.onChange = [this] { request(); };
+    modeBox.onChange = [this]
+    {
+        telemetry::capture ("analysis_settings", { { "mode", analysisModeName ((AnalysisMode) (modeBox.getSelectedId() - 1)) },
+                                                   { "fft_size", 1024 << (fftBox.getSelectedId() - 1) } });
+        request();
+    };
     addAndMakeVisible (modeBox);
 
     for (int n = 1024, id = 1; n <= 65536; n *= 2, ++id)
         fftBox.addItem ("FFT " + juce::String (n), id);
     fftBox.setSelectedId (4, juce::dontSendNotification);   // 8192
-    fftBox.onChange = [this] { request(); };
+    fftBox.onChange = [this]
+    {
+        telemetry::capture ("analysis_settings", { { "mode", analysisModeName ((AnalysisMode) (modeBox.getSelectedId() - 1)) },
+                                                   { "fft_size", 1024 << (fftBox.getSelectedId() - 1) } });
+        request();
+    };
     addAndMakeVisible (fftBox);
 
     storeButton.onClick = [this] { storeCurrent(); };
@@ -300,6 +311,8 @@ void AnalysisPane::storeCurrent()
     p.freqs = current.f;
     p.db = current.db;
     plots.add (std::move (p));
+    telemetry::capture ("plot_stored", { { "mode", analysisModeName (current.mode) },
+                                         { "count", (int) plots.plots().size() } });
     document.plotsChanged();
     rebuildChips();
     repaint();

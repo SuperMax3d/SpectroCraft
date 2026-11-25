@@ -2,6 +2,7 @@
 #include "LiveAudio.h"
 #include "MobileDocument.h"
 #include "MobileStyle.h"
+#include "Telemetry.h"
 
 namespace scm
 {
@@ -32,6 +33,7 @@ CalibrationPane::CalibrationPane (AppContext& c) : ctx (c)
     clearButton.onClick = [this]
     {
         ctx.calibrations.clear (ctx.inputKey());
+        telemetry::capture ("calibration_cleared", {});
         refresh();
     };
     applyFileButton.onClick = [this]
@@ -101,6 +103,8 @@ void CalibrationPane::finishCalibrator()
         return;
     }
     const auto r = cal::analyseCalibrator (shot.data(), (int) shot.size(), ctx.audio.sampleRate(), hz, refDb);
+    telemetry::capture ("calibration", { { "method", "calibrator" }, { "ok", r.ok }, { "result", r.code },
+                                         { "ref_db", refDb }, { "ref_hz", hz } });
     juce::String details = "Band level " + juce::String (20.0 * std::log10 (std::max (1e-12, r.bandRms)), 2)
                          + " dBFS at " + juce::String (r.peakHz, 1) + " Hz, steadiness "
                          + juce::String (r.spreadDb, 2) + " dB, tone "
@@ -135,6 +139,7 @@ void CalibrationPane::applyTyped()
     c.method = "typed";
     c.when = juce::Time::getCurrentTime();
     store (c);
+    telemetry::capture ("calibration", { { "method", "typed" }, { "ok", true } });
     resultLabel.setText ("Calibration set.", juce::dontSendNotification);
 }
 

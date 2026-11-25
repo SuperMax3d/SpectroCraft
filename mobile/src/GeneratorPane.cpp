@@ -1,6 +1,7 @@
 #include "GeneratorPane.h"
 #include "LiveAudio.h"
 #include "MobileStyle.h"
+#include "Telemetry.h"
 
 namespace scm
 {
@@ -14,6 +15,11 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
         ctx.audio.generator().setEnabled (onButton.getToggleState());
         onButton.setButtonText (onButton.getToggleState() ? "Generator on" : "Generator off");
         push();
+        static const char* kinds[] = { "tone", "sweep", "noise" };
+        static const char* noises[] = { "white", "pink", "brown", "custom" };
+        telemetry::capture ("generator_toggled", { { "on", onButton.getToggleState() },
+                                                   { "kind", kinds[(int) settings.kind] },
+                                                   { "noise", noises[(int) settings.noise] } });
     };
     content.addAndMakeVisible (onButton);
 

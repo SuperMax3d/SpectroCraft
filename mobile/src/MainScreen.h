@@ -48,6 +48,8 @@ public:
     void audioReady (const juce::String& error);
     /** App going to the background (iOS / Android). */
     void suspended();
+    /** First launch: says that anonymous reports are sent and how to turn them off. */
+    void showTelemetryNotice();
     /** Opens a panel (0 Files, 1 Analyse, 2 Generate, 3 Calibrate, 4 Input, 5 Edit). */
     void showTab (int t) { panelOpen = false; currentTab = -1; selectTab (t); }
 

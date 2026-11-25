@@ -33,6 +33,7 @@ struct CalibratorReading
 {
     bool ok = false;
     juce::String problem;      // why it is not usable ("" when ok)
+    juce::String code;         // short reason: ok, too_short, clipping, no_tone, wrong_frequency, noisy, unsteady
     double bandRms = 0.0;      // RMS in the 1/3-octave band around toneHz
     double totalRms = 0.0;     // RMS of the whole capture
     double bandShare = 0.0;    // band power / total power (0..1)

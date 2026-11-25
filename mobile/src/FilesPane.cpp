@@ -2,6 +2,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "Telemetry.h"
 #include "TimeFormat.h"
 #include "VideoCapture.h"
 
@@ -20,6 +21,10 @@ FilesPane::FilesPane (AppContext& c) : ctx (c)
     list.setRowHeight (52);
     list.setColour (juce::ListBox::backgroundColourId, style::panelBackground);
     addAndMakeVisible (list);
+    privacy.setToggleState (telemetry::enabled(), juce::dontSendNotification);
+    privacy.onClick = [this] { telemetry::setEnabled (privacy.getToggleState()); };
+    privacy.setVisible (telemetry::available());
+    addChildComponent (privacy);
     ctx.document.addChangeListener (this);
     refresh();
 }
@@ -77,7 +82,7 @@ void FilesPane::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
 void FilesPane::listBoxItemClicked (int row, const juce::MouseEvent&)
 {
     if (juce::isPositiveAndBelow (row, files.size()) && files[row] != ctx.document.file())
-        openFile (files[row]);
+        openFile (files[row], "list");
 }
 
 void FilesPane::confirmDiscard (std::function<void()> then)
@@ -99,13 +104,23 @@ void FilesPane::confirmDiscard (std::function<void()> then)
     });
 }
 
-void FilesPane::openFile (const juce::File& f)
+void FilesPane::openFile (const juce::File& f, const char* source)
 {
     if (ctx.recorder.isRecording()) return;
-    confirmDiscard ([this, f]
+    const juce::String src (source);
+    confirmDiscard ([this, f, src]
     {
         juce::String err;
-        if (! ctx.document.open (f, err)) showMessage ("Open", err);
+        const bool ok = ctx.document.open (f, err);
+        telemetry::capture ("file_opened", { { "source", src }, { "ok", ok },
+                                             { "duration_s", juce::roundToInt (ctx.document.duration()) },
+                                             { "channels", ctx.document.numChannels() },
+                                             { "sample_rate", (int) ctx.document.sampleRate() } });
+        if (! ok)
+        {
+            telemetry::reportError ("file: a WAV could not be opened");
+            showMessage ("Open", err);
+        }
         refresh();
     });
 }
@@ -138,14 +153,20 @@ void FilesPane::openFromElsewhere()
             out.flush();
             local = target;
         }
-        openFile (local);
+        openFile (local, "picker");
     });
 }
 
 void FilesPane::saveCurrent()
 {
     juce::String err;
-    if (! ctx.document.save (err)) showMessage ("Save", err);
+    const bool ok = ctx.document.save (err);
+    telemetry::capture ("file_saved", { { "ok", ok } });
+    if (! ok)
+    {
+        telemetry::reportError ("file: save failed");
+        showMessage ("Save", err);
+    }
     refresh();
 }
 
@@ -156,6 +177,7 @@ void FilesPane::share()
     juce::Array<juce::URL> urls { juce::URL (f) };
     const auto movie = VideoCapture::movieFileFor (f);
     if (movie.existsAsFile()) urls.add (juce::URL (movie));
+    telemetry::capture ("file_shared", { { "with_video", movie.existsAsFile() } });
     shareBox = juce::ContentSharer::shareFilesScoped (urls, [] (bool ok, const juce::String& err)
     {
         if (! ok && err.isNotEmpty()) showMessage ("Share", err);
@@ -173,6 +195,7 @@ void FilesPane::deleteSelected()
     {
         if (r != 1) return;
         if (f == ctx.document.file()) ctx.document.close();
+        telemetry::capture ("file_deleted", {});
         VideoCapture::movieFileFor (f).deleteFile();
         f.deleteFile();
         refresh();
@@ -196,6 +219,8 @@ void FilesPane::resized()
         row.removeFromLeft (4);
     }
     r.removeFromTop (style::kGap);
+    if (privacy.isVisible())
+        privacy.setBounds (r.removeFromBottom (style::kTouch));
     list.setBounds (r);
 }
 } // namespace scm

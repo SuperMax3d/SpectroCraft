@@ -7,6 +7,9 @@
 //   versionCode   integer build number (CI: the run number)
 //   ndkVersion    an installed NDK (CI passes the runner's)
 //   abis          comma-separated ABIs (default arm64-v8a; add x86_64 for emulators)
+//   sentryDsn     Sentry DSN (crash reports; empty = none)
+//   posthogKey    PostHog project API key (usage statistics; empty = none)
+//   posthogHost   PostHog ingestion host (default https://us.i.posthog.com)
 // Release signing reads SC_KEYSTORE_FILE, SC_KEYSTORE_PASSWORD, SC_KEY_ALIAS and
 // SC_KEY_PASSWORD from the environment; without them the release APK is signed
 // with the debug key (installable by hand, not uploadable to Google Play).
@@ -37,7 +40,10 @@ android {
             cmake {
                 arguments "-DANDROID_STL=c++_shared",
                           "-DANDROID_PLATFORM=android-26",
-                          "-DSC_MOBILE_APP=ON"
+                          "-DSC_MOBILE_APP=ON",
+                          "-DSC_SENTRY_DSN=" + prop("sentryDsn", ""),
+                          "-DSC_POSTHOG_KEY=" + prop("posthogKey", ""),
+                          "-DSC_POSTHOG_HOST=" + prop("posthogHost", "https://us.i.posthog.com")
                 targets "SpectroCraftMobile"
             }
         }
@@ -76,7 +82,8 @@ android {
         release {
             minifyEnabled false
             def ks = System.getenv("SC_KEYSTORE_FILE")
-            signingConfig (ks != null && file(ks).exists()) ? signingConfigs.release : signingConfigs.debug
+            def uploadKey = ks != null && file(ks).exists()
+            signingConfig = uploadKey ? signingConfigs.release : signingConfigs.debug
             externalNativeBuild {
                 cmake {
                     arguments "-DCMAKE_BUILD_TYPE=Release"
@@ -102,4 +109,10 @@ android {
             useLegacyPackaging false
         }
     }
+}
+
+dependencies {
+    // Crash reports (Java and native: the NDK part catches crashes in libjuce_jni.so).
+    // Started from C++ only when the build has a DSN and the user allows it.
+    implementation "io.sentry:sentry-android:8.65.1"
 }

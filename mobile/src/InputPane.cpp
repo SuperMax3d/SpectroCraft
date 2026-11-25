@@ -2,6 +2,7 @@
 #include "AudioRoute.h"
 #include "LiveAudio.h"
 #include "MobileStyle.h"
+#include "Telemetry.h"
 
 namespace scm
 {
@@ -96,6 +97,13 @@ void InputPane::refresh()
 void InputPane::choose (int index)
 {
     if (! juce::isPositiveAndBelow (index, ids.size())) return;
+    // Statistics get the kind of input only, never the device's name.
+    const auto label = choices[index]->getButtonText().toLowerCase();
+    const juce::String kind = label.contains ("bluetooth") || label.contains ("sco") ? "bluetooth"
+                            : label.contains ("usb") ? "usb"
+                            : label.contains ("built-in") || label.contains ("builtin") || label.contains ("microphone") ? "built-in"
+                            : label.contains ("wired") || label.contains ("headset") ? "wired" : "other";
+    telemetry::capture ("input_changed", { { "kind", kind } });
     if (route::platformHasRoutes())
     {
         if (! route::selectInput (ids[index]))

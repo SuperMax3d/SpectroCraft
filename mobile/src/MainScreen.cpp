@@ -3,6 +3,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "Telemetry.h"
 #include "TimeFormat.h"
 #include "TimeViewport.h"
 #include "VideoCapture.h"
@@ -123,6 +124,7 @@ MainScreen::MainScreen (AppContext& c)
     };
     ctx.recorder.onAutoStop = [this] (const juce::String& msg)
     {
+        telemetry::capture ("recording_memory_limit", { { "minutes", juce::roundToInt (ctx.recorder.maxSeconds() / 60.0) } });
         stopRecording();
         showMessage ("Recording", msg);
     };
@@ -224,11 +226,19 @@ void MainScreen::startRecording()
     const auto cal = ctx.currentInputCalibration();
     if (! ctx.recorder.start (cal.toScale(), err))
     {
+        telemetry::reportError ("recording: could not start");
         showMessage ("Recording", err);
         return;
     }
-    if (videoButton.getToggleState() && ctx.video.isOpen())
+    const bool withVideo = videoButton.getToggleState() && ctx.video.isOpen();
+    if (withVideo)
         ctx.video.start (VideoCapture::movieFileFor (ctx.recorder.targetFile()));
+    telemetry::capture ("recording_started", { { "mode", mode == 1 ? "unlimited" : "loop" },
+                                               { "loop_s", mode == 1 ? 0 : mode },
+                                               { "channels", ctx.audio.numInputs() },
+                                               { "sample_rate", (int) ctx.audio.sampleRate() },
+                                               { "calibrated", cal.valid() },
+                                               { "video", withVideo } });
     ctx.view.setMinimumVisible (mode == 1 ? 10.0 : (double) mode);
     ctx.view.setRange (0.0, mode == 1 ? 10.0 : (double) mode);
     analysisPane->setLive (true);
@@ -255,7 +265,15 @@ void MainScreen::stopRecording()
     ctx.view.setMinimumVisible (0.0);
     ctx.view.setDuration (ctx.document.duration(), false);
     ctx.view.showAll();
-    if (saved == juce::File() && err.isNotEmpty()) showMessage ("Recording", err);
+    telemetry::capture ("recording_stopped", { { "duration_s", juce::roundToInt (ctx.document.duration()) },
+                                               { "mode", ctx.recorder.mode() == Recorder::Mode::Loop ? "loop" : "unlimited" },
+                                               { "saved", saved != juce::File() },
+                                               { "video", movie != juce::File() } });
+    if (saved == juce::File() && err.isNotEmpty())
+    {
+        telemetry::reportError ("recording: the take could not be saved");
+        showMessage ("Recording", err);
+    }
     if (filesPane) filesPane->refresh();
     updateTransport();
 }
@@ -297,8 +315,10 @@ void MainScreen::toggleVideo()
     {
         ctx.video.open ([this] (juce::String err)
         {
+            telemetry::capture ("video_enabled", { { "ok", err.isEmpty() } });
             if (err.isNotEmpty())
             {
+                telemetry::reportError ("video: the camera did not open");
                 videoButton.setToggleState (false, juce::dontSendNotification);
                 showMessage ("Video", err);
                 return;
@@ -386,8 +406,24 @@ void MainScreen::selectTab (int t)
     resized();
 }
 
+void MainScreen::showTelemetryNotice()
+{
+    auto options = juce::MessageBoxOptions::makeOptionsOkCancel (juce::MessageBoxIconType::NoIcon,
+        "Crash reports and statistics",
+        "SpectroCraft sends anonymous crash reports and usage statistics to help fix and improve the app: "
+        "a random install id, the app and system versions, the phone model and which features are used. "
+        "Never your audio, file names or location.\n\nYou can turn this off any time in Files > Privacy.",
+        "OK", "Turn off");
+    juce::AlertWindow::showAsync (options, [] (int r)
+    {
+        if (r == 0) telemetry::setEnabled (false);
+    });
+}
+
 void MainScreen::setLayout (Layout l)
 {
+    if (l != layout && getWidth() > 0)
+        telemetry::capture ("layout_changed", { { "view", l == Layout::Both ? "both" : l == Layout::Waveform ? "waveform" : "spectrogram" } });
     layout = l;
     ctx.props.setValue ("layout", (int) l);
     waveform.setVisible (l != Layout::Spectrogram);

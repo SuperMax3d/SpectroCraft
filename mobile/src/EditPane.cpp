@@ -2,6 +2,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "Telemetry.h"
 #include "TimeFormat.h"
 
 namespace scm
@@ -17,13 +18,15 @@ EditPane::EditPane (AppContext& c) : ctx (c)
     {
         juce::String err;
         if (! ctx.document.deleteSelection (err)) showMessage ("Delete", err);
+        else telemetry::capture ("edit", { { "op", "delete" } });
     };
-    undoButton.onClick = [this] { ctx.document.undo(); };
-    redoButton.onClick = [this] { ctx.document.redo(); };
+    undoButton.onClick = [this] { if (ctx.document.undo()) telemetry::capture ("edit", { { "op", "undo" } }); };
+    redoButton.onClick = [this] { if (ctx.document.redo()) telemetry::capture ("edit", { { "op", "redo" } }); };
     gainButton.onClick = [this]
     {
         juce::String err;
         if (! ctx.document.gainSelection ((float) gain.getValue(), err)) showMessage ("Gain", err);
+        else telemetry::capture ("edit", { { "op", "gain" } });
     };
     gain.setSliderStyle (juce::Slider::LinearHorizontal);
     gain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 30);

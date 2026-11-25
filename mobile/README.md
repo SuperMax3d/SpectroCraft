@@ -21,6 +21,34 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 | Editing | *Edit* tab: delete the selection, change its gain (or the whole file's), undo / redo; display options (log / linear frequency, dB range, channel). |
 | Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. |
 
+## Crash reports and statistics
+
+When the build has keys (see *CI and store builds*), the app sends:
+
+- **crash reports** to Sentry: crashes in Java / Objective-C and in the C++ code (Android: `sentry-android`
+  with its NDK part; iOS: the `SentryObjC` framework), plus a few non-fatal errors with generic text
+  ("recording: the take could not be saved");
+- **usage statistics** to PostHog: events such as `recording_started` (mode, loop length, channels,
+  sample rate, calibrated, video), `recording_stopped` (duration), `file_opened`, `calibration` (method,
+  result code), `analysis_settings`, `plot_stored`, `generator_toggled`, `input_changed` (built-in /
+  USB / Bluetooth), `edit`, `video_enabled`. Each carries a random install id, the app version, the OS
+  and its version, and the phone model. PostHog keeps no person profile (`$process_person_profile`
+  false).
+
+Never sent: audio, file names or paths, device names, location, account data.
+
+Both are on by default when compiled in. A notice at first launch says so, and *Files > Send anonymous
+crash reports and usage statistics* turns them off (and back on). A build without keys (local builds,
+pull requests from forks) contains neither and shows no toggle.
+
+What to declare to the stores:
+
+- **Google Play, Data safety**: *App info and performance > Crash logs and Diagnostics*, and *App
+  activity > App interactions*: collected, not shared, processed ephemerally: no, optional: yes
+  (the user can turn it off), not linked to an identity.
+- **App Store, App Privacy**: *Diagnostics > Crash Data*, *Other Diagnostic Data*; *Usage Data >
+  Product Interaction*: not linked to the user, not used for tracking.
+
 ## Files and the desktop
 
 - The WAV is the desktop's format: float32, with the `SCMD` metadata chunk written by the desktop's
@@ -51,7 +79,9 @@ gradle -p mobile/android assembleRelease -PndkVersion=<installed NDK>
 ```
 
 Options: `-DSC_MOBILE_BUNDLE_ID=` (iOS bundle id / Android application id, default
-`com.spectrocraft.mobile`), `-DSC_MOBILE_BUILD_NUMBER=`, `-DSC_MOBILE_APP=OFF` (tests only).
+`com.spectrocraft.mobile`), `-DSC_MOBILE_BUILD_NUMBER=`, `-DSC_MOBILE_APP=OFF` (tests only),
+`-DSC_SENTRY_DSN=`, `-DSC_POSTHOG_KEY=`, `-DSC_POSTHOG_HOST=` (Gradle: `-PsentryDsn=`, `-PposthogKey=`,
+`-PposthogHost=`).
 
 Desktop development hooks (macOS / Linux builds only): `SC_MOBILE_RECORDINGS=<folder>`,
 `SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_SIZE=<w>x<h>`,
@@ -74,7 +104,17 @@ Store builds need these repository secrets (Settings > Secrets and variables > A
 | `SC_APPLE_TEAM_ID` | the Apple developer team |
 | `SC_APPSTORE_KEY_ID`, `SC_APPSTORE_ISSUER_ID`, `SC_APPSTORE_KEY_P8` | an App Store Connect API key (role App Manager or Admin) and its `.p8` contents; Xcode signs automatically and uploads to TestFlight. The bundle id must be registered and the app created in App Store Connect. |
 
-The repository variable `SC_MOBILE_BUNDLE_ID` sets the bundle / application id.
+Repository variables (Settings > Secrets and variables > Actions > Variables):
+
+| Variable | |
+|---|---|
+| `SC_MOBILE_BUNDLE_ID` | the bundle / application id |
+| `SC_SENTRY_DSN` | the Sentry project's DSN: crash reports are compiled in |
+| `SC_POSTHOG_KEY`, `SC_POSTHOG_HOST` | the PostHog project API key (`phc_...`) and host (default `https://us.i.posthog.com`): statistics are compiled in |
+| `SC_SENTRY_ORG`, `SC_SENTRY_PROJECT` | with the secret `SC_SENTRY_AUTH_TOKEN` (a Sentry auth token allowed to upload debug files): the debug symbols are uploaded so native crashes show file and line |
+
+The DSN and the PostHog key end up inside the app anyway (they are not secrets), but keeping them out of
+the code means a fork or a pull request never reports to them.
 
 ## Limits
 

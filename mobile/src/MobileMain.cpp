@@ -7,6 +7,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "Telemetry.h"
 #include "TimeViewport.h"
 #include "VideoCapture.h"
 
@@ -73,6 +74,8 @@ public:
         o.folderName = "SpectroCraftMobile";
         o.osxLibrarySubFolder = "Application Support";
         props = std::make_unique<juce::PropertiesFile> (o);
+        telemetry::initialise (*props);
+        telemetry::capture ("app_opened", {});
 
         audio = std::make_unique<LiveAudio>();
         document = std::make_unique<MobileDocument>();
@@ -85,6 +88,8 @@ public:
         mainWindow = std::make_unique<MainWindow> (getApplicationName(), screen);
 
         audio->onDeviceChanged = [screen] { screen->audioReady ({}); };
+        if (telemetry::takeFirstLaunchNotice())
+            screen->showTelemetryNotice();
        #if ! (JUCE_IOS || JUCE_ANDROID)
         // Development hooks (desktop builds only):
         //   SC_MOBILE_NO_AUDIO=1          do not open the microphone
@@ -142,6 +147,7 @@ public:
         audio.reset();      // the callback stops before the document goes
         document.reset();
         view.reset();
+        telemetry::shutdown();
         if (props) props->saveIfNeeded();
         props.reset();
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
@@ -149,6 +155,7 @@ public:
 
     void suspended() override
     {
+        telemetry::flush();
         if (props) props->saveIfNeeded();
         if (mainWindow != nullptr)
             if (auto* s = dynamic_cast<MainScreen*> (mainWindow->getContentComponent())) s->suspended();

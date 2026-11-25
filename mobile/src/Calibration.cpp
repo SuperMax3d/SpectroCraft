@@ -71,6 +71,7 @@ CalibratorReading analyseCalibrator (const float* x, int n, double rate, double 
     if (x == nullptr || rate <= 0.0 || n < (int) rate)
     {
         r.problem = "Capture too short (at least 1 second is needed).";
+        r.code = "too_short";
         return r;
     }
     const int order = rate > 64000.0 ? 14 : 13;
@@ -121,21 +122,37 @@ CalibratorReading analyseCalibrator (const float* x, int n, double rate, double 
     r.spreadDb = mx >= mn ? mx - mn : 0.0;
 
     if (r.peak >= 0.999)
+    {
         r.problem = "The signal clips: lower the input gain or move the calibrator.";
+        r.code = "clipping";
+    }
     else if (r.bandRms < 1e-4)
+    {
         r.problem = "No calibrator tone found (the level is below -80 dBFS).";
+        r.code = "no_tone";
+    }
     else if (std::abs (r.peakHz - toneHz) > 0.03 * toneHz)
+    {
         r.problem = "The strongest tone is at " + juce::String (r.peakHz, 1) + " Hz, not "
                   + juce::String (toneHz, 0) + " Hz.";
+        r.code = "wrong_frequency";
+    }
     else if (r.bandShare < 0.9)
+    {
         r.problem = "Too much background noise (the tone carries "
                   + juce::String (100.0 * r.bandShare, 0) + " % of the power).";
+        r.code = "noisy";
+    }
     else if (r.spreadDb > 0.5)
+    {
         r.problem = "The level is not steady (" + juce::String (r.spreadDb, 2)
                   + " dB spread): hold the calibrator firmly on the microphone.";
+        r.code = "unsteady";
+    }
     else
     {
         r.ok = true;
+        r.code = "ok";
         r.fullScalePa = fullScaleFromCalibrator (r.bandRms, refDbSpl);
     }
     return r;

@@ -32,6 +32,13 @@ set (SC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set (SC_MOBILE_BUNDLE_ID "com.spectrocraft.mobile" CACHE STRING "iOS bundle id / Android application id")
 set (SC_MOBILE_BUILD_NUMBER "1" CACHE STRING "Build number (CI run number)")
 option (SC_MOBILE_APP "Build the app (OFF: only the unit tests, on desktop platforms)" ON)
+# Crash reports and usage statistics (mobile/src/Telemetry.h): compiled in only
+# when keys are given (CI passes the repository's variables). Empty = nothing sent.
+set (SC_SENTRY_DSN "" CACHE STRING "Sentry DSN for crash reports (empty = none)")
+set (SC_POSTHOG_KEY "" CACHE STRING "PostHog project API key for usage statistics (empty = none)")
+set (SC_POSTHOG_HOST "https://us.i.posthog.com" CACHE STRING "PostHog ingestion host")
+set (SC_SENTRY_COCOA_VERSION "9.35.0")
+set (SC_SENTRY_COCOA_SHA256 "199980b6a7aed5fcba387c3fc47872710d24829af04fb5c90a291084f197e7ba")
 
 add_subdirectory (${SC_ROOT}/extern/JUCE ${CMAKE_BINARY_DIR}/JUCE)
 add_subdirectory (${SC_ROOT}/extern/soxr ${CMAKE_BINARY_DIR}/soxr)
@@ -149,13 +156,16 @@ set (SC_MOBILE_SOURCES
     src/EditPane.cpp
     src/FilesPane.cpp
     src/VideoCapture.cpp
+    src/Telemetry.cpp
     src/MainScreen.cpp)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    set_source_files_properties (src/AudioRoute_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_ios.mm)
+    set_source_files_properties (src/AudioRoute_ios.mm src/Telemetry_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_ios.mm src/Telemetry_ios.mm)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/Telemetry_android.cpp)
 else()
-    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp)
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/Telemetry_none.cpp)
 endif()
 
 target_sources (SpectroCraftMobile PRIVATE ${SC_MOBILE_SOURCES} ${SC_ENGINE_SOURCES})
@@ -196,7 +206,42 @@ target_compile_definitions (SpectroCraftMobile PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraftMobile,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:SpectroCraftMobile,JUCE_VERSION>"
     SC_MOBILE=1
-    SC_ENABLE_CONTROL=0)
+    SC_ENABLE_CONTROL=0
+    SC_SENTRY_DSN="${SC_SENTRY_DSN}"
+    SC_POSTHOG_KEY="${SC_POSTHOG_KEY}"
+    SC_POSTHOG_HOST="${SC_POSTHOG_HOST}")
+
+# Release builds keep debug info so crash reports can be symbolicated (the
+# Android packaging strips the shipped library; CI uploads the symbols).
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_compile_options (SpectroCraftMobile PRIVATE $<$<CONFIG:Release>:-g>)
+    set_target_properties (SpectroCraftMobile PROPERTIES
+        XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT "dwarf-with-dsym")
+endif()
+
+# iOS crash reports: Sentry's SentryObjC framework, fetched when a DSN is given.
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS" AND SC_SENTRY_DSN)
+    if (CMAKE_VERSION VERSION_LESS 3.28)
+        message (FATAL_ERROR "Linking the Sentry xcframework needs CMake 3.28 or later")
+    endif()
+    set (_sentry_dir "${CMAKE_BINARY_DIR}/sentry-cocoa-${SC_SENTRY_COCOA_VERSION}")
+    set (_sentry_xcf "${_sentry_dir}/SentryObjC-Dynamic.xcframework")
+    if (NOT EXISTS "${_sentry_xcf}")
+        set (_zip "${CMAKE_BINARY_DIR}/SentryObjC-Dynamic-${SC_SENTRY_COCOA_VERSION}.zip")
+        file (DOWNLOAD
+            "https://github.com/getsentry/sentry-cocoa/releases/download/${SC_SENTRY_COCOA_VERSION}/SentryObjC-Dynamic.xcframework.zip"
+            "${_zip}" EXPECTED_HASH SHA256=${SC_SENTRY_COCOA_SHA256} SHOW_PROGRESS)
+        file (ARCHIVE_EXTRACT INPUT "${_zip}" DESTINATION "${_sentry_dir}")
+    endif()
+    target_link_libraries (SpectroCraftMobile PRIVATE "${_sentry_xcf}")
+    target_include_directories (SpectroCraftMobile PRIVATE "${_sentry_xcf}/ios-arm64/SentryObjC.framework/Headers")
+    target_compile_definitions (SpectroCraftMobile PRIVATE SC_HAVE_SENTRY_COCOA=1)
+    set_target_properties (SpectroCraftMobile PROPERTIES
+        XCODE_EMBED_FRAMEWORKS "${_sentry_xcf}"
+        XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
+        XCODE_EMBED_FRAMEWORKS_REMOVE_HEADERS_ON_COPY ON
+        XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "$(inherited) @executable_path/Frameworks")
+endif()
 
 if (APPLE)
     target_link_libraries (SpectroCraftMobile PRIVATE
@@ -218,6 +263,8 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         src/LiveAudio.cpp
         src/Recorder.cpp
         src/MobileDocument.cpp
+        src/Telemetry.cpp
+        src/Telemetry_none.cpp
         src/LoopBuffer.h
         ${SC_ENGINE_SOURCES})
     juce_generate_juce_header (SpectroCraftMobileTests)
@@ -230,7 +277,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
     target_compile_definitions (SpectroCraftMobileTests PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 SC_MOBILE=1 SC_ENABLE_CONTROL=0
-        JUCE_MODAL_LOOPS_PERMITTED=0)
+        JUCE_MODAL_LOOPS_PERMITTED=0 JUCE_APPLICATION_VERSION_STRING="0.1.0")
     if (APPLE)
         target_link_libraries (SpectroCraftMobileTests PRIVATE
             "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
