@@ -64,10 +64,12 @@ set (SC_ENGINE_SOURCES
     ${SC_ROOT}/src/FFTAvx.cpp
     ${SC_ROOT}/src/FileDoc.cpp
     ${SC_ROOT}/src/FileMeta.cpp
+    ${SC_ROOT}/src/FileWatch.cpp
     ${SC_ROOT}/src/FilterEQ.cpp
     ${SC_ROOT}/src/MarkerManager.cpp
     ${SC_ROOT}/src/Measures.cpp
     ${SC_ROOT}/src/Resampler.cpp
+    ${SC_ROOT}/src/RiffInfo.cpp
     ${SC_ROOT}/src/SavedSelections.cpp
     ${SC_ROOT}/src/ScttChunk.cpp
     ${SC_ROOT}/src/Session.cpp
