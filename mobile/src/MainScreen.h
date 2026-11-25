@@ -50,6 +50,8 @@ public:
     void suspended();
     /** Opens a panel (0 Files, 1 Analyse, 2 Generate, 3 Calibrate, 4 Input, 5 Edit). */
     void showTab (int t) { panelOpen = false; currentTab = -1; selectTab (t); }
+    /** Development hook: the analysis mode (0 FFT Linear, 1 FFT Log, 2 1/3 octave). */
+    void setAnalysisMode (int m) { analysisPane->setMode (m); }
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };
@@ -97,6 +99,7 @@ private:
     juce::OwnedArray<juce::TextButton> tabButtons;
     int currentTab = Analysis;
     bool panelOpen = true;
+    bool wasPlaying = false;   // to notice the engine stopping at the end
     juce::Component* videoPreview = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainScreen)

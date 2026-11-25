@@ -250,6 +250,9 @@ if (APPLE)
     target_link_libraries (SpectroCraftMobile PRIVATE
         "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
 endif()
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries (SpectroCraftMobile PRIVATE "-framework AVKit")   # the output picker
+endif()
 
 endif()   # SC_MOBILE_APP
 

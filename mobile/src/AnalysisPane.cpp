@@ -407,14 +407,25 @@ juce::Rectangle<float> AnalysisPane::plotArea() const
     return r;
 }
 
+std::pair<double, double> AnalysisPane::logRange() const
+{
+    const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
+    if (mode == AnalysisMode::ThirdOctave && current.mode == AnalysisMode::ThirdOctave && ! current.f.empty())
+    {
+        const double k = std::pow (2.0, 1.0 / 6.0);   // half a third of an octave
+        return { current.f.front() / k, current.f.back() * k };
+    }
+    return { std::max (1.0, fLo), fHi };
+}
+
 double AnalysisPane::freqToX (double f) const
 {
     const auto p = plotArea();
     const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
     if (mode == AnalysisMode::FftLinear)
         return p.getX() + (f - 0.0) / std::max (1.0, fHi) * p.getWidth();
-    const double lo = std::max (1.0, fLo);
-    return p.getX() + (std::log (std::max (1e-3, f)) - std::log (lo)) / std::log (fHi / lo) * p.getWidth();
+    const auto [lo, hi] = logRange();
+    return p.getX() + (std::log (std::max (1e-3, f)) - std::log (lo)) / std::log (hi / lo) * p.getWidth();
 }
 
 double AnalysisPane::xToFreq (double x) const
@@ -423,8 +434,8 @@ double AnalysisPane::xToFreq (double x) const
     const double t = (x - p.getX()) / std::max (1.0f, p.getWidth());
     const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
     if (mode == AnalysisMode::FftLinear) return t * fHi;
-    const double lo = std::max (1.0, fLo);
-    return lo * std::pow (fHi / lo, t);
+    const auto [lo, hi] = logRange();
+    return lo * std::pow (hi / lo, t);
 }
 
 double AnalysisPane::dbToY (double db) const
@@ -499,9 +510,12 @@ void AnalysisPane::paint (juce::Graphics& g)
         for (double f = step; f < fHi; f += step) ticks.push_back (f);
     }
     else
+    {
+        const auto [lo, hi] = logRange();
         for (double dec = 10.0; dec < 1e5; dec *= 10.0)
             for (double m : { 1.0, 2.0, 5.0 })
-                if (m * dec >= fLo && m * dec <= fHi) ticks.push_back (m * dec);
+                if (m * dec >= lo && m * dec <= hi) ticks.push_back (m * dec);
+    }
     for (double f : ticks)
     {
         const float x = (float) freqToX (f);
@@ -534,6 +548,29 @@ void AnalysisPane::paint (juce::Graphics& g)
     {
         g.setColour (style::textDim);
         g.drawFittedText ("No audio to analyse", plot.toNearestInt(), juce::Justification::centred, 1);
+    }
+
+    // The level unit on the scale; dB-SPL needs a Pascal calibration (as on the
+    // desktop, 1/3 octave then uses the reference dB-SPL pipeline).
+    if (document.hasAudio())
+    {
+        const auto cal = document.calibration();
+        const bool spl = cal.isCalibratedFor (0) && cal.unit == ScaleCalibration::Unit::Pascal;
+        const juce::String unit = current.f.empty() ? juce::String (spl ? "dB-SPL" : "dBFS") : current.unit;
+        g.setColour (style::axisLabel);
+        g.setFont (style::font (12.0f, true));
+        g.drawText (unit, plot.withHeight (16.0f).translated (4.0f, 2.0f), juce::Justification::centredLeft);
+        if (mode == AnalysisMode::ThirdOctave && ! spl)
+        {
+            const auto box = plot.reduced (8.0f, 0.0f).withTrimmedTop (20.0f).withHeight (44.0f);
+            g.setColour (style::barBackground.withAlpha (0.92f));
+            g.fillRoundedRectangle (box, 5.0f);
+            g.setColour (style::warning);
+            g.setFont (style::font (13.0f));
+            g.drawFittedText ("Not calibrated: levels in dBFS. To read dB-SPL, calibrate the input "
+                              "(Calibrate) and record, or use \"Apply to the open file\".",
+                              box.reduced (8.0f, 4.0f).toNearestInt(), juce::Justification::centred, 3);
+        }
     }
 
     // touch cursor: frequency and level of the current curve

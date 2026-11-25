@@ -436,12 +436,70 @@ void SpectrogramPane::drawRuler (juce::Graphics& g, juce::Rectangle<float> plot)
 
 void SpectrogramPane::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.position.x < kAxisW) return;
+    axisPress = e.position.x < kAxisW && e.position.y > (showRuler ? kRulerH : 0);
+    if (axisPress) return;
     gestures.mouseDown (e);
 }
 
-void SpectrogramPane::mouseDrag (const juce::MouseEvent& e) { gestures.mouseDrag (e); }
-void SpectrogramPane::mouseUp (const juce::MouseEvent& e) { gestures.mouseUp (e); }
+void SpectrogramPane::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! axisPress) gestures.mouseDrag (e);
+}
+
+void SpectrogramPane::mouseUp (const juce::MouseEvent& e)
+{
+    if (axisPress)
+    {
+        axisPress = false;
+        if (e.position.x < kAxisW && e.getDistanceFromDragStart() < 12) showAxisMenu();
+        return;
+    }
+    gestures.mouseUp (e);
+}
+
+void SpectrogramPane::showAxisMenu()
+{
+    juce::PopupMenu m;
+    m.addSectionHeader ("Frequency scale (" + juce::String (fLo, 0) + " - " + juce::String (fHi, 0) + " Hz)");
+    m.addItem (1, "Minimum frequency...");
+    m.addItem (2, "Maximum frequency...");
+    m.addItem (3, "Full range");
+    juce::Component::SafePointer<SpectrogramPane> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                         .withTargetScreenArea (localAreaToGlobal (plotArea().withX (0).withWidth ((float) kAxisW).toNearestInt())),
+                     [safe] (int r)
+    {
+        if (safe == nullptr) return;
+        if (r == 1) safe->askFrequency (true);
+        if (r == 2) safe->askFrequency (false);
+        if (r == 3) safe->setFrequencyRange (20.0, safe->nyquist());
+    });
+}
+
+void SpectrogramPane::askFrequency (bool minimum)
+{
+    auto* w = new juce::AlertWindow (minimum ? "Minimum frequency" : "Maximum frequency",
+                                     "In Hz (" + juce::String (minimum ? 1.0 : fLo + 10.0, 0) + " to "
+                                         + juce::String (minimum ? fHi - 10.0 : nyquist(), 0) + ")",
+                                     juce::MessageBoxIconType::NoIcon);
+    w->addTextEditor ("hz", juce::String (minimum ? fLo : fHi, 0));
+    if (auto* ed = w->getTextEditor ("hz"))
+    {
+        ed->setInputRestrictions (8, "0123456789.");
+        ed->setKeyboardType (juce::TextInputTarget::decimalKeyboard);
+    }
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<SpectrogramPane> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w, minimum] (int r)
+    {
+        if (safe == nullptr || r != 1) return;
+        const double v = w->getTextEditorContents ("hz").getDoubleValue();
+        if (v <= 0.0) return;
+        if (minimum) safe->setFrequencyRange (std::min (v, safe->fHi - 10.0), safe->fHi);
+        else safe->setFrequencyRange (safe->fLo, std::max (v, safe->fLo + 10.0));
+    }), true);
+}
 
 void SpectrogramPane::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {

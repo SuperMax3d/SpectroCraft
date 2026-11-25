@@ -63,6 +63,10 @@ private:
     void drawFrequencyAxis (juce::Graphics&, juce::Rectangle<float> plot);
     void drawRuler (juce::Graphics&, juce::Rectangle<float> plot);
     void zoomFrequency (double anchorHz, double factor);
+    /** Tap on the frequency scale: minimum / maximum frequency, full range. */
+    void showAxisMenu();
+    /** Asks for the minimum (or maximum) frequency in Hz. */
+    void askFrequency (bool minimum);
 
     MobileDocument& document;
     TimeViewport& view;
@@ -77,6 +81,7 @@ private:
     double fLo = 20.0, fHi = 20000.0;
     bool logAxis = true;
     double writeHead = -1.0;
+    bool axisPress = false;   // the current touch started on the scale
 
     // pinch start state
     double pinchT0 = 0, pinchT1 = 0, pinchFLo = 0, pinchFHi = 0;

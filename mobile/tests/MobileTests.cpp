@@ -607,6 +607,59 @@ public:
     }
 };
 
+
+class PlaybackEndTests : public juce::UnitTest
+{
+public:
+    PlaybackEndTests() : juce::UnitTest ("playback end", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        beginTest ("playback stops at the end of the file (with the screen's 30 Hz playhead sync)");
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                             .getChildFile ("scm-play-" + juce::String (juce::Random::getSystemRandom().nextInt (1 << 30)));
+        dir.createDirectory();
+        const auto wav = dir.getChildFile ("tone.wav");
+        {
+            FileDoc d;
+            std::vector<std::vector<float>> data (1, std::vector<float> (48000, 0.5f));
+            d.engine.initNew (1, 48000.0, &data);
+            d.engine.saveFileAs (wav);
+        }
+        scm::LiveAudio audio;
+        audio.simulateDevice (48000.0, 1);
+        scm::MobileDocument doc;
+        juce::String err;
+        expect (doc.open (wav, err), err);
+        auto& eng = doc.doc()->engine;
+        audio.setPlaybackSource (&eng);
+        eng.play();
+        const int block = 512;
+        std::vector<float> in ((size_t) block, 0.0f), outL ((size_t) block), outR ((size_t) block);
+        int nonSilentAfterEnd = 0, framesAfterEnd = 0;
+        int64_t frame = 0;
+        for (int b = 0; b < 300; ++b)   // ~3.2 s for a 1 s file
+        {
+            const float* ins[] = { in.data() };
+            float* outs[] = { outL.data(), outR.data() };
+            audio.audioDeviceIOCallbackWithContext (ins, 1, outs, 2, block, {});
+            frame += block;
+            if (frame > 48000 + 4 * block)
+            {
+                framesAfterEnd += block;
+                for (float v : outL) if (std::abs (v) > 1e-6f) { ++nonSilentAfterEnd; break; }
+            }
+            if (b % 3 == 0)   // what MainScreen::timerCallback does
+                doc.followPlayback (eng.position());
+        }
+        expect (! eng.isPlaying(), "stopped after the end");
+        expectWithinAbsoluteError (doc.playhead(), 1.0, 0.02, "the playhead stays at the end");
+        expectEquals (nonSilentAfterEnd, 0, "no sound after the end (no loop)");
+        audio.setPlaybackSource (nullptr);
+        dir.deleteRecursively();
+    }
+};
+
 static GeneratorTests generatorTests;
 static CalibrationTests calibrationTests;
 static StoredPlotsTests storedPlotsTests;
@@ -614,6 +667,7 @@ static LoopTests loopTests;
 static FileRoundTripTests fileRoundTripTests;
 static RecordingPathTests recordingPathTests;
 static TelemetryTests telemetryTests;
+static PlaybackEndTests playbackEndTests;
 
 int main()
 {

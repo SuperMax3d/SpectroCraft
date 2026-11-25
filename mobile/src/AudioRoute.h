@@ -31,4 +31,10 @@ juce::String currentInputId();
 bool selectInput (const juce::String& id);
 /** Note shown next to a Bluetooth input. */
 juce::String bluetoothNote();
+
+/** Where the sound plays (speaker, AirPods, AirPlay...), e.g. "AirPods Pro". */
+juce::String currentOutputName();
+/** iOS: the system's output picker (AVRoutePickerView: speaker, AirPods,
+    AirPlay). nullptr where outputs are AudioDeviceManager devices. */
+std::unique_ptr<juce::Component> createOutputPicker();
 } // namespace scm::route

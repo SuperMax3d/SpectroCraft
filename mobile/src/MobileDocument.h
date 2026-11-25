@@ -54,6 +54,9 @@ public:
     void setSelection (juce::Range<double> r);
     double playhead() const noexcept { return head; }
     void setPlayhead (double t);
+    /** The playhead follows playback: no seek and no change message (the
+        views only repaint their cursor). */
+    void followPlayback (double t) noexcept { head = t; }
 
     // ---- edits (undoable)
     bool deleteSelection (juce::String& error);

@@ -195,15 +195,20 @@ void MainScreen::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void MainScreen::timerCallback()
 {
-    // follow the playhead while playing
-    if (auto* d = ctx.document.doc(); d != nullptr && d->engine.isPlaying())
+    // Follow the playhead while playing. The engine stops by itself at the end
+    // of the file; the playhead then stays there and the next Play starts over.
+    auto* d = ctx.document.doc();
+    const bool playing = d != nullptr && d->engine.isPlaying();
+    if (playing || wasPlaying)
     {
-        const double t = d->engine.position();
-        ctx.document.setPlayhead (t);
-        if (t > ctx.view.end()) ctx.view.pan (ctx.view.span() * 0.9);
-        if (t >= ctx.document.duration() - 1e-3 && ! d->engine.isLooping()) stopPlayback();
+        const double t = d != nullptr ? d->engine.position() : 0.0;
+        ctx.document.followPlayback (t);
+        if (playing && t > ctx.view.end()) ctx.view.pan (ctx.view.span() * 0.9);
+        waveform.repaint();
+        spectrogram.repaint();
         updateTransport();
     }
+    wasPlaying = playing;
 }
 
 void MainScreen::toggleRecord()
@@ -487,7 +492,7 @@ void MainScreen::resized()
     auto views = r.reduced (0, 2);
     if (layout == Layout::Both)
     {
-        waveform.setBounds (views.removeFromTop ((int) (views.getHeight() * 0.34)));
+        waveform.setBounds (views.removeFromTop ((int) (views.getHeight() * 0.23)));
         views.removeFromTop (2);
         spectrogram.setBounds (views);
     }

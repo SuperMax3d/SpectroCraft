@@ -83,7 +83,7 @@ Options: `-DSC_MOBILE_BUNDLE_ID=` (iOS bundle id / Android application id, defau
 `-PposthogHost=`).
 
 Desktop development hooks (macOS / Linux builds only): `SC_MOBILE_RECORDINGS=<folder>`,
-`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_SIZE=<w>x<h>`,
+`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_ANALYSIS=<0..2>`, `SC_MOBILE_SIZE=<w>x<h>`,
 `SC_MOBILE_SNAPSHOT=<png>` (writes the window after 2.5 s and quits).
 
 ## CI and store builds
