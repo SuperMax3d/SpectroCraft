@@ -6,6 +6,8 @@
 
 #include <JuceHeader.h>
 #include <array>
+#include <numeric>
+#include <random>
 #include <cstring>
 #include <fstream>
 #include <set>
@@ -27,6 +29,7 @@
 #include "Panels.h"
 #include "ScrollBars.h"
 #include "MainWindow.h"
+#include "BlindSeparation.h"   // issue #68
 #include "ScaleForm.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
@@ -16420,9 +16423,9 @@ static void testSplitSpectralSelectionApp()
         // Menu bar order: File Edit Selection Transport Effects View Window Help.
         const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 20, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68)
 #else
-        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
     }
     app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2 (the old F12 behaviour)
@@ -25703,9 +25706,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 20, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68)
 #else
-    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -31496,6 +31499,7 @@ static void testWriteDataToNewChannels()
 #include "regression/sessions.inc"       // sessions: referenced files on the timeline (issue #21)
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 #include "regression/model.inc"         // Model panel: sound model analysis / rendering (issue #40)
+#include "regression/bss.inc"           // blind source separation (issue #68)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -31731,6 +31735,9 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("undo/redo", testUndo);
     SC_RUN_TEST ("zero-crossing", testZeroCrossing);
     SC_RUN_TEST ("spectral engine", testSpectral);
+    SC_RUN_TEST ("blind source separation: AuxIVA, ILRMA, cACGMM, FastMNMF2 (#68)", testBlindSeparation);
+    SC_RUN_TEST ("blind source separation: the effect window (#68)", testBlindSeparationWindow);
+    SC_RUN_TEST ("bench: blind source separation timings (SC_BENCH=1 only)", testBlindSeparationBench);
     SC_RUN_TEST ("playhead line full height", testPlayheadLineFullHeight);
     SC_RUN_TEST ("playhead line bottom ruler", testPlayheadLineBottomRuler);
     SC_RUN_TEST ("spectral view paint", testSpectralViewPaint);

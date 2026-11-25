@@ -54,6 +54,8 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/BlindSeparation.cpp   # blind source separation: AuxIVA, ILRMA, cACGMM, FastMNMF2 (issue #68)
+        ${CMAKE_CURRENT_SOURCE_DIR}/BlindSeparationWindow.cpp   # Effects > Blind Source Separation window (issue #68)
         ${CMAKE_CURRENT_SOURCE_DIR}/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)

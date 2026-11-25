@@ -11,6 +11,7 @@
 #include "ScaleForm.h"   // ScaleFormWindow::PickAction in handleScalePick
 #include "Docking.h"   // Adobe-style docking workspace (panel groups, floating windows)
 #include "MainToolbar.h"   // the toolbar in the menu bar row (issue #43)
+#include "BlindSeparationWindow.h"   // Effects > Blind Source Separation (issue #68)
 #include <memory>
 #include <algorithm>
 #include <atomic>
@@ -622,6 +623,9 @@ public:
     /** Effects > Stem Separation... - opens (or brings to front) the
         non-modal window that drives the external stem-separation CLI. */
     void showStemSeparationWindow();
+    /** Effects > Blind Source Separation... (issue #68): multi-channel files only. */
+    void showBlindSeparationWindow();
+    BlindSeparationWindow* blindSeparationWindow() const noexcept { return bssWin_.get(); }
     /** Effects > Super Resolution... - opens (or brings to front) the
         non-modal window that drives the external super-resolution CLI. */
     void showSuperResolutionWindow();
@@ -774,6 +778,7 @@ public:
         ToolsGenSilence,           // Effects > Generate Silence...
         ToolsGenNoise,             // Effects > Generate Noise...
         ToolsGenTone,              // Effects > Generate Tone...
+        ToolsBlindSeparation = 5100,   // Effects > Blind Source Separation... (issue #68)
         ActionsRunSelected = 6800, // Actions > Run Selected Action (Ctrl+Shift+P)
         ActionsBatch = 6801,       // Actions > Batch...
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -883,6 +888,7 @@ private:
 
     // Effects > Stem Separation window (at most one open at a time).
     std::unique_ptr<StemSeparationWindow> stemWin_;
+    std::unique_ptr<BlindSeparationWindow> bssWin_;   // Effects > Blind Source Separation (issue #68)
 
     // Effects > Super Resolution window (at most one open at a time).
     std::unique_ptr<SuperResolutionWindow> superResWin_;

@@ -1043,6 +1043,47 @@ this version.
 
 ---
 
+## Blind source separation
+
+**Effects > Blind Source Separation...** (issue #68; files with two channels or
+more) separates the sources of a multi-channel recording - a motor, an
+airflow, a voice - by how each one reaches the microphones. No AI model and
+no download: the methods fit a model of the recording itself. It processes
+the time selection, or the whole file without one, on every channel.
+
+The window offers four methods, each with a short description, its pros and
+its cons, and shows only the settings that method uses:
+
+| Method | What it does | Best for | Watch out |
+|---|---|---|---|
+| **AuxIVA** | Independent vector analysis: a demixing filter per frequency, each source's frequencies kept together by their common loudness over time | Speech, sources that start and stop; fast | Needs at least as many microphones as sources |
+| **ILRMA** | AuxIVA whose sources are also a few repeating spectral shapes (NMF) | Tonal and harmonic sources (motors, fans, music) | Same limit; slower than AuxIVA |
+| **Cluster (cACGMM)** | Groups every time-frequency point by its direction, then extracts each group with an MVDR beamformer or a mask; an optional class takes the diffuse noise | Fewer sources than microphones, diffuse noise, sparse sources | Masks can sound watery; overlapping sources can mix up across frequencies |
+| **FastMNMF2** | A full spatial model (jointly diagonalised covariances) with NMF spectra | Reverberant rooms, steady sources such as airflow | The slowest by far |
+
+Settings: **Sources** (at most the channel count), **FFT size** (the
+analysis window; default 4096 at 32 kHz and above, 2048 below), **Iterations**
+(defaults 50 / 100 / 40 / 100), **NMF bases** (ILRMA, FastMNMF2),
+**Reference** (each source comes out as this microphone hears it),
+**Extraction** and **Noise class** (cACGMM), **Block length** and
+**Output**: a new file, replace the current file, or add the sources as new
+tracks over the range (one undoable step, as Stem Separation). The settings
+are remembered (`bss_params`).
+
+Long recordings are processed in blocks (default 60 s, overlapping by 2 s):
+the memory stays bounded whatever the length. AuxIVA and ILRMA start each
+block from the previous one's solution, and every block's outputs are put in
+the order of the previous block by their correlation over the overlap, then
+cross-faded. The loops over frequencies run on every core, and the FFTs use
+the AVX2 path when the processor has it. A progress dialog can cancel at any
+time.
+
+Code: `include/BlindSeparation.h` + `src/BlindSeparation.cpp` (headless,
+`sc::bss::separate`), the window `include/BlindSeparationWindow.h`; tests
+`tests/regression/bss.inc` (synthetic convolutive mixtures, scored by the SDR
+gain over the mixture). Timings: `SC_BENCH=1 SC_TEST_FILTER=bench`
+(`SC_BENCH_BSS_SECONDS`, default 60), meaningful in a Release build.
+
 ## Video files
 
 SpectroCraft opens video files as their audio: the first audio stream is

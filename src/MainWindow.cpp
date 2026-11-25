@@ -5227,6 +5227,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
+        case ToolsBlindSeparation: showBlindSeparationWindow(); break;
         case ToolsSuperResolve: showSuperResolutionWindow(); break;
         case ToolsSplitSpectralSelCfg:
             showSplitConfigDialog ();
@@ -8740,6 +8741,20 @@ void MainWindow::showStemSeparationWindow()
     stemWin_->onCloseRequested = [this] { stemWin_.reset (); };
 }
 
+void MainWindow::showBlindSeparationWindow()
+{
+    if (! app.audioEngine().isFileLoaded() || app.audioEngine().numChannels() < 2)
+        return;
+    if (bssWin_ != nullptr)
+    {
+        bssWin_->view().refresh();
+        bssWin_->toFront (true);
+        return;
+    }
+    bssWin_ = std::make_unique<BlindSeparationWindow> (app);
+    bssWin_->onCloseRequested = [this] { bssWin_.reset(); };
+}
+
 // Show every channel in both views (View > All Channels, and the solo-off
 // half of the Ctrl/Shift+click / Ctrl+Shift+N toggle).
 void MainWindow::zoomSessionRows (int steps)
@@ -10288,6 +10303,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // the whole file becomes the input.
         menu.addItem (ToolsStemSeparate, "Stem Separation...",
                       app.audioEngine().isFileLoaded(), false);
+        // Issue #68: separates the sources of a multi-channel recording by
+        // where they come from (no AI model; AuxIVA, ILRMA, cACGMM, FastMNMF2).
+        menu.addItem (ToolsBlindSeparation, "Blind Source Separation...",
+                      app.audioEngine().isFileLoaded() && app.audioEngine().numChannels() >= 2, false);
         // Configure which channels the spectral selection is extracted from
         // and where each extraction goes. Closing saves the configuration
         // without performing any split.
