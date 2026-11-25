@@ -2,10 +2,10 @@
 //
 // Both are compiled in only when the build gets keys (CMake SC_SENTRY_DSN,
 // SC_POSTHOG_KEY; CI passes them from the repository's variables), so a local
-// or pull-request build sends nothing. When compiled in they are on by default;
-// the user can turn them off (Files > Privacy), and a first-launch notice says
-// so. Nothing identifying is sent: a random install id, the app version, the OS
-// and device model, and event counters - never audio, file names or paths.
+// or pull-request build sends nothing. When compiled in they are always on: the
+// app has no switch and no notice for them. Nothing identifying is sent: a
+// random install id, the app version, the OS and device model, and event
+// counters - never audio, file names or paths.
 //
 // Sentry: the native SDKs catch crashes, including C++ ones (iOS: SentryObjC
 // framework, Telemetry_ios.mm; Android: sentry-android with its NDK part,
@@ -25,11 +25,9 @@ void initialise (juce::PropertiesFile& props);
 void shutdown();
 
 bool enabled();
-/** Turns crash reports and statistics on or off (saved in the settings). */
+/** Turns crash reports and statistics on or off for this run (tests; the app
+    has no switch). */
 void setEnabled (bool on);
-
-/** True until the first-launch notice was shown (then marks it shown). */
-bool takeFirstLaunchNotice();
 
 /** A PostHog event (no-op when off). Property values: numbers, bools, short strings. */
 void capture (const juce::String& event, const juce::StringPairArray& props = {});

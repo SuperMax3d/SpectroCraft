@@ -89,8 +89,6 @@ public:
         mainWindow = std::make_unique<MainWindow> (getApplicationName(), screen);
 
         audio->onDeviceChanged = [screen] { screen->audioReady ({}); };
-        if (telemetry::takeFirstLaunchNotice())
-            screen->showTelemetryNotice();
        #if ! (JUCE_IOS || JUCE_ANDROID)
         // Development hooks (desktop builds only):
         //   SC_MOBILE_NO_AUDIO=1          do not open the microphone

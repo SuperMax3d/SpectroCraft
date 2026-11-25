@@ -36,7 +36,6 @@ private:
     juce::TextButton openButton { "Open..." }, saveButton { "Save" }, shareButton { "Share" },
                      deleteButton { "Delete" };
     juce::ListBox list;
-    juce::ToggleButton privacy { "Send anonymous crash reports and usage statistics" };
     juce::Array<juce::File> files;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::ScopedMessageBox shareBox;

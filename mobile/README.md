@@ -37,15 +37,14 @@ When the build has keys (see *CI and store builds*), the app sends:
 
 Never sent: audio, file names or paths, device names, location, account data.
 
-Both are on by default when compiled in. A notice at first launch says so, and *Files > Send anonymous
-crash reports and usage statistics* turns them off (and back on). A build without keys (local builds,
-pull requests from forks) contains neither and shows no toggle.
+Both are always on when compiled in: the app has no switch and no notice for them. A build without keys
+(local builds, pull requests from forks) contains neither.
 
 What to declare to the stores:
 
 - **Google Play, Data safety**: *App info and performance > Crash logs and Diagnostics*, and *App
-  activity > App interactions*: collected, not shared, processed ephemerally: no, optional: yes
-  (the user can turn it off), not linked to an identity.
+  activity > App interactions*: collected, not shared, processed ephemerally: no, optional: no
+  (the app has no switch), not linked to an identity.
 - **App Store, App Privacy**: *Diagnostics > Crash Data*, *Other Diagnostic Data*; *Usage Data >
   Product Interaction*: not linked to the user, not used for tracking.
 

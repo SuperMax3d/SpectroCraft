@@ -406,20 +406,6 @@ void MainScreen::selectTab (int t)
     resized();
 }
 
-void MainScreen::showTelemetryNotice()
-{
-    auto options = juce::MessageBoxOptions::makeOptionsOkCancel (juce::MessageBoxIconType::NoIcon,
-        "Crash reports and statistics",
-        "SpectroCraft sends anonymous crash reports and usage statistics to help fix and improve the app: "
-        "a random install id, the app and system versions, the phone model and which features are used. "
-        "Never your audio, file names or location.\n\nYou can turn this off any time in Files > Privacy.",
-        "OK", "Turn off");
-    juce::AlertWindow::showAsync (options, [] (int r)
-    {
-        if (r == 0) telemetry::setEnabled (false);
-    });
-}
-
 void MainScreen::setLayout (Layout l)
 {
     if (l != layout && getWidth() > 0)

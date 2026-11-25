@@ -21,10 +21,6 @@ FilesPane::FilesPane (AppContext& c) : ctx (c)
     list.setRowHeight (52);
     list.setColour (juce::ListBox::backgroundColourId, style::panelBackground);
     addAndMakeVisible (list);
-    privacy.setToggleState (telemetry::enabled(), juce::dontSendNotification);
-    privacy.onClick = [this] { telemetry::setEnabled (privacy.getToggleState()); };
-    privacy.setVisible (telemetry::available());
-    addChildComponent (privacy);
     ctx.document.addChangeListener (this);
     refresh();
 }
@@ -219,8 +215,6 @@ void FilesPane::resized()
         row.removeFromLeft (4);
     }
     r.removeFromTop (style::kGap);
-    if (privacy.isVisible())
-        privacy.setBounds (r.removeFromBottom (style::kTouch));
     list.setBounds (r);
 }
 } // namespace scm

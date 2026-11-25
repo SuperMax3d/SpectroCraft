@@ -598,7 +598,6 @@ public:
             expect (! scm::telemetry::enabled());
             scm::telemetry::setEnabled (true);
             expect (! scm::telemetry::enabled());
-            expect (! scm::telemetry::takeFirstLaunchNotice());
             scm::telemetry::capture ("x", { { "a", 1 } });   // no sender: a no-op
             scm::telemetry::reportError ("y");
             expect (props.getValue ("telemetryId").length() >= 32, "an install id is still kept");
