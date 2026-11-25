@@ -171,7 +171,9 @@ jobs:
           status: ${{ vars.SC_PLAY_RELEASE_STATUS || 'completed' }}
 
   ios:
-    runs-on: macos-15
+    # App Store Connect takes only builds made with the iOS 26 SDK or later
+    # (Xcode 26: macos-26's default).
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Configure (Xcode, iOS)
@@ -262,8 +264,11 @@ jobs:
           SENTRY_ORG: ${{ vars.SC_SENTRY_ORG }}
           SENTRY_PROJECT: ${{ vars.SC_SENTRY_PROJECT }}
         run: |
-          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_DSN" ] || [ ! -d build-ios/SpectroCraftMobile.xcarchive/dSYMs ]; then
-            echo "No Sentry token, DSN or archive: skipped."; exit 0
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_DSN" ]; then
+            echo "No Sentry token or DSN: skipped."; exit 0
           fi
           curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION=3.8.2 sh
-          sentry-cli debug-files upload --include-sources build-ios/SpectroCraftMobile.xcarchive/dSYMs
+          # A CMake-made Xcode project leaves the app's dSYM next to the built
+          # app, not in the archive: scan the whole build folder (it also holds
+          # the SentryObjC framework's dSYMs).
+          sentry-cli debug-files upload --include-sources build-ios
