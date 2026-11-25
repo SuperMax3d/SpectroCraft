@@ -32,7 +32,14 @@
  #pragma comment (lib, "psapi.lib")
 #else
  #include <cerrno>
- #include <execinfo.h>
+ // Android's libc has backtrace() only from API 33; older targets (the mobile
+ // app supports API 26+) write the crash report without the stack.
+ #if defined (__ANDROID__) && __ANDROID_API__ < 33
+  #define SC_HAVE_BACKTRACE 0
+ #else
+  #define SC_HAVE_BACKTRACE 1
+  #include <execinfo.h>
+ #endif
  #include <fcntl.h>
  #include <signal.h>
  #include <sys/types.h>
@@ -389,9 +396,13 @@ namespace
         const long long start = gStartMonoMs.load();
         rawWriteNumber (fd, (unsigned long long) std::max (0LL, monoMs() - start), 10);
         rawWrite (fd, " ms\n---- stack ----\n");
+ #if SC_HAVE_BACKTRACE
         void* frames[64];
         const int n = backtrace (frames, 64);
         backtrace_symbols_fd (frames, n, fd);
+ #else
+        rawWrite (fd, "(no backtrace on this platform)\n");
+ #endif
         rawWrite (fd, "---- last events ----\n");
         const unsigned end = gCrashRingNext.load (std::memory_order_acquire);
         const unsigned count = std::min<unsigned> (end, (unsigned) kCrashRingSize);
@@ -418,11 +429,13 @@ namespace
         static bool installed = false;
         if (installed) return;
         installed = true;
+ #if SC_HAVE_BACKTRACE
         {
             // Load the unwinder now: the first backtrace() may allocate.
             void* warm[2];
             backtrace (warm, 2);
         }
+ #endif
         static char altStack[64 * 1024];   // stack overflows on the message thread still get a report
         stack_t ss {};
         ss.ss_sp = altStack;

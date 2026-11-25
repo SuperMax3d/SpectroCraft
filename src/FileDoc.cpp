@@ -157,6 +157,9 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
         tablesMode = scmdB.tablesMode;
     }
 
+    // Stored analysis plots (mobile app, issue #73): unified > SCMD.
+    storedPlots = unifiedB.haveStoredPlots ? unifiedB.storedPlots : scmdB.storedPlots;
+
     // Sound model (Model panel): unified > SCMD.
     soundModel = {};
     {
@@ -171,6 +174,9 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
         videoTracks = unifiedB.videoTracks;
     else if (scmdB.haveVideoTracks)
         videoTracks = scmdB.videoTracks;
+    // A track recorded elsewhere (the mobile app) or a moved folder: find the
+    // movie next to the audio by its relative path or name.
+    sc::resolveVideoTracks (videoTracks, f.getParentDirectory());
 
     // Session (issue #21): unified > SCMD. Application builds the composite.
     session = sc::session::Session {};
@@ -278,6 +284,7 @@ std::string FileDoc::buildScmdJson () const
     // it so saving as .wav keeps the reference and the video reappears on reopen.
     if (b.videoTracks.empty() && videoFile != juce::File())
         b.videoTracks.push_back ({ videoFile });
+    sc::fillVideoRelativePaths (b.videoTracks, engine.getFile().getParentDirectory());
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -287,6 +294,7 @@ std::string FileDoc::buildScmdJson () const
         b.session = pendingSession;   // not opened as a session (files missing): keep the entry
     if (!soundModel.empty ())
         b.soundModel = soundModel.toVar ();
+    b.storedPlots = storedPlots;
 
     if (!b.hasContent ())
         return {};   // nothing worth embedding: omit the SCMD chunk entirely
@@ -306,6 +314,7 @@ std::string FileDoc::buildMetaJson () const
     b.videoTracks  = videoTracks;
     if (b.videoTracks.empty() && videoFile != juce::File())
         b.videoTracks.push_back ({ videoFile });
+    sc::fillVideoRelativePaths (b.videoTracks, engine.getFile().getParentDirectory());
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -316,6 +325,7 @@ std::string FileDoc::buildMetaJson () const
         b.session = pendingSession;
     if (!soundModel.empty ())
         b.soundModel = soundModel.toVar ();
+    b.storedPlots = storedPlots;
 
     return sc::serialiseBundle (b, true);
 }
@@ -333,6 +343,7 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     if (b.haveSession) pendingSession = b.session;          // opened by Application
     soundModel = {};
     if (b.soundModel.isObject ()) sc::model::Model::fromVar (b.soundModel, soundModel);
+    if (b.haveStoredPlots) storedPlots = b.storedPlots;
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;

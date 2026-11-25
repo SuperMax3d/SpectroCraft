@@ -5,6 +5,50 @@
 namespace sc
 {
 
+juce::String videoRelativePath (const juce::File& video, const juce::File& audioFolder)
+{
+    if (video == juce::File() || audioFolder == juce::File() || !video.isAChildOf (audioFolder))
+        return {};
+    return video.getRelativePathFrom (audioFolder).replaceCharacter ('\\', '/');
+}
+
+void fillVideoRelativePaths (std::vector<VideoTrackData>& tracks, const juce::File& audioFolder)
+{
+    for (auto& t : tracks)
+    {
+        const auto rel = videoRelativePath (t.file, audioFolder);
+        if (rel.isNotEmpty())
+            t.relPath = rel;
+    }
+}
+
+void resolveVideoTracks (std::vector<VideoTrackData>& tracks, const juce::File& audioFolder)
+{
+    if (audioFolder == juce::File())
+        return;
+    const auto inFolder = [&audioFolder] (const juce::String& rel)
+    {
+        return audioFolder.getChildFile (rel.replaceCharacter ('/', juce::File::getSeparatorChar()));
+    };
+    for (auto& t : tracks)
+    {
+        if (t.file != juce::File() && t.file.existsAsFile())
+            continue;
+        juce::Array<juce::File> candidates;
+        if (t.relPath.isNotEmpty())
+            candidates.add (inFolder (t.relPath));
+        if (t.file != juce::File())
+            candidates.add (audioFolder.getChildFile (t.file.getFileName()));
+        else if (t.relPath.isNotEmpty())
+            candidates.add (audioFolder.getChildFile (t.relPath.fromLastOccurrenceOf ("/", false, false)));
+        bool found = false;
+        for (const auto& c : candidates)
+            if (c.existsAsFile()) { t.file = c; found = true; break; }
+        if (!found && t.file == juce::File() && t.relPath.isNotEmpty())
+            t.file = inFolder (t.relPath);
+    }
+}
+
 juce::File fileMetaSidecarPath (const juce::File& audioFile)
 {
     return juce::File (audioFile.getFullPathName() + ".meta.json");
@@ -339,7 +383,8 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
         for (const auto& t : b.videoTracks)
         {
             auto o = new juce::DynamicObject();
-            o->setProperty ("file", t.file.getFullPathName());
+            o->setProperty ("file", t.file != juce::File() ? t.file.getFullPathName() : t.relPath);
+            if (t.relPath.isNotEmpty())   o->setProperty ("relFile", t.relPath);
             if (t.offsetSecs != 0.0)      o->setProperty ("offset", t.offsetSecs);
             if (!t.hasDefaultAdjustments())
             {
@@ -364,6 +409,8 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
 
     if (b.soundModel.isObject())
         root->setProperty ("soundModel", b.soundModel);
+    if (b.storedPlots.isArray() && b.storedPlots.size() > 0)
+        root->setProperty ("storedPlots", b.storedPlots);
 
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
@@ -553,7 +600,15 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
                 if (o == nullptr) continue;
                 const auto& op = o->getProperties();
                 VideoTrackData t;
-                t.file        = juce::File (op.getWithDefault ("file", juce::var()).toString());
+                // "file" is absolute when written by the desktop; a relative one
+                // (or "relFile") is resolved against the audio file's folder by
+                // resolveVideoTracks() - juce::File needs an absolute path.
+                const juce::String path = op.getWithDefault ("file", juce::var()).toString();
+                t.relPath     = op.getWithDefault ("relFile", juce::var()).toString();
+                if (juce::File::isAbsolutePath (path))
+                    t.file = juce::File (path);
+                else if (t.relPath.isEmpty())
+                    t.relPath = path.replaceCharacter ('\\', '/');
                 t.offsetSecs  = static_cast<double> (op.getWithDefault ("offset", 0.0));
                 t.zoom        = std::max (1.0f, static_cast<float> (op.getWithDefault ("zoom", 1.0)));
                 t.panX        = static_cast<float> (op.getWithDefault ("panX", 0.0));
@@ -562,7 +617,7 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
                 t.contrast    = std::max (1e-3, static_cast<double> (op.getWithDefault ("contrast", 1.0)));
                 t.brightness  = std::clamp (static_cast<double> (op.getWithDefault ("brightness", 0.0)), -1.0, 1.0);
                 t.solo        = static_cast<int> (op.getWithDefault ("solo", 0)) != 0;
-                if (t.file != juce::File())
+                if (t.file != juce::File() || t.relPath.isNotEmpty())
                     list.push_back (std::move (t));
             }
             out.videoTracks = std::move (list);
@@ -576,6 +631,10 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
     out.haveSoundModel = p.contains ("soundModel");
     if (out.haveSoundModel)
         out.soundModel = p.getWithDefault ("soundModel", juce::var());
+
+    out.haveStoredPlots = p.contains ("storedPlots");
+    if (out.haveStoredPlots)
+        out.storedPlots = p.getWithDefault ("storedPlots", juce::var());
 
     out.haveScale = p.contains ("scale");
     if (const auto* scaleObj = p.getWithDefault ("scale", juce::var()).getDynamicObject())
@@ -763,6 +822,7 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     b.tables       = unifiedB.haveTables       ? unifiedB.tables       : scmdB.tables;
     b.tablesMode   = unifiedB.haveTables       ? unifiedB.tablesMode   : scmdB.tablesMode;
     b.soundModel   = unifiedB.haveSoundModel   ? unifiedB.soundModel   : scmdB.soundModel;
+    b.storedPlots  = unifiedB.haveStoredPlots  ? unifiedB.storedPlots  : scmdB.storedPlots;
 
     // The cue/adtl payloads are sample-based: the file's rate is needed both to
     // READ them and to REBUILD them below.

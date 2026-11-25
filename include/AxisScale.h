@@ -99,6 +99,12 @@ struct Legacy
 };
 List migrateLegacy (const Legacy& in, bool& hadLegacy);
 
+/** Amplitude units index (unitNames (Kind::Amplitude)) of a calibration's
+    physical unit: Volt 2, Pascal 3, g 4, otherwise 1 ("None"). */
+int unitsFromCalibration (const ScaleCalibration& sc);
+/** The calibration unit an Amplitude units index stands for (None for dB / None). */
+ScaleCalibration::Unit calibrationUnit (int units);
+
 /** Writes the entries into the session's existing display state: the primary
     entry of each kind drives timeAxisMode / timeOffsetSecs / waveVScaleMode /
     the file's ScaleCalibration / specFreqScaleMode + factor, and every

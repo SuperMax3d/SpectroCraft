@@ -27,6 +27,8 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/FilterEQ.cpp      # FFT zero-phase curve equaliser
         ${CMAKE_CURRENT_SOURCE_DIR}/Envelope.cpp      # amplitude-over-time envelope effect
         ${CMAKE_CURRENT_SOURCE_DIR}/AxisScale.cpp     # per-file axis entries (the Scale form's model)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AxisScaleApp.cpp  # axis entries: the Application / view half
+        ${CMAKE_CURRENT_SOURCE_DIR}/TimeFormat.cpp    # time, ruler and scale-label text helpers (UI-free)
         ${CMAKE_CURRENT_SOURCE_DIR}/ScaleForm.cpp     # the Scale form (modeless, always-on-top)
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/WaveformView.cpp

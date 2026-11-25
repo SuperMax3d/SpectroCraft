@@ -80,6 +80,11 @@ struct AltRefState
 struct VideoTrackData
 {
     juce::File file;            // the video file (absolute path)
+    /** The video's path relative to the audio file's folder, "/"-separated
+        (written as "relFile"). Lets a file recorded on another machine - the
+        mobile app, or a folder moved or copied - find its video next to the
+        audio: see resolveVideoTracks(). Empty when the video is elsewhere. */
+    juce::String relPath;
     double offsetSecs = 0.0;    // document time of the track's first frame
 
     // Per-video picture adjustments (the Video window restores them when the
@@ -138,7 +143,8 @@ struct MetaBundle
     bool haveMarkers = false, haveSelections = false, haveDrawings = false,
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
          haveTranscription = false, haveTables = false, haveVideoTracks = false,
-         haveAxes = false, haveSession = false, haveSoundModel = false;
+         haveAxes = false, haveSession = false, haveSoundModel = false,
+         haveStoredPlots = false;
 
     /** Session (issue #21): the referenced files with their lanes and
         offsets, as written by sc::session::toVar (kept as JSON here; the
@@ -148,6 +154,10 @@ struct MetaBundle
     /** Model panel (issue #40): the file's sound model, as written by
         sc::model::Model::toVar (kept as JSON here, like the session). */
     juce::var soundModel;
+    /** Frequency Analysis stored plots (issue #73): the curves the mobile app
+        keeps with a recording, as written by its StoredPlots::toVar (an array,
+        kept as JSON here). The desktop carries them through its saves. */
+    juce::var storedPlots;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
@@ -156,9 +166,24 @@ struct MetaBundle
             || scale.isCalibrated() || !altRef.isDefault()
             || !freqAnalysis.isDefault() || !tables.empty()
             || !videoTracks.empty() || !axes.empty() || session.isObject()
-            || soundModel.isObject();
+            || soundModel.isObject()
+            || (storedPlots.isArray() && storedPlots.size() > 0);
     }
 };
+
+/** The video's path relative to `audioFolder` ("/" separators), or "" when
+    the video is not inside that folder. */
+juce::String videoRelativePath (const juce::File& video, const juce::File& audioFolder);
+
+/** Fills every track's relPath from its file (tracks inside `audioFolder`),
+    before the bundle is written. */
+void fillVideoRelativePaths (std::vector<VideoTrackData>& tracks, const juce::File& audioFolder);
+
+/** After a bundle is read: a track whose absolute file is missing is looked
+    up in `audioFolder` at its relPath, then by its bare file name, and points
+    there when found. A track with only a relPath gets the resolved path even
+    when the movie is missing (the Video window then shows it as missing). */
+void resolveVideoTracks (std::vector<VideoTrackData>& tracks, const juce::File& audioFolder);
 
 /** The external sidecar path: "<audio file>.meta.json". */
 juce::File fileMetaSidecarPath (const juce::File& audioFile);
