@@ -1,6 +1,7 @@
 // iOS crash reports: Sentry's SentryObjC framework (see Telemetry.h). Built
 // only when mobile/CMakeLists.txt fetched the framework (a DSN was given);
 // otherwise the calls do nothing.
+#define DONT_SET_USING_JUCE_NAMESPACE 1   // see AudioRoute_ios.mm
 #include "Telemetry.h"
 
 #if SC_HAVE_SENTRY_COCOA

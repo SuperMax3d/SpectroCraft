@@ -1,4 +1,7 @@
 // iOS: the microphone is an AVAudioSession input route (see AudioRoute.h).
+// No "using namespace juce": CoreAudio's AudioBuffer struct would clash with
+// juce::AudioBuffer (the desktop's .mm files do the same).
+#define DONT_SET_USING_JUCE_NAMESPACE 1
 #include "AudioRoute.h"
 #import <AVFoundation/AVFoundation.h>
 

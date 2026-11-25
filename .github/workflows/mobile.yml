@@ -87,6 +87,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
+      - name: Host packages for juceaide
+        # JUCE builds its helper tool (juceaide) for the Linux host first; it
+        # needs the same headers as the desktop Linux build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfreetype-dev libfontconfig1-dev libasound2-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxrender-dev
       - name: Pick the installed NDK
         run: |
           ndk="${ANDROID_NDK_HOME:-}"
@@ -172,7 +181,9 @@ jobs:
         run: |
           xcodebuild -project build-ios/SpectroCraftMobile.xcodeproj -scheme SpectroCraftMobile \
             -configuration Release -sdk iphonesimulator -destination "generic/platform=iOS Simulator" \
-            CODE_SIGNING_ALLOWED=NO build | tail -n 30
+            CODE_SIGNING_ALLOWED=NO build > build-ios/xcodebuild.log 2>&1 \
+            || { grep -E -A4 "error:" build-ios/xcodebuild.log | head -150; tail -n 20 build-ios/xcodebuild.log; exit 1; }
+          tail -n 5 build-ios/xcodebuild.log
           app="$(find build-ios -path '*Release-iphonesimulator*' -name '*.app' -maxdepth 6 | head -1)"
           echo "Simulator app: $app"
           mkdir -p out && ditto -c -k --keepParent "$app" out/SpectroCraftMobile-simulator.zip
