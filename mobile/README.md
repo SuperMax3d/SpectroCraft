@@ -123,4 +123,4 @@ the code means a fork or a pull request never reports to them.
 - *Unlimited* recording keeps the take in memory (a quarter of the phone's RAM, at most 1.5 GB: about
   2 hours mono at 48 kHz on a recent phone). The limit is shown while recording.
 - The video's offset comes from the clocks of the first audio and video frames (a few tens of ms).
-- On Android, JUCE needs API 26 (Android 8) or later. iOS 16 or later.
+- Android 10 (API 29) or later: JUCE 9's Android font code needs it. iOS 16 or later.

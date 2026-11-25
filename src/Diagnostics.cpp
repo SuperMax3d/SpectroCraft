@@ -33,7 +33,7 @@
 #else
  #include <cerrno>
  // Android's libc has backtrace() only from API 33; older targets (the mobile
- // app supports API 26+) write the crash report without the stack.
+ // app supports API 29+) write the crash report without the stack.
  #if defined (__ANDROID__) && __ANDROID_API__ < 33
   #define SC_HAVE_BACKTRACE 0
  #else

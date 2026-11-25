@@ -184,8 +184,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build > build-ios/xcodebuild.log 2>&1 \
             || { grep -E -A4 "error:" build-ios/xcodebuild.log | head -150; tail -n 20 build-ios/xcodebuild.log; exit 1; }
           tail -n 5 build-ios/xcodebuild.log
-          app="$(find build-ios -path '*Release-iphonesimulator*' -name '*.app' -maxdepth 6 | head -1)"
+          app="$(find build-ios -type d -name 'SpectroCraft.app' -not -path '*.dSYM*' | head -1)"
           echo "Simulator app: $app"
+          [ -n "$app" ] || { find build-ios -type d -name '*.app' | head; exit 1; }
           mkdir -p out && ditto -c -k --keepParent "$app" out/SpectroCraftMobile-simulator.zip
       - uses: actions/upload-artifact@v4
         with:

@@ -28,7 +28,7 @@ android {
 
     defaultConfig {
         applicationId prop("appId", "com.spectrocraft.mobile")
-        minSdk 26
+        minSdk 29   // JUCE 9's Android font code (AFontMatcher) needs API 29
         targetSdk 35
         versionCode prop("versionCode", "1").toInteger()
         versionName "0.1.0"
@@ -39,7 +39,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared",
-                          "-DANDROID_PLATFORM=android-26",
+                          "-DANDROID_PLATFORM=android-29",
                           "-DSC_MOBILE_APP=ON",
                           "-DSC_SENTRY_DSN=" + prop("sentryDsn", ""),
                           "-DSC_POSTHOG_KEY=" + prop("posthogKey", ""),
