@@ -1,0 +1,105 @@
+// SpectroCraft Mobile - the Android app: JUCE's Java bootstrap classes
+// (com.rmsl.juce.JuceApp / JuceActivity) around the native library that
+// mobile/CMakeLists.txt builds (libjuce_jni.so).
+//
+// Properties (gradle -P...):
+//   appId         application id (default com.spectrocraft.mobile)
+//   versionCode   integer build number (CI: the run number)
+//   ndkVersion    an installed NDK (CI passes the runner's)
+//   abis          comma-separated ABIs (default arm64-v8a; add x86_64 for emulators)
+// Release signing reads SC_KEYSTORE_FILE, SC_KEYSTORE_PASSWORD, SC_KEY_ALIAS and
+// SC_KEY_PASSWORD from the environment; without them the release APK is signed
+// with the debug key (installable by hand, not uploadable to Google Play).
+
+plugins {
+    id "com.android.application"
+}
+
+def juceModules = file("../../../extern/JUCE/modules")
+def prop = { String name, String fallback -> project.hasProperty(name) ? project.property(name).toString() : fallback }
+
+android {
+    namespace "com.spectrocraft.mobile"
+    compileSdk 35
+    ndkVersion prop("ndkVersion", "27.2.12479018")
+
+    defaultConfig {
+        applicationId prop("appId", "com.spectrocraft.mobile")
+        minSdk 26
+        targetSdk 35
+        versionCode prop("versionCode", "1").toInteger()
+        versionName "0.1.0"
+
+        ndk {
+            abiFilters(*prop("abis", "arm64-v8a").split(","))
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DANDROID_PLATFORM=android-26",
+                          "-DSC_MOBILE_APP=ON"
+                targets "SpectroCraftMobile"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("../../CMakeLists.txt")
+            version "3.22.1+"
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += [
+                "${juceModules}/juce_core/native/javacore/init",
+                "${juceModules}/juce_core/native/javacore/app",
+                "${juceModules}/juce_gui_basics/native/javaopt/app",
+            ]
+        }
+    }
+
+    signingConfigs {
+        release {
+            def ks = System.getenv("SC_KEYSTORE_FILE")
+            if (ks != null && file(ks).exists()) {
+                storeFile file(ks)
+                storePassword System.getenv("SC_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("SC_KEY_ALIAS")
+                keyPassword System.getenv("SC_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            def ks = System.getenv("SC_KEYSTORE_FILE")
+            signingConfig (ks != null && file(ks).exists()) ? signingConfigs.release : signingConfigs.debug
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Release"
+                }
+            }
+        }
+        debug {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Debug"
+                }
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+}

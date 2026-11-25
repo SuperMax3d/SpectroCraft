@@ -1682,6 +1682,21 @@ whole file (and fits it to view); double-clicking inside a marker region still
 selects just that marker's range. Both right-click context menus also gained a
 **Select All** item (same action as Ctrl+A).
 
+### Camera without sound: `JUCE_CAMERA_RECORD_AUDIO` in vendored JUCE
+
+SpectroCraft Mobile (`mobile/`, issue #73) films next to its own calibrated
+microphone recording. JUCE's `CameraDevice` always adds the microphone to the
+movie (Android `MediaRecorder.setAudioSource`, iOS an audio input in the
+`AVCaptureSession`), which would fight the app's audio input for the device
+(on iOS the capture session also reconfigures the app's audio session). With
+`JUCE_CAMERA_RECORD_AUDIO=0` (set by `mobile/CMakeLists.txt` only) the camera
+records the picture alone; the default keeps JUCE's behaviour:
+
+- `extern/JUCE/modules/juce_video/native/juce_CameraDevice_android.h`
+- `extern/JUCE/modules/juce_video/native/juce_CameraDevice_ios.h`
+
+Both are marked with a `SPECTROCRAFT PATCH` comment; re-apply if JUCE is updated.
+
 ### Snapshot overlays: dangling-else fix in `FFTAnalysisView::paint`
 
 Stored snapshot curves were silently not drawn in **FFT Linear** and

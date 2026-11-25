@@ -115,6 +115,7 @@ struct CameraDevice::Pimpl
              jassert (granted);
          }];
 
+       #if ! defined (JUCE_CAMERA_RECORD_AUDIO) || JUCE_CAMERA_RECORD_AUDIO   // SPECTROCRAFT PATCH (see below)
         [AVCaptureDevice requestAccessForMediaType: AVMediaTypeAudio
                                  completionHandler: ^([[maybe_unused]] BOOL granted)
          {
@@ -122,6 +123,7 @@ struct CameraDevice::Pimpl
              // silence will be produced otherwise!
              jassert (granted);
          }];
+       #endif
 
         captureSession.startSessionForDeviceWithId (cameraId);
     }
@@ -441,6 +443,11 @@ private:
                                     return;
                                 }
 
+                                // SPECTROCRAFT PATCH: JUCE_CAMERA_RECORD_AUDIO=0 records the picture only
+                                // (SpectroCraft Mobile captures the microphone itself, calibrated;
+                                // an audio input here would also let the capture session
+                                // reconfigure the app's audio session).
+                               #if ! defined (JUCE_CAMERA_RECORD_AUDIO) || JUCE_CAMERA_RECORD_AUDIO
                                 // ... so add audio explicitly here
                                 error = addInputToDevice (audioDevice);
 
@@ -454,6 +461,9 @@ private:
 
                                     return;
                                 }
+                               #else
+                                juce::ignoreUnused (audioDevice);
+                               #endif
 
                                 [captureSession.get() commitConfiguration];
 
