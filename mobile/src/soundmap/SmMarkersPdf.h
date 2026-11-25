@@ -15,7 +15,8 @@ struct Paper
     double widthMm = 215.9, heightMm = 279.4;
 };
 
-/** Letter, or Tabloid when the tag and its white border do not fit on a letter page. */
+/** The smallest of Letter, Tabloid (11 x 17 in) and 12 x 16 in that holds the
+    tag, its white border and the printer's margins across. */
 Paper paperFor (double tagSizeMm);
 
 /** The PDF bytes. False on a bad id or size. */

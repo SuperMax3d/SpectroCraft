@@ -43,6 +43,7 @@ AprilRobotics' `apriltag` (BSD-2, vendored in `extern/apriltag`), small plain C.
 |---|---|---|
 | 160 mm (default) | 77 / 46 / 31 px (1080p), about 2x on 4K | Letter |
 | 200 mm | 97 / 58 / 39 px (1080p) | Tabloid |
+| 230 mm | 111 / 67 / 44 px (1080p) | 12 x 16 in |
 
 - iOS: the app takes the largest still the camera's 1080p video format offers
   (about 4K at the same field of view; a SPECTROCRAFT PATCH in the vendored

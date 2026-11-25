@@ -922,7 +922,9 @@ public:
             expectEquals (okObjects, 4 + 2 * 3);
             // 160 mm = 453.543 pt: the black square
             expect (s.contains ("453.543 453.543 re\nf"), "black square at 160 mm");
-            expect (paperFor (160.0).name == "Letter" && paperFor (200.0).name == "Tabloid");
+            expect (paperFor (160.0).name == "Letter" && paperFor (200.0).name == "Tabloid" && paperFor (230.0).name == "12 x 16 in");
+            expect (markersPdf ({ 5 }, 230.0, paperFor (230.0), mb) && mb.toString().contains ("[0 0 864.000 1152.000]"),
+                    "a 230 mm tag on a 12 x 16 in page");
             expect (! markersPdf ({ 600 }, 160.0, paperFor (160.0), mb), "id out of the family");
             expect (writeMarkersPdf (dir.getChildFile ("tags.pdf"), { 0 }, 160.0));
         }

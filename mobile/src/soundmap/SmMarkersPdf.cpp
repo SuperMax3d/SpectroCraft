@@ -95,7 +95,8 @@ Paper paperFor (double tagSizeMm)
 {
     const double needed = tagSizeMm * 10.0 / 8.0 + 12.0;   // the white border (1 cell a side) and the printer's margins
     if (needed <= 215.9) return { "Letter", 215.9, 279.4 };
-    return { "Tabloid", 279.4, 431.8 };
+    if (needed <= 279.4) return { "Tabloid", 279.4, 431.8 };
+    return { "12 x 16 in", 304.8, 406.4 };   // up to a 234 mm square
 }
 
 bool markersPdf (const std::vector<int>& ids, double S, const Paper& paper, juce::MemoryBlock& out, const juce::String& title)
