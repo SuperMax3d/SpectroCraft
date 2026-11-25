@@ -442,6 +442,7 @@ public:
             float x = 0.0f;
             back.engine.readSamples (0, 1000, 1, &x);
             expectWithinAbsoluteError (x, 0.25f * (float) std::sin (0.1309 * 1000.0), 1e-6f);
+            expect (rec.fileStartTime() == rec.firstFrameTime(), "unlimited: the file starts with the take");
         }
 
         beginTest ("loop: the file keeps the last N seconds, oldest first");
@@ -464,6 +465,9 @@ public:
             for (int64_t i = 0; i < 48000; ++i)
                 if (std::abs (v[(size_t) i] - (float) (first + i) / 1.0e6f) > 1e-6f) { ordered = false; break; }
             expect (ordered, "frames " + juce::String (first) + ".." + juce::String (frame - 1) + " in order");
+            // a video filmed with the take lines up with the file's first frame, not the take's
+            expectWithinAbsoluteError ((double) (rec.fileStartTime().toMilliseconds() - rec.firstFrameTime().toMilliseconds()),
+                                       (double) first / 48.0, 1.0);
         }
 
         beginTest ("the generator plays while the input records (full duplex)");

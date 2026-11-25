@@ -406,12 +406,22 @@ private:
 
             if (--numCaptureSessions == 0)
             {
+                // SPECTROCRAFT PATCH: do not hold the message thread while the
+                // session stops. stopRunning needs the main run loop (the
+                // preview layer), so waiting for it here blocked the app until
+                // AVFoundation's own timeout, about 10 s on iOS 26 / 27. Wait
+                // only for the blocks queued before this one (they use `this`),
+                // then stop a retained session on the queue.
+                AVCaptureSession* session = [captureSession.get() retain];
+
                 dispatch_async (captureSessionQueue, ^
                                 {
-                                    if (captureSession.get().running)
-                                        [captureSession.get() stopRunning];
+                                    sessionClosedEvent.signal();   // `this` is not used after this line
 
-                                    sessionClosedEvent.signal();
+                                    if (session.running)
+                                        [session stopRunning];
+
+                                    [session release];
                                 });
 
                 sessionClosedEvent.wait (-1);

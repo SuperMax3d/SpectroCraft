@@ -8,6 +8,7 @@
 #include "TimeFormat.h"
 #include "TimeViewport.h"
 #include "VideoCapture.h"
+#include "VideoSync.h"
 
 namespace scm
 {
@@ -81,6 +82,10 @@ MainScreen::MainScreen (AppContext& c)
     for (auto* comp : std::initializer_list<juce::Component*> { &recordButton, &playButton, &stopButton,
                                                                 &videoButton, &modeBox, &timeLabel, &meter })
         addAndMakeVisible (comp);
+    addChildComponent (videoPane);
+    videoPane.setCollapsed (ctx.props.getBoolValue ("videoCollapsed", false));
+    videoPane.onCollapsedChanged = [this] (bool hidden) { ctx.props.setValue ("videoCollapsed", hidden); };
+    videoPane.onLayoutChanged = [this] { resized(); };
 
     filesPane = std::make_unique<FilesPane> (ctx);
     analysisPane = std::make_unique<AnalysisPane> (ctx.document, ctx.view);
@@ -142,6 +147,7 @@ MainScreen::MainScreen (AppContext& c)
     selectTab (ctx.props.getIntValue ("tab", Analysis));
     setLayout ((Layout) ctx.props.getIntValue ("layout", 0));
     updateTransport();
+    refreshVideo();
     startTimerHz (30);
 }
 
@@ -154,6 +160,8 @@ MainScreen::~MainScreen()
     ctx.recorder.onUpdate = nullptr;
     ctx.recorder.onAutoStop = nullptr;
     ctx.audio.setPlaybackSource (nullptr);
+    videoPane.onLayoutChanged = nullptr;
+    videoPane.setLive (nullptr);
 }
 
 void MainScreen::audioReady (const juce::String& error)
@@ -176,6 +184,7 @@ void MainScreen::suspended()
         {
             videoButton.setToggleState (false, juce::dontSendNotification);
             toggleVideo();
+            ctx.video.close (true);   // now: timers wait in the background
         }
     }
 }
@@ -192,6 +201,8 @@ void MainScreen::documentReplaced()
     waveform.setChannel (0);
     spectrogram.setChannel (0);
     updateTransport();
+    if (! ctx.recorder.isRecording()) reviewMovie = true;   // an opened file shows its own movie
+    refreshVideo();
     resized();
 }
 
@@ -206,6 +217,7 @@ void MainScreen::changeListenerCallback (juce::ChangeBroadcaster*)
         waveform.contentChanged();
     }
     updateTransport();
+    refreshVideo();   // the take's movie is linked when it is saved
 }
 
 void MainScreen::timerCallback()
@@ -228,6 +240,9 @@ void MainScreen::timerCallback()
         updateTransport();
     }
     wasPlaying = playing;
+
+    if (videoPane.isVisible())
+        videoPane.sync (ctx.document.playhead(), playing);
 }
 
 void MainScreen::toggleRecord()
@@ -257,6 +272,8 @@ void MainScreen::startRecording()
     const bool withVideo = videoButton.getToggleState() && ctx.video.isOpen();
     if (withVideo)
         ctx.video.start (VideoCapture::movieFileFor (ctx.recorder.targetFile()));
+    reviewMovie = false;
+    refreshVideo();
     telemetry::capture ("recording_started", { { "mode", mode == 1 ? "unlimited" : "loop" },
                                                { "loop_s", mode == 1 ? 0 : mode },
                                                { "channels", ctx.audio.numInputs() },
@@ -278,8 +295,9 @@ void MainScreen::stopRecording()
     {
         if (movie != juce::File())
         {
+            // the file's first frame: a wrapped loop dropped its start
             const double offset = (double) (ctx.video.firstFrameTime().toMilliseconds()
-                                            - ctx.recorder.firstFrameTime().toMilliseconds()) / 1000.0;
+                                            - ctx.recorder.fileStartTime().toMilliseconds()) / 1000.0;
             ctx.document.linkVideo (movie, offset);
         }
     });
@@ -298,8 +316,11 @@ void MainScreen::stopRecording()
         telemetry::reportError ("recording: the take could not be saved");
         showMessage ("Recording", err);
     }
+    if (! videoButton.getToggleState() && ctx.video.isOpen())
+        ctx.video.close();   // Video was turned off during the take: the filming ends with it
     if (filesPane) filesPane->refresh();
     updateTransport();
+    refreshVideo();
 }
 
 void MainScreen::togglePlay()
@@ -319,6 +340,8 @@ void MainScreen::togglePlay()
     else if (ctx.document.playhead() >= ctx.document.duration() - 1e-3)
         eng.setPosition (0.0);
     eng.play();
+    reviewMovie = true;
+    refreshVideo();
     updateTransport();
 }
 
@@ -330,6 +353,8 @@ void MainScreen::stopPlayback()
         const auto sel = ctx.document.selection();
         ctx.document.setPlayhead (sel.isEmpty() ? 0.0 : sel.getStart());
     }
+    reviewMovie = false;
+    refreshVideo();
     updateTransport();
 }
 
@@ -337,6 +362,7 @@ void MainScreen::toggleVideo()
 {
     if (videoButton.getToggleState())
     {
+        reviewMovie = false;   // the camera's picture, to frame the next take
         ctx.video.open ([this] (juce::String err)
         {
             telemetry::capture ("video_enabled", { { "ok", err.isEmpty() } });
@@ -345,18 +371,31 @@ void MainScreen::toggleVideo()
                 telemetry::reportError ("video: the camera did not open");
                 videoButton.setToggleState (false, juce::dontSendNotification);
                 showMessage ("Video", err);
-                return;
             }
-            videoPreview = ctx.video.preview();
-            if (videoPreview != nullptr) addAndMakeVisible (videoPreview);
-            resized();
+            refreshVideo();
         });
     }
-    else
+    else if (! ctx.video.isRecording())
     {
-        if (videoPreview != nullptr) removeChildComponent (videoPreview);
-        videoPreview = nullptr;
-        if (! ctx.video.isRecording()) ctx.video.close();
+        // The preview goes now; the camera stops a moment later (VideoCapture::close).
+        videoPane.setLive (nullptr);
+        ctx.video.close();
+    }
+    refreshVideo();
+}
+
+void MainScreen::refreshVideo()
+{
+    const bool rec = ctx.recorder.isRecording();
+    const auto movie = ctx.document.linkedVideo();
+    videoPane.setMovie (! rec && movie.existsAsFile() ? movie : juce::File(), ctx.document.linkedVideoOffset());
+    videoPane.setLive (videoButton.getToggleState() && ctx.video.isOpen() ? ctx.video.preview() : nullptr);
+    videoPane.setPreferMovie (reviewMovie);
+    videoPane.setFilming (ctx.video.isRecording());
+    const bool show = videoPane.hasContent();
+    if (show != videoPane.isVisible())
+    {
+        videoPane.setVisible (show);
         resized();
     }
 }
@@ -505,8 +544,15 @@ void MainScreen::resized()
     videoButton.setBounds (tr.removeFromRight (unit)); tr.removeFromRight (4);
     modeBox.setBounds (tr.reduced (0, 2));
 
-    // views
+    // views: the video first (its own part, sized to the picture), then the
+    // waveform and the spectrogram
     auto views = r.reduced (0, 2);
+    if (videoPane.isVisible())
+    {
+        const auto split = video::split (views, videoPane.pictureAspect(), videoPane.isCollapsed());
+        videoPane.setBounds (split.pane);
+        views = split.rest;
+    }
     if (layout == Layout::Both)
     {
         waveform.setBounds (views.removeFromTop ((int) (views.getHeight() * 0.23)));
@@ -515,12 +561,5 @@ void MainScreen::resized()
     }
     else if (layout == Layout::Waveform) waveform.setBounds (views);
     else spectrogram.setBounds (views);
-
-    if (videoPreview != nullptr)
-    {
-        const int w = std::min (180, views.getWidth() / 3);
-        videoPreview->setBounds (views.getRight() - w - 6, views.getY() + 26, w, w * 9 / 16);
-        videoPreview->toFront (false);
-    }
 }
 } // namespace scm

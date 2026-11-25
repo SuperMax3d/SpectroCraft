@@ -46,6 +46,10 @@ public:
     /** Wall-clock time of the first recorded frame: lines a video up with
         the audio (CameraDevice reports its first frame the same way). */
     juce::Time firstFrameTime() const noexcept { return firstFrameWall; }
+    /** Wall-clock time of the saved file's first frame: later than
+        firstFrameTime() when a loop wrapped (the file keeps the last N
+        seconds). Valid after stop(). */
+    juce::Time fileStartTime() const noexcept;
 
     /** Moves the captured frames into the document now (the timer does it at
         30 Hz; tests call it directly). */

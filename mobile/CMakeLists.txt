@@ -158,6 +158,7 @@ set (SC_MOBILE_SOURCES
     src/EditPane.cpp
     src/FilesPane.cpp
     src/VideoCapture.cpp
+    src/VideoPane.cpp
     src/Telemetry.cpp
     src/MainScreen.cpp)
 
@@ -263,6 +264,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
     juce_add_console_app (SpectroCraftMobileTests PRODUCT_NAME "SpectroCraftMobileTests")
     target_sources (SpectroCraftMobileTests PRIVATE
         tests/MobileTests.cpp
+        tests/VideoTests.cpp
         src/SignalSource.cpp
         src/StoredPlots.cpp
         src/Calibration.cpp

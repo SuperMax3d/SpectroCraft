@@ -19,7 +19,7 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 | Analysis | *Analyse* tab: FFT Linear, FFT Log and 1/3 octave of the selection (the visible range when nothing is selected, the last second while recording), with RMS and peak, through the desktop's `sc::measures`. *Store* keeps the curve (8 slots); stored plots are saved in the file. |
 | Generator | *Generate* tab: manual tone, linear or log sweep (repeating or one-shot), white / pink / brown / custom noise (slope in dB/octave, band edges). It plays while recording. Level = RMS dBFS. |
 | Editing | *Edit* tab: delete the selection, change its gain (or the whole file's), undo / redo; display options (log / linear frequency, dB range, channel). |
-| Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. |
+| Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. The picture gets its own part of the screen beside the waveform and spectrogram (a column for a portrait picture, a strip on top for a landscape one; a tap on its title row hides it). With *Video* on it shows the camera; *Play* shows the take's movie in step with the sound, and *Stop* goes back to the camera. A file opened with a movie shows it. |
 
 ## Crash reports and statistics
 

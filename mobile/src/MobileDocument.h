@@ -80,6 +80,8 @@ public:
     // ---- video linked to the recording
     void linkVideo (const juce::File& movie, double offsetSecs);
     juce::File linkedVideo() const;
+    /** Document time of the linked video's first frame (0 without one). */
+    double linkedVideoOffset() const;
 
     /** Call after the stored plots change: they go into the metadata. */
     void plotsChanged();

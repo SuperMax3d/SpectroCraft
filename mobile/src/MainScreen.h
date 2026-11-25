@@ -19,6 +19,7 @@
 #include "GeneratorPane.h"
 #include "InputPane.h"
 #include "SpectrogramPane.h"
+#include "VideoPane.h"
 #include "WaveformPane.h"
 
 namespace scm
@@ -66,6 +67,8 @@ private:
     void togglePlay();
     void stopPlayback();
     void toggleVideo();
+    /** The video pane follows the camera, the open file's movie and the transport. */
+    void refreshVideo();
     void selectTab (int t);
     void setLayout (Layout l);
     void updateTransport();
@@ -102,7 +105,8 @@ private:
     bool panelOpen = true;
     bool wasPlaying = false;   // to notice the engine stopping at the end
     juce::BorderSize<int> appliedInsets;   // the safe area the layout used
-    juce::Component* videoPreview = nullptr;
+    VideoPane videoPane;
+    bool reviewMovie = false;   // Play shows the take's movie instead of the live camera; Stop goes back
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainScreen)
 };

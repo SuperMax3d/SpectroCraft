@@ -333,6 +333,12 @@ juce::File MobileDocument::linkedVideo() const
     return current->videoTracks.front().file;
 }
 
+double MobileDocument::linkedVideoOffset() const
+{
+    if (current == nullptr || current->videoTracks.empty()) return 0.0;
+    return current->videoTracks.front().offsetSecs;
+}
+
 void MobileDocument::plotsChanged()
 {
     if (current == nullptr) return;

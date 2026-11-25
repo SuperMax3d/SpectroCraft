@@ -1,4 +1,5 @@
 #include "Recorder.h"
+#include <cmath>
 #include "LiveAudio.h"
 #include "MobileDocument.h"
 
@@ -28,6 +29,12 @@ double Recorder::maxSeconds() const
 double Recorder::elapsed() const
 {
     return rate > 0.0 ? (double) plan.written / rate : 0.0;
+}
+
+juce::Time Recorder::fileStartTime() const noexcept
+{
+    const double dropped = rate > 0.0 ? (double) plan.droppedAtStop() / rate : 0.0;
+    return juce::Time (firstFrameWall.toMilliseconds() + (juce::int64) std::llround (dropped * 1000.0));
 }
 
 double Recorder::writeHeadSeconds() const
