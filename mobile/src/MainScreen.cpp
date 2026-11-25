@@ -60,6 +60,36 @@ MainScreen::MainScreen (AppContext& c)
     };
     for (auto* b : { &layoutW, &layoutS, &layoutWS, &saveButton }) addAndMakeVisible (b);
 
+    // tablet top bar (applyPanels shows them in the tablet form only)
+    panelsButton.onClick = [this] { togglePanels(); };
+    undoButton.onClick = [this] { runCommand (screen::Command::Undo); };
+    redoButton.onClick = [this] { runCommand (screen::Command::Redo); };
+    for (auto* b : { &panelsButton, &undoButton, &redoButton }) addChildComponent (b);
+
+    // tablet splitters: drag to share the room, double tap for the default
+    panelsSplitter.onDrag = [this] (int pos) { screen::dragPanelsSplitter (tablet, safeBounds(), form, pos); resized(); };
+    groupSplitter.onDrag = [this] (int pos) { screen::dragGroupSplitter (tablet, safeBounds(), form, pos); resized(); };
+    panelsSplitter.onDragEnd = groupSplitter.onDragEnd = [this] { saveTabletState(); };
+    panelsSplitter.onDoubleTap = [this]
+    {
+        if (form == screen::Form::TabletLandscape) tablet.landscapeColumn = screen::TabletState::kDefaultLandscapeColumn;
+        else tablet.portraitPanels = screen::TabletState::kDefaultPortraitPanels;
+        saveTabletState();
+        resized();
+    };
+    groupSplitter.onDoubleTap = [this]
+    {
+        if (form == screen::Form::TabletLandscape) tablet.landscapeSplit = screen::TabletState::kDefaultLandscapeSplit;
+        else tablet.portraitSplit = screen::TabletState::kDefaultPortraitSplit;
+        saveTabletState();
+        resized();
+    };
+    addChildComponent (panelsSplitter);
+    addChildComponent (groupSplitter);
+
+    // a hardware keyboard's shortcuts reach the screen (keyPressed)
+    setWantsKeyboardFocus (true);
+
     addAndMakeVisible (waveform);
     addAndMakeVisible (spectrogram);
 
@@ -115,7 +145,7 @@ MainScreen::MainScreen (AppContext& c)
     };
 
     const char* names[] = { "Files", "Analyse", "Generate", "Calibrate", "Input", "Edit" };
-    for (int t = 0; t < NumTabs; ++t)
+    for (int t = 0; t < screen::NumTabs; ++t)
     {
         auto* b = tabButtons.add (new juce::TextButton (names[t]));
         b->setClickingTogglesState (false);
@@ -150,7 +180,8 @@ MainScreen::MainScreen (AppContext& c)
         showMessage ("Recording", msg);
     };
 
-    selectTab (ctx.props.getIntValue ("tab", Analysis));
+    loadTabletState();
+    selectTab (ctx.props.getIntValue ("tab", screen::Analysis));
     setLayout ((Layout) ctx.props.getIntValue ("layout", 0));
     updateTransport();
     refreshVideo();
@@ -235,6 +266,15 @@ void MainScreen::timerCallback()
     // The safe area can change after the first layout (see SafeArea.h).
     if (safearea::insetsFor (*this) != appliedInsets)
         resized();
+
+    // A hardware keyboard's keys go to the focused component and up to its
+    // parents: keep the focus inside the screen when nothing holds it (a text
+    // field keeps it while it is edited). Not over a menu or a message box,
+    // nor when the app is in the background: on the desktop that would raise
+    // the window.
+    if (juce::Component::getCurrentlyFocusedComponent() == nullptr && isShowing()
+        && juce::Component::getNumCurrentlyModalComponents() == 0 && juce::Process::isForegroundProcess())
+        grabKeyboardFocus();
 
     // Follow the playhead while playing. The engine stops by itself at the end
     // of the file; the playhead then stays there and the next Play starts over.
@@ -422,6 +462,8 @@ void MainScreen::updateTransport()
     stopButton.setEnabled (audio && ! rec);
     modeBox.setEnabled (! rec);
     saveButton.setEnabled (audio && ! rec);
+    undoButton.setEnabled (audio && ! rec && ctx.document.canUndo());
+    redoButton.setEnabled (audio && ! rec && ctx.document.canRedo());
     for (auto* b : tabButtons) b->setEnabled (true);
 
     juce::String t;
@@ -449,34 +491,181 @@ juce::Component* MainScreen::tabContent (int t)
 {
     switch (t)
     {
-        case Files:     return filesPane.get();
-        case Analysis:  return analysisPane.get();
-        case Generator: return generatorPane.get();
-        case Calibrate: return calibrationPane.get();
-        case Input:     return inputPane.get();
-        case Edit:      return editPane.get();
-        default:        return nullptr;
+        case screen::Files:     return filesPane.get();
+        case screen::Analysis:  return analysisPane.get();
+        case screen::Generator: return generatorPane.get();
+        case screen::Calibrate: return calibrationPane.get();
+        case screen::Input:     return inputPane.get();
+        case screen::Edit:      return editPane.get();
+        default:                return nullptr;
     }
+}
+
+bool MainScreen::panelShown (int t) const
+{
+    if (screen::isTablet (form))
+        return tablet.panelsVisible && tablet.tab[screen::groupOf (t)] == t;
+    return panelOpen && t == currentTab;
+}
+
+void MainScreen::applyPanels()
+{
+    const bool isTablet = screen::isTablet (form);
+    for (int i = 0; i < screen::NumTabs; ++i)
+    {
+        const bool shown = panelShown (i);
+        tabButtons[i]->setToggleState (shown, juce::dontSendNotification);
+        tabButtons[i]->setVisible (! isTablet || tablet.panelsVisible);
+        if (auto* c = tabContent (i))
+        {
+            if (shown && c->getParentComponent() != this) addAndMakeVisible (c);
+            else if (! shown && c->getParentComponent() == this) removeChildComponent (c);
+        }
+    }
+    for (auto* b : { &panelsButton, &undoButton, &redoButton }) b->setVisible (isTablet);
+    panelsButton.setToggleState (tablet.panelsVisible, juce::dontSendNotification);
+    panelsSplitter.setVisible (isTablet && tablet.panelsVisible);
+    groupSplitter.setVisible (isTablet && tablet.panelsVisible);
+    if (panelShown (screen::Input)) inputPane->refresh();
 }
 
 void MainScreen::selectTab (int t)
 {
-    t = juce::jlimit (0, NumTabs - 1, t);
-    if (t == currentTab && panelOpen && getWidth() > 0) panelOpen = false;   // tap again: hide the panel
-    else panelOpen = true;
-    currentTab = t;
-    ctx.props.setValue ("tab", t);
-    for (int i = 0; i < NumTabs; ++i)
+    t = juce::jlimit (0, screen::NumTabs - 1, t);
+    if (screen::isTablet (form))
     {
-        tabButtons[i]->setToggleState (panelOpen && i == currentTab, juce::dontSendNotification);
-        if (auto* c = tabContent (i))
-        {
-            if (i == currentTab && panelOpen) addAndMakeVisible (c);
-            else removeChildComponent (c);
-        }
+        screen::tapTab (tablet, t);   // each group keeps a panel open
+        saveTabletState();
     }
-    if (t == Input && panelOpen) inputPane->refresh();
+    else
+    {
+        if (t == currentTab && panelOpen && getWidth() > 0) panelOpen = false;   // tap again: hide the panel
+        else panelOpen = true;
+        currentTab = t;
+        ctx.props.setValue ("tab", t);
+    }
+    applyPanels();
     resized();
+}
+
+void MainScreen::showTab (int t)
+{
+    t = juce::jlimit (0, screen::NumTabs - 1, t);
+    currentTab = t;
+    panelOpen = true;
+    screen::tapTab (tablet, t);
+    applyPanels();
+    resized();
+}
+
+void MainScreen::togglePanels()
+{
+    if (screen::isTablet (form))
+    {
+        tablet.panelsVisible = ! tablet.panelsVisible;
+        saveTabletState();
+        telemetry::capture ("tablet_panels", { { "visible", tablet.panelsVisible } });
+    }
+    else
+        panelOpen = ! panelOpen;
+    applyPanels();
+    resized();
+}
+
+void MainScreen::loadTabletState()
+{
+    auto& p = ctx.props;
+    for (int g = 0; g < 2; ++g)
+    {
+        const int t = p.getIntValue ("tabletTab" + juce::String (g), tablet.tab[g]);
+        if (juce::isPositiveAndBelow (t, (int) screen::NumTabs) && screen::groupOf (t) == g) tablet.tab[g] = t;
+    }
+    tablet.panelsVisible = p.getBoolValue ("tabletPanels", true);
+    const auto fraction = [&p] (const char* key, double def)
+    {
+        const double v = p.getDoubleValue (key, def);
+        return v > 0.0 && v < 1.0 ? v : def;
+    };
+    tablet.landscapeColumn = fraction ("tabletLandscapeColumn", screen::TabletState::kDefaultLandscapeColumn);
+    tablet.landscapeSplit = fraction ("tabletLandscapeSplit", screen::TabletState::kDefaultLandscapeSplit);
+    tablet.portraitPanels = fraction ("tabletPortraitPanels", screen::TabletState::kDefaultPortraitPanels);
+    tablet.portraitSplit = fraction ("tabletPortraitSplit", screen::TabletState::kDefaultPortraitSplit);
+}
+
+void MainScreen::saveTabletState()
+{
+    auto& p = ctx.props;
+    p.setValue ("tabletTab0", tablet.tab[0]);
+    p.setValue ("tabletTab1", tablet.tab[1]);
+    p.setValue ("tabletPanels", tablet.panelsVisible);
+    p.setValue ("tabletLandscapeColumn", tablet.landscapeColumn);
+    p.setValue ("tabletLandscapeSplit", tablet.landscapeSplit);
+    p.setValue ("tabletPortraitPanels", tablet.portraitPanels);
+    p.setValue ("tabletPortraitSplit", tablet.portraitSplit);
+}
+
+bool MainScreen::keyPressed (const juce::KeyPress& key)
+{
+    const auto c = screen::commandForKey (key);
+    if (c == screen::Command::None) return false;
+    runCommand (c);
+    return true;
+}
+
+void MainScreen::runCommand (screen::Command c)
+{
+    using C = screen::Command;
+    const bool rec = ctx.recorder.isRecording();
+    const bool audio = ctx.document.hasAudio();
+    // While recording, the take owns the document: only the transport, the
+    // zoom and the panels answer.
+    if (rec && c != C::Stop && c != C::Record && c != C::ZoomIn && c != C::ZoomOut
+            && c != C::ZoomAll && c != C::TogglePanels)
+        return;
+    const auto edit = [] (const char* box, bool ok, const juce::String& err, const char* op)
+    {
+        if (! ok && err.isNotEmpty()) showMessage (box, err);
+        else if (ok) telemetry::capture ("edit", { { "op", op }, { "from", "keyboard" } });
+    };
+    const auto anchor = [this]
+    {
+        const double t = ctx.document.playhead();
+        return t >= ctx.view.start() && t <= ctx.view.end() ? t : ctx.view.start() + ctx.view.span() * 0.5;
+    };
+    switch (c)
+    {
+        case C::PlayPause: togglePlay(); break;
+        case C::Stop:      if (rec) stopRecording(); else stopPlayback(); break;
+        case C::Record:    toggleRecord(); break;
+        case C::GoToStart:
+        case C::GoToEnd:
+            if (audio)
+            {
+                const double t = c == C::GoToStart ? 0.0 : ctx.document.duration();
+                ctx.document.setPlayhead (t);
+                if (t < ctx.view.start() || t > ctx.view.end())
+                    ctx.view.setRange (t - (c == C::GoToEnd ? ctx.view.span() : 0.0), t + (c == C::GoToStart ? ctx.view.span() : 0.0));
+            }
+            break;
+        case C::SelectAll:      if (audio) ctx.document.setSelection ({ 0.0, ctx.document.duration() }); break;
+        case C::ClearSelection: ctx.document.setSelection ({}); break;
+        case C::Delete:
+            if (audio && ! ctx.document.selection().isEmpty())
+            {
+                juce::String err;
+                edit ("Delete", ctx.document.deleteSelection (err), err, "delete");
+            }
+            break;
+        case C::Undo: if (audio && ctx.document.undo()) telemetry::capture ("edit", { { "op", "undo" } }); break;
+        case C::Redo: if (audio && ctx.document.redo()) telemetry::capture ("edit", { { "op", "redo" } }); break;
+        case C::Save: if (audio) saveButton.triggerClick(); break;
+        case C::ZoomIn:  ctx.view.zoom (anchor(), 2.0); break;
+        case C::ZoomOut: ctx.view.zoom (anchor(), 0.5); break;
+        case C::ZoomAll: ctx.view.showAll(); break;
+        case C::TogglePanels: togglePanels(); break;
+        case C::None: break;
+    }
+    updateTransport();
 }
 
 void MainScreen::setLayout (Layout l)
@@ -498,13 +687,45 @@ void MainScreen::setLayout (Layout l)
 void MainScreen::paint (juce::Graphics& g)
 {
     g.fillAll (style::appBackground);
+    if (! screen::isTablet (form) || ! tablet.panelsVisible) return;
+    // the panel groups, framed like the desktop's docked groups: a tab strip
+    // on a darker bar above each panel
+    for (int i = 0; i < 2; ++i)
+    {
+        g.setColour (style::barBackground);
+        g.fillRect (frame.tabs[i]);
+        g.setColour (style::panelBackground);
+        g.fillRect (frame.panel[i]);
+        g.setColour (style::border);
+        g.drawRect (frame.tabs[i].getUnion (frame.panel[i]), 1);
+    }
 }
 
 void MainScreen::resized()
 {
     // notch or Dynamic Island, status bar, home indicator (see SafeArea.h)
     appliedInsets = safearea::insetsFor (*this);
-    auto r = appliedInsets.subtractedFrom (getLocalBounds());
+    const auto r = safeBounds();
+    if (const auto f = screen::formFor (r); f != form)
+    {
+        form = f;
+        applyPanels();
+    }
+    static bool reported = false;   // the form the app starts in, once per launch
+    if (! reported && ! r.isEmpty())
+    {
+        reported = true;
+        telemetry::capture ("screen_form", { { "form", form == screen::Form::Phone ? "phone"
+                                                     : form == screen::Form::TabletLandscape ? "tablet_landscape"
+                                                                                              : "tablet_portrait" } });
+    }
+    if (screen::isTablet (form)) layoutTablet (r);
+    else layoutPhone (r);
+    repaint();
+}
+
+void MainScreen::layoutPhone (juce::Rectangle<int> r)
+{
     const bool landscape = r.getWidth() > r.getHeight() * 1.2;
 
     // top bar
@@ -535,14 +756,75 @@ void MainScreen::resized()
     // tabs
     {
         auto t = tabsArea.reduced (2, 2);
-        const int w = t.getWidth() / NumTabs;
-        for (int tab : kTabOrder) tabButtons[tab]->setBounds (t.removeFromLeft (w).reduced (1, 0));
+        const int w = t.getWidth() / screen::NumTabs;
+        for (int tab : screen::kPhoneTabOrder) tabButtons[tab]->setBounds (t.removeFromLeft (w).reduced (1, 0));
     }
     if (auto* c = tabContent (currentTab); c != nullptr && panelOpen)
         c->setBounds (panelArea);
 
-    // transport: buttons, then the time and the input meter
-    auto tr = r.removeFromBottom (style::kTouch + 34).reduced (style::kGap, 3);
+    layoutTransport (r.removeFromBottom (screen::transportHeight (false)).reduced (style::kGap, 3), false);
+    layoutViews (r);
+}
+
+void MainScreen::layoutTablet (juce::Rectangle<int> r)
+{
+    frame = screen::tabletFrame (r, form, tablet);
+
+    // top bar: [panels] name ... [undo][redo]  [W][S][W+S]  [Save]
+    auto top = frame.topBar.reduced (style::kGap, 3);
+    panelsButton.setBounds (top.removeFromLeft (52));
+    top.removeFromLeft (style::kGap * 2);
+    saveButton.setBounds (top.removeFromRight (72));
+    top.removeFromRight (style::kGap * 2);
+    for (auto* b : { &layoutWS, &layoutS, &layoutW })
+    {
+        b->setBounds (top.removeFromRight (b == &layoutWS ? 56 : 44));
+        top.removeFromRight (2);
+    }
+    top.removeFromRight (style::kGap * 2);
+    redoButton.setBounds (top.removeFromRight (52));
+    top.removeFromRight (2);
+    undoButton.setBounds (top.removeFromRight (52));
+    top.removeFromRight (style::kGap);
+    title.setBounds (top);
+
+    // the two panel groups, each with its tab strip (tabs from the left, as
+    // on the desktop)
+    for (int g = 0; g < 2; ++g)
+    {
+        const auto& tabs = screen::tabsOfGroup (g);
+        auto strip = frame.tabs[g].reduced (3, 3);
+        const int w = std::min (140, strip.getWidth() / (int) tabs.size());
+        for (int t : tabs)
+            tabButtons[t]->setBounds (strip.removeFromLeft (w).reduced (1, 0));
+        if (auto* c = tabContent (tablet.tab[g]); c != nullptr && tablet.panelsVisible)
+            c->setBounds (frame.panel[g].reduced (1, 0).withTrimmedBottom (1));
+    }
+    panelsSplitter.setVertical (form == screen::Form::TabletLandscape);
+    panelsSplitter.setBounds (frame.panelsSplitter);
+    groupSplitter.setVertical (form == screen::Form::TabletPortrait);
+    groupSplitter.setBounds (frame.groupSplitter);
+
+    layoutTransport (frame.transport.reduced (style::kGap, 3), frame.transportSingleRow);
+    layoutViews (frame.views);
+}
+
+void MainScreen::layoutTransport (juce::Rectangle<int> tr, bool singleRow)
+{
+    if (singleRow)
+    {
+        // REC, Play, Stop, mode, Video, then the time and the input meter
+        const int unit = juce::jlimit (72, 104, tr.getWidth() / 11);
+        recordButton.setBounds (tr.removeFromLeft (unit + unit / 3)); tr.removeFromLeft (4);
+        playButton.setBounds (tr.removeFromLeft (unit)); tr.removeFromLeft (4);
+        stopButton.setBounds (tr.removeFromLeft (unit)); tr.removeFromLeft (4);
+        modeBox.setBounds (tr.removeFromLeft (unit * 3 / 2 + 8).reduced (0, 2)); tr.removeFromLeft (4);
+        videoButton.setBounds (tr.removeFromLeft (unit)); tr.removeFromLeft (style::kGap * 2);
+        meter.setBounds (tr.removeFromRight (std::min (360, tr.getWidth() / 2)).withSizeKeepingCentre (std::min (360, tr.getWidth() / 2), 22));
+        timeLabel.setBounds (tr);
+        return;
+    }
+    // the phone's: buttons, then the time and the input meter
     auto status = tr.removeFromBottom (26);
     timeLabel.setBounds (status.removeFromLeft (status.getWidth() / 2));
     meter.setBounds (status.reduced (0, 3));
@@ -553,10 +835,13 @@ void MainScreen::resized()
     stopButton.setBounds (tr.removeFromLeft (unit)); tr.removeFromLeft (4);
     videoButton.setBounds (tr.removeFromRight (unit)); tr.removeFromRight (4);
     modeBox.setBounds (tr.reduced (0, 2));
+}
 
-    // views: the video first (its own part, sized to the picture), then the
+void MainScreen::layoutViews (juce::Rectangle<int> views)
+{
+    // the video first (its own part, sized to the picture), then the
     // waveform and the spectrogram
-    auto views = r.reduced (0, 2);
+    views = views.reduced (0, 2);
     if (videoPane.isVisible())
     {
         const auto split = video::split (views, videoPane.pictureAspect(), videoPane.isCollapsed());

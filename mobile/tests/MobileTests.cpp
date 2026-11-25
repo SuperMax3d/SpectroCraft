@@ -1,5 +1,5 @@
 // SpectroCraft Mobile - unit tests for the app's own logic (generator, loop
-// recording, calibrator, stored plots) and for the file round trip through the
+// recording, calibrator, stored plots, the phone / tablet layout) and for the file round trip through the
 // desktop's FileDoc (calibration, stored plots and the video link must come
 // back as the desktop reads them).
 //
@@ -14,7 +14,9 @@
 #include "FileMeta.h"
 #include "LiveAudio.h"
 #include "MobileDocument.h"
+#include "MobileStyle.h"
 #include "Recorder.h"
+#include "ScreenLayout.h"
 #include "Telemetry.h"
 #include <cmath>
 #include <cstring>
@@ -723,6 +725,178 @@ public:
     }
 };
 
+class ScreenLayoutTests : public juce::UnitTest
+{
+public:
+    ScreenLayoutTests() : juce::UnitTest ("screen layout", "SpectroCraftMobile") {}
+
+    using Form = scm::screen::Form;
+    using Rect = juce::Rectangle<int>;
+
+    /** Every area inside the safe area, none overlapping another, the
+        minimum sizes kept, and the areas cover the safe area. */
+    void checkFrame (Rect safe, Form form, const scm::screen::TabletState& st, const juce::String& what)
+    {
+        namespace s = scm::screen;
+        const auto f = s::tabletFrame (safe, form, st);
+        const std::vector<std::pair<const char*, Rect>> top {
+            { "top bar", f.topBar }, { "views", f.views }, { "transport", f.transport },
+            { "panels", f.panels }, { "panels splitter", f.panelsSplitter } };
+        int area = 0;
+        for (size_t i = 0; i < top.size(); ++i)
+        {
+            expect (safe.contains (top[i].second) || top[i].second.isEmpty(), what + ": " + top[i].first + " inside");
+            area += top[i].second.getWidth() * top[i].second.getHeight();
+            for (size_t j = i + 1; j < top.size(); ++j)
+                expect (! top[i].second.intersects (top[j].second),
+                        what + ": " + top[i].first + " / " + top[j].first + " overlap");
+        }
+        expectEquals (area, safe.getWidth() * safe.getHeight(), what + ": the areas cover the screen");
+        expect (f.views.getWidth() >= s::kMinViewsWidth && f.views.getHeight() >= s::kMinViewsHeight / 2,
+                what + ": room for the views " + f.views.toString());
+        if (! st.panelsVisible)
+        {
+            expect (f.panels.isEmpty() && f.panelsSplitter.isEmpty() && f.groupSplitter.isEmpty(), what + ": no panels");
+            return;
+        }
+        for (int g = 0; g < 2; ++g)
+        {
+            expect (f.panels.contains (f.tabs[g]) && f.panels.contains (f.panel[g]), what + ": group inside the panels");
+            expectEquals (f.tabs[g].getHeight(), scm::style::kTouch, what + ": tab strip height");
+            expect (f.panel[g].getHeight() >= s::kMinPanelHeight * 3 / 4, what + ": panel height " + f.panel[g].toString());
+            expect (f.panel[g].getWidth() >= s::kMinPanelWidth * 3 / 4, what + ": panel width " + f.panel[g].toString());
+            expect (! f.panel[g].intersects (f.groupSplitter) && ! f.tabs[g].intersects (f.groupSplitter),
+                    what + ": group splitter apart");
+        }
+        expect (! f.panel[0].intersects (f.panel[1]) && ! f.tabs[0].intersects (f.panel[1]), what + ": groups apart");
+    }
+
+    void runTest() override
+    {
+        namespace s = scm::screen;
+
+        beginTest ("the form follows the smaller side: phones in both orientations, tablets from 600 points");
+        {
+            expect (s::formFor ({ 0, 0, 390, 844 }) == Form::Phone);
+            expect (s::formFor ({ 0, 0, 932, 430 }) == Form::Phone, "a large phone in landscape");
+            expect (s::formFor ({ 0, 0, 599, 960 }) == Form::Phone);
+            expect (s::formFor ({ 0, 0, 600, 960 }) == Form::TabletPortrait);
+            expect (s::formFor ({ 0, 0, 744, 1133 }) == Form::TabletPortrait, "iPad mini");
+            expect (s::formFor ({ 0, 0, 1180, 820 }) == Form::TabletLandscape, "iPad");
+            expect (s::formFor ({ 0, 0, 1376, 1032 }) == Form::TabletLandscape, "iPad Pro 13");
+            expect (s::formFor ({}) == Form::Phone, "before the first layout");
+        }
+
+        beginTest ("tablet frames: inside the safe area, no overlap, minimum sizes, at any splitter position");
+        {
+            const std::vector<Rect> screens {
+                { 0, 24, 1180, 776 },    // iPad landscape, status bar and home indicator out
+                { 0, 24, 820, 1136 },    // iPad portrait
+                { 0, 24, 744, 1089 },    // iPad mini portrait
+                { 0, 24, 1133, 700 },    // iPad mini landscape
+                { 0, 24, 1376, 988 },    // iPad Pro 13 landscape
+                { 0, 0, 960, 528 },      // small Android tablet landscape, bars out
+                { 0, 0, 600, 912 } };    // small Android tablet portrait
+            for (const auto& sa : screens)
+                for (double fraction : { 0.0, 0.34, 0.5, 1.0 })
+                    for (bool visible : { true, false })
+                    {
+                        s::TabletState st;
+                        st.landscapeColumn = st.landscapeSplit = st.portraitPanels = st.portraitSplit = fraction;
+                        st.panelsVisible = visible;
+                        const auto form = sa.getWidth() > sa.getHeight() ? Form::TabletLandscape : Form::TabletPortrait;
+                        checkFrame (sa, form, st, sa.toString() + " fraction " + juce::String (fraction)
+                                                    + (visible ? "" : " hidden"));
+                    }
+        }
+
+        beginTest ("landscape: the column on the left, the groups stacked; portrait: the groups side by side below");
+        {
+            s::TabletState st;
+            const auto l = s::tabletFrame ({ 0, 0, 1180, 800 }, Form::TabletLandscape, st);
+            expect (l.panels.getX() == 0 && l.views.getX() > l.panels.getRight(), "column left of the views");
+            expect (l.tabs[1].getY() > l.panel[0].getBottom(), "group 1 under group 0");
+            expect (l.transport.getWidth() == 1180 && l.transportSingleRow, "transport along the bottom, one row");
+            const auto p = s::tabletFrame ({ 0, 0, 820, 1160 }, Form::TabletPortrait, st);
+            expect (p.panels.getY() > p.views.getBottom() && p.transport.getY() >= p.views.getBottom()
+                        && p.transport.getBottom() <= p.panels.getY(), "views, transport, then the panels");
+            expect (p.tabs[1].getX() > p.panel[0].getRight(), "group 1 right of group 0");
+            expect (! p.transportSingleRow, "820 points: the phone's two transport rows");
+        }
+
+        beginTest ("a splitter drag moves the bar to the finger, within the limits");
+        {
+            const Rect sa { 0, 0, 1180, 800 };
+            s::TabletState st;
+            s::dragPanelsSplitter (st, sa, Form::TabletLandscape, 500);
+            auto f = s::tabletFrame (sa, Form::TabletLandscape, st);
+            expectEquals (f.panelsSplitter.getCentreX(), 500);
+            s::dragPanelsSplitter (st, sa, Form::TabletLandscape, 5000);
+            f = s::tabletFrame (sa, Form::TabletLandscape, st);
+            expectEquals (f.views.getWidth(), s::kMinViewsWidth, "the views keep their minimum");
+            s::dragPanelsSplitter (st, sa, Form::TabletLandscape, -100);
+            f = s::tabletFrame (sa, Form::TabletLandscape, st);
+            expectEquals (f.panels.getWidth(), s::kMinPanelWidth, "the column keeps its minimum");
+
+            s::dragGroupSplitter (st, sa, Form::TabletLandscape, 300);
+            f = s::tabletFrame (sa, Form::TabletLandscape, st);
+            expectEquals (f.groupSplitter.getCentreY(), 300);
+
+            const Rect sp { 0, 0, 820, 1160 };
+            s::dragPanelsSplitter (st, sp, Form::TabletPortrait, 700);
+            f = s::tabletFrame (sp, Form::TabletPortrait, st);
+            expectEquals (f.panelsSplitter.getCentreY(), 700);
+            s::dragGroupSplitter (st, sp, Form::TabletPortrait, 420);
+            f = s::tabletFrame (sp, Form::TabletPortrait, st);
+            expectEquals (f.groupSplitter.getCentreX(), 420);
+        }
+
+        beginTest ("tabs: two groups as on the desktop; a tap shows the tab in its group and brings the panels back");
+        {
+            for (int t = 0; t < s::NumTabs; ++t)
+            {
+                const auto& g = s::tabsOfGroup (s::groupOf (t));
+                expect (std::find (g.begin(), g.end(), t) != g.end());
+            }
+            expectEquals ((int) (s::tabsOfGroup (0).size() + s::tabsOfGroup (1).size()), (int) s::NumTabs);
+            s::TabletState st;
+            st.panelsVisible = false;
+            s::tapTab (st, s::Generator);
+            expect (st.panelsVisible && st.tab[1] == s::Generator && st.tab[0] == s::Analysis);
+            s::tapTab (st, s::Files);
+            expect (st.tab[0] == s::Files && st.tab[1] == s::Generator, "the other group keeps its panel");
+        }
+
+        beginTest ("hardware keyboard: the desktop's shortcuts");
+        {
+            using K = juce::KeyPress;
+            using C = s::Command;
+            const int cmd = juce::ModifierKeys::commandModifier, shift = juce::ModifierKeys::shiftModifier;
+            expect (s::commandForKey (K (K::spaceKey)) == C::PlayPause);
+            expect (s::commandForKey (K ('.', cmd, 0)) == C::Stop);
+            expect (s::commandForKey (K (K::F10Key, shift, 0)) == C::Record);
+            expect (s::commandForKey (K ('z', cmd, 0)) == C::Undo);
+            expect (s::commandForKey (K ('Z', cmd, 0)) == C::Undo, "letters in either case");
+            expect (s::commandForKey (K ('y', cmd, 0)) == C::Redo);
+            expect (s::commandForKey (K ('z', cmd | shift, 'Z')) == C::Redo);
+            expect (s::commandForKey (K ('s', cmd, 0)) == C::Save);
+            expect (s::commandForKey (K ('a', cmd, 0)) == C::SelectAll);
+            expect (s::commandForKey (K (K::escapeKey)) == C::ClearSelection);
+            expect (s::commandForKey (K (K::backspaceKey)) == C::Delete);
+            expect (s::commandForKey (K (K::deleteKey)) == C::Delete);
+            expect (s::commandForKey (K (K::homeKey)) == C::GoToStart);
+            expect (s::commandForKey (K (K::endKey)) == C::GoToEnd);
+            expect (s::commandForKey (K ('=', cmd, 0)) == C::ZoomIn);
+            expect (s::commandForKey (K ('-', cmd, 0)) == C::ZoomOut);
+            expect (s::commandForKey (K ('0', cmd, 0)) == C::ZoomAll);
+            expect (s::commandForKey (K (K::returnKey, cmd | shift, 0)) == C::TogglePanels);
+            expect (s::commandForKey (K ('z', 0, 'z')) == C::None, "a plain letter does nothing");
+            expect (s::commandForKey (K (K::spaceKey, shift, 0)) == C::None);
+            expect (s::commandForKey (K ('s', cmd | juce::ModifierKeys::altModifier, 0)) == C::None);
+        }
+    }
+};
+
 static GeneratorTests generatorTests;
 static CalibrationTests calibrationTests;
 static StoredPlotsTests storedPlotsTests;
@@ -732,6 +906,7 @@ static RecordingPathTests recordingPathTests;
 static TelemetryTests telemetryTests;
 static PlaybackEndTests playbackEndTests;
 static CropTests cropTests;
+static ScreenLayoutTests screenLayoutTests;
 
 int main()
 {

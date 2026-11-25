@@ -161,6 +161,7 @@ set (SC_MOBILE_SOURCES
     src/VideoCapture.cpp
     src/VideoPane.cpp
     src/Telemetry.cpp
+    src/ScreenLayout.cpp
     src/MainScreen.cpp)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -260,7 +261,7 @@ endif()   # SC_MOBILE_APP
 
 # ---------------------------------------------------------------- unit tests
 # Mobile-only logic (generator, loop buffer, calibrator maths, stored plots,
-# video link) as a console program, built on desktop platforms only.
+# video link, the phone / tablet screen layout) as a console program, built on desktop platforms only.
 if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
     juce_add_console_app (SpectroCraftMobileTests PRODUCT_NAME "SpectroCraftMobileTests")
     target_sources (SpectroCraftMobileTests PRIVATE
@@ -277,6 +278,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         src/Telemetry.cpp
         src/Telemetry_none.cpp
         src/AudioRoute_generic.cpp
+        src/ScreenLayout.cpp
         src/LoopBuffer.h
         ${SC_ENGINE_SOURCES})
     juce_generate_juce_header (SpectroCraftMobileTests)

@@ -95,11 +95,20 @@ public:
         //   SC_MOBILE_OPEN=<wav>          open a file at start
         //   SC_MOBILE_TAB=<0..5>          show a panel (Files, Analyse, Generate, Calibrate, Input, Edit)
         //   SC_MOBILE_SNAPSHOT=<png>      after 2.5 s, write the window to a PNG and quit
-        //   SC_MOBILE_SIZE=<w>x<h>        window size (e.g. 844x390 for landscape)
+        //   SC_MOBILE_KEYS=<k>[;<k>...]   after 1 s, press these keys (juce::KeyPress descriptions)
+        //   SC_MOBILE_SIZE=<w>x<h>        window size (e.g. 844x390: a phone in landscape, 1180x820: an iPad)
         const auto env = [] (const char* n) { return juce::SystemStats::getEnvironmentVariable (n, {}); };
         if (env ("SC_MOBILE_SIZE").containsChar ('x'))
-            mainWindow->setSize (env ("SC_MOBILE_SIZE").upToFirstOccurrenceOf ("x", false, false).getIntValue(),
-                                 env ("SC_MOBILE_SIZE").fromFirstOccurrenceOf ("x", false, false).getIntValue());
+        {
+            const int w = env ("SC_MOBILE_SIZE").upToFirstOccurrenceOf ("x", false, false).getIntValue();
+            const int h = env ("SC_MOBILE_SIZE").fromFirstOccurrenceOf ("x", false, false).getIntValue();
+            mainWindow->setSize (w, h);
+            // A screen too small for the size (an iPad in portrait on a laptop):
+            // the screen component still gets it, past the window's edge, so the
+            // snapshot shows the layout at that size.
+            if (auto* c = mainWindow->getContentComponent(); c != nullptr && (c->getWidth() < w || c->getHeight() < h))
+                c->setSize (w, h);
+        }
         if (env ("SC_MOBILE_OPEN").isNotEmpty())
         {
             juce::String err;
@@ -114,6 +123,15 @@ public:
             const float fx = env ("SC_MOBILE_PRECISE").upToFirstOccurrenceOf (",", false, false).getFloatValue();
             const float fy = env ("SC_MOBILE_PRECISE").fromFirstOccurrenceOf (",", false, false).getFloatValue();
             juce::Timer::callAfterDelay (1500, [screen, fx, fy] { screen->showPreciseAt (fx, fy); });
+        }
+        if (env ("SC_MOBILE_KEYS").isNotEmpty())   // "command + shift + return;spacebar": keys, after 1 s
+        {
+            const auto keys = juce::StringArray::fromTokens (env ("SC_MOBILE_KEYS"), ";", {});
+            juce::Timer::callAfterDelay (1000, [screen, keys]
+            {
+                for (const auto& k : keys)
+                    screen->keyPressed (juce::KeyPress::createFromDescription (k.trim()));
+            });
         }
         if (env ("SC_MOBILE_SNAPSHOT").isNotEmpty())
         {

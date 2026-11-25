@@ -1,5 +1,8 @@
 // SpectroCraft Mobile - the main screen.
 //
+// Phones (MainScreen::layoutPhone): one panel at a time under the views
+// (portrait) or beside them (landscape).
+//
 //   portrait                         landscape
 //   +---------------------------+   +-------------------+-----------+
 //   | file name     W S W+S Save|   | file name       W S W+S Save  |
@@ -9,6 +12,9 @@
 //   | panel (Analysis, ...)     |   +-------------------+-----------+
 //   | Files Edit Analyse Gen ...|
 //   +---------------------------+
+//
+// Tablets (smaller side >= 600 points, MainScreen::layoutTablet): two panel
+// groups shown at once, as in the desktop's left column; see ScreenLayout.h.
 #pragma once
 #include <JuceHeader.h>
 #include "AppContext.h"
@@ -17,8 +23,11 @@
 #include "EditPane.h"
 #include "FilesPane.h"
 #include "GeneratorPane.h"
+#include "IconButton.h"
 #include "InputPane.h"
+#include "ScreenLayout.h"
 #include "SpectrogramPane.h"
+#include "Splitter.h"
 #include "VideoPane.h"
 #include "WaveformPane.h"
 
@@ -44,22 +53,21 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    /** A hardware keyboard: the desktop's shortcuts (screen::commandForKey). */
+    bool keyPressed (const juce::KeyPress&) override;
 
     /** The audio device came up (or changed): refresh the input-dependent panes. */
     void audioReady (const juce::String& error);
     /** App going to the background (iOS / Android). */
     void suspended();
     /** Opens a panel (0 Files, 1 Analyse, 2 Generate, 3 Calibrate, 4 Input, 5 Edit). */
-    void showTab (int t) { panelOpen = false; currentTab = -1; selectTab (t); }
+    void showTab (int t);
     /** Development hook: the analysis mode (0 FFT Linear, 1 FFT Log, 2 1/3 octave). */
     void setAnalysisMode (int m) { analysisPane->setMode (m); }
     void showPreciseAt (float fx, float fy) { spectrogram.showPreciseAt (fx, fy); }
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };
-    enum Tab { Files = 0, Analysis, Generator, Calibrate, Input, Edit, NumTabs };   // saved: keep the numbers
-    /** The tab bar, left to right. */
-    static constexpr int kTabOrder[NumTabs] = { Files, Edit, Analysis, Generator, Calibrate, Input };
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
@@ -77,12 +85,28 @@ private:
     void documentReplaced();
     void zoomToSelection();
     juce::Component* tabContent (int t);
+    /** Shows the panels the form and the state ask for, and their tabs. */
+    void applyPanels();
+    bool panelShown (int t) const;
+    void togglePanels();
+    void runCommand (screen::Command);
+    void layoutPhone (juce::Rectangle<int> r);
+    void layoutTablet (juce::Rectangle<int> r);
+    void layoutTransport (juce::Rectangle<int> r, bool singleRow);
+    void layoutViews (juce::Rectangle<int> views);
+    juce::Rectangle<int> safeBounds() const { return appliedInsets.subtractedFrom (getLocalBounds()); }
+    void loadTabletState();
+    void saveTabletState();
 
     AppContext& ctx;
 
     // top bar
     juce::Label title;
     juce::TextButton layoutW { "W" }, layoutS { "S" }, layoutWS { "W+S" }, saveButton { "Save" };
+    // tablet only: show / hide the panels, undo, redo (the desktop's toolbar)
+    IconButton panelsButton { "Panels", IconButton::Icon::Panels },
+               undoButton { "Undo", IconButton::Icon::Undo },
+               redoButton { "Redo", IconButton::Icon::Redo };
 
     // views
     WaveformPane waveform;
@@ -103,8 +127,15 @@ private:
     std::unique_ptr<InputPane> inputPane;
     std::unique_ptr<EditPane> editPane;
     juce::OwnedArray<juce::TextButton> tabButtons;
-    int currentTab = Analysis;
-    bool panelOpen = true;
+    int currentTab = screen::Analysis;   // phone: the panel shown
+    bool panelOpen = true;               // phone: tap the shown tab again to hide it
+
+    // tablet
+    screen::Form form = screen::Form::Phone;   // of the last layout
+    screen::TabletState tablet;
+    screen::TabletFrame frame;                 // the last tablet layout (paint)
+    Splitter panelsSplitter, groupSplitter;
+
     bool wasPlaying = false;   // to notice the engine stopping at the end
     juce::BorderSize<int> appliedInsets;   // the safe area the layout used
     VideoPane videoPane;

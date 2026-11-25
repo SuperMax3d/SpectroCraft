@@ -1,7 +1,7 @@
 # SpectroCraft Mobile
 
-The iOS and Android companion app (issue #73): record, see and measure sound on a phone, with the
-desktop's spectrogram, measurements and file format.
+The iOS and Android companion app (issue #73): record, see and measure sound on a phone or a tablet,
+with the desktop's spectrogram, measurements and file format.
 
 It is a JUCE app built from the desktop's own engine sources (`../src`: `AudioEngine`,
 `SpectralEngine`, `Measures`, `FileDoc`, `FileMeta`, ...) plus a touch UI in `mobile/src`, so the
@@ -21,6 +21,8 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 | Generator | *Generate* tab: manual tone, linear or log sweep (repeating or one-shot), white / pink / brown / custom noise (slope in dB/octave, band edges). It plays while recording. Level = RMS dBFS. |
 | Editing | *Edit* tab: delete the selection, change its gain (or the whole file's), undo / redo; display options (log / linear frequency, dB range, channel). |
 | Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. The picture gets its own part of the screen beside the waveform and spectrogram (a column for a portrait picture, a strip on top for a landscape one; a tap on its title row hides it). With *Video* on it shows the camera; *Play* shows the take's movie in step with the sound, and *Stop* goes back to the camera. A file opened with a movie shows it. |
+| Tablets | When the screen's smaller side is at least 600 points (every iPad, Android tablets), two panel groups show at once, as in the desktop's left column: *Files \| Analyse* and *Edit \| Generate \| Calibrate \| Input*, so the analysis stays in view while the generator, the calibration or the edit tools are open. Landscape: the groups stacked left of the views, the transport along the bottom. Portrait: the groups side by side under the views. Drag the bars between them to share the room (double tap: the default). The top bar's panel button hides the groups; *Undo* / *Redo* sit next to the view buttons. Phones keep one panel at a time. |
+| Keyboard | A hardware keyboard (iPad, Android tablet) gets the desktop's shortcuts, Cmd on iPad and Ctrl on Android: Space play / pause, Cmd+. stop, Shift+F10 record, Home / End, Cmd+A select all, Esc clear the selection, Delete, Cmd+Z undo, Cmd+Y or Cmd+Shift+Z redo, Cmd+S save, Cmd+= / Cmd+- / Cmd+0 zoom in / out / all, Cmd+Shift+Return show or hide the panels. |
 
 ## Crash reports and statistics
 
@@ -32,7 +34,8 @@ When the build has keys (see *CI and store builds*), the app sends:
 - **usage statistics** to PostHog: events such as `recording_started` (mode, loop length, channels,
   sample rate, calibrated, video), `recording_stopped` (duration), `file_opened`, `calibration` (method,
   result code), `analysis_settings`, `plot_stored`, `generator_toggled`, `input_changed` (built-in /
-  USB / Bluetooth, chosen by hand or not), `edit`, `video_enabled`. Each carries a random install id, the app version, the OS
+  USB / Bluetooth, chosen by hand or not), `edit`, `video_enabled`, `screen_form` (phone, tablet landscape or
+  portrait, once per launch), `tablet_panels`. Each carries a random install id, the app version, the OS
   and its version, and the phone model. PostHog keeps no person profile (`$process_person_profile`
   false).
 
@@ -84,8 +87,9 @@ Options: `-DSC_MOBILE_BUNDLE_ID=` (iOS bundle id / Android application id, defau
 `-PposthogHost=`).
 
 Desktop development hooks (macOS / Linux builds only): `SC_MOBILE_RECORDINGS=<folder>`,
-`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_ANALYSIS=<0..2>`, `SC_MOBILE_PRECISE=<fx>,<fy>` (precision reticle), `SC_MOBILE_SIZE=<w>x<h>`,
-`SC_MOBILE_SNAPSHOT=<png>` (writes the window after 2.5 s and quits).
+`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_ANALYSIS=<0..2>`, `SC_MOBILE_PRECISE=<fx>,<fy>` (precision reticle), `SC_MOBILE_SIZE=<w>x<h>` (`1180x820`: an iPad in landscape),
+`SC_MOBILE_KEYS=<key>[;<key>...]` (keyboard shortcuts after 1 s, as `juce::KeyPress` descriptions such
+as `command + shift + return`), `SC_MOBILE_SNAPSHOT=<png>` (writes the window after 2.5 s and quits).
 
 ## CI and store builds
 
@@ -126,3 +130,5 @@ the code means a fork or a pull request never reports to them.
   2 hours mono at 48 kHz on a recent phone). The limit is shown while recording.
 - The video's offset comes from the clocks of the first audio and video frames (a few tens of ms).
 - Android 10 (API 29) or later: JUCE 9's Android font code needs it. iOS 16 or later.
+- iPad: full screen only (no Split View or Slide Over, `REQUIRES_FULL_SCREEN`): in multitasking iPadOS
+  stops the camera of an app that does not ask for multitasking camera access.

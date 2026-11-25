@@ -154,6 +154,9 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   in `mobile/src`; Android wrapper `mobile/android` (Gradle), CI `.github/workflows/mobile.yml`, unit
   tests `mobile/tests/MobileTests.cpp` (`-DSC_MOBILE_APP=OFF` builds only them). Keep those engine
   files free of `Application` / view includes: the UI halves live in `AxisScaleApp.cpp` and the views.
+  Phone or tablet layout (smaller side >= 600 points: two panel groups as in the desktop's left column)
+  and the hardware keyboard's shortcuts: `mobile/src/ScreenLayout.{h,cpp}` (no components, tested),
+  applied by `MainScreen::layoutPhone` / `layoutTablet`.
   Files written by the app: `videoTracks[].relFile` (resolved next to the WAV, `sc::resolveVideoTracks`)
   and `storedPlots` (carried by the desktop). Crash reports (Sentry) and statistics (PostHog) live in
   `mobile/src/Telemetry*`, compiled in only with keys (`SC_SENTRY_DSN`, `SC_POSTHOG_KEY`); never send

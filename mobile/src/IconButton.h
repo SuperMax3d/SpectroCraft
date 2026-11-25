@@ -9,7 +9,7 @@ namespace scm
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Open, Save, Share, Delete };
+    enum class Icon { Open, Save, Share, Delete, Undo, Redo, Panels };
 
     IconButton (const juce::String& name, Icon i) : juce::Button (name), icon (i)
     {
@@ -74,13 +74,36 @@ public:
                 p.startNewSubPath (14.0f, 10.0f);
                 p.lineTo (14.0f, 17.5f);
                 break;
+            case Icon::Undo:      // an arrow back to the left, curling down
+            case Icon::Redo:      // the same, mirrored
+                p.startNewSubPath (8.5f, 5.5f);
+                p.lineTo (4.0f, 10.0f);
+                p.lineTo (8.5f, 14.5f);
+                p.startNewSubPath (4.0f, 10.0f);
+                p.lineTo (14.5f, 10.0f);
+                p.cubicTo (18.5f, 10.0f, 20.5f, 12.5f, 20.5f, 15.5f);
+                p.cubicTo (20.5f, 18.5f, 18.5f, 21.0f, 14.5f, 21.0f);
+                p.lineTo (10.0f, 21.0f);
+                if (icon == Icon::Redo)
+                    p.applyTransform (juce::AffineTransform::scale (-1.0f, 1.0f).translated (24.0f, 0.0f));
+                break;
+            case Icon::Panels:    // a window with a side column
+                p.addRoundedRectangle (2.5f, 4.5f, 19.0f, 15.0f, 2.0f);
+                p.startNewSubPath (9.0f, 4.5f);
+                p.lineTo (9.0f, 19.5f);
+                p.startNewSubPath (4.8f, 8.5f);
+                p.lineTo (6.8f, 8.5f);
+                p.startNewSubPath (4.8f, 11.5f);
+                p.lineTo (6.8f, 11.5f);
+                break;
         }
         return p;
     }
 
     void paintButton (juce::Graphics& g, bool highlighted, bool down) override
     {
-        getLookAndFeel().drawButtonBackground (g, *this, findColour (juce::TextButton::buttonColourId),
+        getLookAndFeel().drawButtonBackground (g, *this, findColour (getToggleState() ? juce::TextButton::buttonOnColourId
+                                                                                      : juce::TextButton::buttonColourId),
                                                highlighted, down);
         const float side = std::min (26.0f, (float) std::min (getWidth(), getHeight()) - 14.0f);
         auto box = getLocalBounds().toFloat().withSizeKeepingCentre (side, side);
