@@ -101,6 +101,7 @@ private:
     int currentTab = Analysis;
     bool panelOpen = true;
     bool wasPlaying = false;   // to notice the engine stopping at the end
+    juce::BorderSize<int> appliedInsets;   // the safe area the layout used
     juce::Component* videoPreview = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainScreen)

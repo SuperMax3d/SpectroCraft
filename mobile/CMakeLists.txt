@@ -162,12 +162,12 @@ set (SC_MOBILE_SOURCES
     src/MainScreen.cpp)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    set_source_files_properties (src/AudioRoute_ios.mm src/Telemetry_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_ios.mm src/Telemetry_ios.mm)
+    set_source_files_properties (src/AudioRoute_ios.mm src/Telemetry_ios.mm src/SafeArea_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_ios.mm src/Telemetry_ios.mm src/SafeArea_ios.mm)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Android")
-    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/Telemetry_android.cpp)
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/SafeArea_generic.cpp src/Telemetry_android.cpp)
 else()
-    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/Telemetry_none.cpp)
+    list (APPEND SC_MOBILE_SOURCES src/AudioRoute_generic.cpp src/SafeArea_generic.cpp src/Telemetry_none.cpp)
 endif()
 
 target_sources (SpectroCraftMobile PRIVATE ${SC_MOBILE_SOURCES} ${SC_ENGINE_SOURCES})

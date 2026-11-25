@@ -3,6 +3,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "SafeArea.h"
 #include "Telemetry.h"
 #include "TimeFormat.h"
 #include "TimeViewport.h"
@@ -209,6 +210,10 @@ void MainScreen::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void MainScreen::timerCallback()
 {
+    // The safe area can change after the first layout (see SafeArea.h).
+    if (safearea::insetsFor (*this) != appliedInsets)
+        resized();
+
     // Follow the playhead while playing. The engine stops by itself at the end
     // of the file; the playhead then stays there and the next Play starts over.
     auto* d = ctx.document.doc();
@@ -448,11 +453,9 @@ void MainScreen::paint (juce::Graphics& g)
 
 void MainScreen::resized()
 {
-    auto r = getLocalBounds();
-   #if JUCE_IOS || JUCE_ANDROID
-    if (auto* d = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-        r = d->safeAreaInsets.subtractedFrom (r);   // notch, home indicator
-   #endif
+    // notch or Dynamic Island, status bar, home indicator (see SafeArea.h)
+    appliedInsets = safearea::insetsFor (*this);
+    auto r = appliedInsets.subtractedFrom (getLocalBounds());
     const bool landscape = r.getWidth() > r.getHeight() * 1.2;
 
     // top bar
