@@ -36,7 +36,7 @@ void FilesPane::changeListenerCallback (juce::ChangeBroadcaster*)
     current.setText (ctx.document.displayName() + (ctx.document.hasUnsavedChanges() ? "  (not saved)" : ""),
                      juce::dontSendNotification);
     saveButton.setEnabled (ctx.document.hasAudio() && ! ctx.recorder.isRecording());
-    shareButton.setEnabled (ctx.document.file().existsAsFile());
+    shareButton.setEnabled (targetFile().existsAsFile());
     if (ctx.document.file() != juce::File() && ! files.contains (ctx.document.file())) refresh();
 }
 
@@ -73,6 +73,11 @@ void FilesPane::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
     g.drawText (info, 10, 28, w - 20, 18, juce::Justification::centredLeft);
     g.setColour (style::border);
     g.drawHorizontalLine (h - 1, 0.0f, (float) w);
+}
+
+void FilesPane::selectedRowsChanged (int)
+{
+    shareButton.setEnabled (targetFile().existsAsFile());
 }
 
 void FilesPane::listBoxItemClicked (int row, const juce::MouseEvent&)
@@ -166,9 +171,16 @@ void FilesPane::saveCurrent()
     refresh();
 }
 
+juce::File FilesPane::targetFile() const
+{
+    const int row = list.getSelectedRow();
+    if (juce::isPositiveAndBelow (row, files.size())) return files[row];
+    return ctx.document.file();
+}
+
 void FilesPane::share()
 {
-    const auto f = ctx.document.file();
+    const auto f = targetFile();
     if (! f.existsAsFile()) return;
     juce::Array<juce::URL> urls { juce::URL (f) };
     const auto movie = VideoCapture::movieFileFor (f);
@@ -177,7 +189,7 @@ void FilesPane::share()
     shareBox = juce::ContentSharer::shareFilesScoped (urls, [] (bool ok, const juce::String& err)
     {
         if (! ok && err.isNotEmpty()) showMessage ("Share", err);
-    }, this);
+    }, &shareButton);   // the iPad's popover points at the button
 }
 
 void FilesPane::deleteSelected()

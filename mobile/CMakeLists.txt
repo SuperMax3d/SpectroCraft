@@ -203,6 +203,7 @@ target_compile_definitions (SpectroCraftMobile PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_USE_CAMERA=1
+    JUCE_CONTENT_SHARING=1       # the share sheet (iOS) / chooser (Android); without it Share does nothing
     JUCE_CAMERA_RECORD_AUDIO=0   # video only: the app records the microphone itself
     JUCE_MODAL_LOOPS_PERMITTED=0
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraftMobile,JUCE_PRODUCT_NAME>"
