@@ -124,6 +124,11 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `include/RiffInfo.h` + `src/RiffInfo.cpp` (LIST/INFO + DISP payloads, `FileDoc::riffInfo`, written by
   `AudioEngine::saveWavWithMarkers` and `Application::saveActiveDocMeta`), basic Markdown in
   `include/Markdown.h`, the panel in `include/FileInfoPanel.h`; tests `tests/regression/file_info.inc`.
+- Blind source separation (issue #68; Effects > Blind Source Separation, 2+ channels): the DSP is headless in
+  `include/BlindSeparation.h` + `src/BlindSeparation.cpp` (`sc::bss::separate`: AuxIVA, ILRMA, cACGMM,
+  FastMNMF2, blocks with order matching), the window `include/BlindSeparationWindow.h`; the result goes through
+  `Application::applyStemSeparationResult` (undo label parameter). Tests `tests/regression/bss.inc`;
+  timings `SC_BENCH=1 SC_TEST_FILTER=bench` in a Release build.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip

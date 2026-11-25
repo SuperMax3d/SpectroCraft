@@ -343,7 +343,8 @@ public:
         2 = replace the current file's content with it (one undoable step; markers inside the extracted range keep their relative position, everything else is dropped with the old timeline),
         3 = append its tracks after the existing channels (one undoable step). */
     bool applyStemSeparationResult (sc::MergeResult& r, int outputMode, double extStartSecs,
-                                    const juce::String& suggestedName, std::string* errOut);
+                                    const juce::String& suggestedName, std::string* errOut,
+                                    const juce::String& undoLabel = "Stem separation");
 
     /** Message-thread only. Applies a super-resolution result to the active
         document according to outputMode: 1 = create a new document from it,

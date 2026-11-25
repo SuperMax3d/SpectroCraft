@@ -3086,7 +3086,8 @@ bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut,
 bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
                                              double extStartSecs,
                                              const juce::String& suggestedName,
-                                             std::string* errOut)
+                                             std::string* errOut,
+                                             const juce::String& undoLabel)
 {
     auto fail = [errOut] (const char* msg) { if (errOut != nullptr) *errOut = msg; return false; };
 
@@ -3124,7 +3125,7 @@ bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
         d->remapForDeletion (0.0, extStartSecs);
         d->remapForDeletion (newDur, totalOld - extStartSecs);
 
-        if (!eng.replaceWholeFileUndoable (r.data, "Stem separation"))
+        if (!eng.replaceWholeFileUndoable (r.data, undoLabel))
             return fail ("Could not replace the file content.");
 
         // Keep playhead/selection at their relative position inside the extracted range.
@@ -3176,7 +3177,7 @@ bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
         }
 
         if (!eng.replaceWithNoiseTracks ({ startSample, startSample + len }, filtered, stems,
-                    "Stem separation (" + juce::String (nTracks) + " tracks appended)"))
+                    undoLabel + " (" + juce::String (nTracks) + " tracks appended)"))
             return fail ("Could not append the stem tracks.");
 
         // Make the freshly added channels visible.
