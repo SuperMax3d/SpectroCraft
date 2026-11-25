@@ -227,10 +227,17 @@ jobs:
             echo "::warning::No app with bundle id $BUNDLE_ID in App Store Connect yet: create it (My Apps > + > New App), then push again. Upload skipped."
             exit 0
           fi
+          # Archive unsigned, then let the export sign for App Store distribution
+          # (cloud-managed certificate through the API key). Signing the archive
+          # itself would ask for a development profile, which needs a registered
+          # device.
           xcodebuild -project build-ios/SpectroCraftMobile.xcodeproj -scheme SpectroCraftMobile \
             -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
             -archivePath build-ios/SpectroCraftMobile.xcarchive \
-            CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$TEAM" "${auth[@]}" archive | tail -n 30
+            DEVELOPMENT_TEAM="$TEAM" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive > build-ios/archive.log 2>&1 \
+            || { grep -E -A4 "error:" build-ios/archive.log | head -80; tail -n 20 build-ios/archive.log; exit 1; }
+          tail -n 3 build-ios/archive.log
           cat > build-ios/ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
