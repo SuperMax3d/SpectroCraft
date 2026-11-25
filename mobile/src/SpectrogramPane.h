@@ -6,11 +6,13 @@
 #include "MobileDocument.h"
 #include "TimeViewport.h"
 #include <atomic>
+#include <set>
 
 namespace scm
 {
 class SpectrogramPane : public juce::Component,
-                        private juce::ChangeListener
+                        private juce::ChangeListener,
+                        private juce::Timer
 {
 public:
     SpectrogramPane (MobileDocument&, TimeViewport&);
@@ -31,6 +33,13 @@ public:
     /** Frequency range shown (Hz); log or linear axis. */
     void setFrequencyRange (double lo, double hi);
     void setLogFrequency (bool log);
+    /** Development hook: the precision reticle at (fx, fy), fractions of the plot. */
+    void showPreciseAt (float fx, float fy)
+    {
+        const auto p = plotArea();
+        fingerNow = { p.getX() + fx * p.getWidth(), p.getY() + fy * p.getHeight() };
+        enterPrecise();
+    }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -54,6 +63,23 @@ private:
     };
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override;
+
+    // Precision touch: a finger held still (~0.45 s) shows a magnifier and a
+    // readout, and moves a reticle 4x slower than itself. Held at the start of
+    // a touch it places the playhead on release (Point); held while dragging a
+    // selection it moves the selection's edge (Edge).
+    enum class Precise { None, Point, Edge };
+    void enterPrecise();
+    void drawPrecise (juce::Graphics&, juce::Rectangle<float> plot);
+    Precise precise = Precise::None;
+    std::set<int> touches;             // fingers down on the plot
+    juce::Point<float> fingerNow, fingerAnchor, crossAnchor, cross, stillAt;
+    juce::uint32 stillSinceMs = 0;
+    bool dragging = false;             // a one-finger selection drag is under way
+    double dragFromTime = 0.0;         // its fixed end
+    static constexpr int kHoldMs = 450;
+    static constexpr float kPreciseGain = 0.25f;
     juce::Rectangle<float> plotArea() const;
     double nyquist() const;
     double yToFreq (double y) const;

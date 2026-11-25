@@ -73,6 +73,9 @@ public:
     void mouseDrag (const juce::MouseEvent&);
     void mouseUp (const juce::MouseEvent&);
     bool pinching() const noexcept { return pinchActive; }
+    /** Forgets the fingers down (another mode takes over the touch): no
+        drag-end, tap or pinch-end callback follows. */
+    void cancel() noexcept { fingers.clear(); pinchActive = dragActive = false; cancelledSingle = true; }
 
 private:
     struct Finger { juce::Point<float> down, now; };

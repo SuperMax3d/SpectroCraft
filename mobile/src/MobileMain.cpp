@@ -109,6 +109,12 @@ public:
             screen->showTab (env ("SC_MOBILE_TAB").getIntValue());
         if (env ("SC_MOBILE_ANALYSIS").isNotEmpty())   // 0 FFT Linear, 1 FFT Log, 2 1/3 octave
             screen->setAnalysisMode (env ("SC_MOBILE_ANALYSIS").getIntValue());
+        if (env ("SC_MOBILE_PRECISE").containsChar (','))   // "fx,fy": the precision reticle, after 1.5 s
+        {
+            const float fx = env ("SC_MOBILE_PRECISE").upToFirstOccurrenceOf (",", false, false).getFloatValue();
+            const float fy = env ("SC_MOBILE_PRECISE").fromFirstOccurrenceOf (",", false, false).getFloatValue();
+            juce::Timer::callAfterDelay (1500, [screen, fx, fy] { screen->showPreciseAt (fx, fy); });
+        }
         if (env ("SC_MOBILE_SNAPSHOT").isNotEmpty())
         {
             const juce::File png (env ("SC_MOBILE_SNAPSHOT"));

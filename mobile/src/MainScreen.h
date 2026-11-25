@@ -52,6 +52,7 @@ public:
     void showTab (int t) { panelOpen = false; currentTab = -1; selectTab (t); }
     /** Development hook: the analysis mode (0 FFT Linear, 1 FFT Log, 2 1/3 octave). */
     void setAnalysisMode (int m) { analysisPane->setMode (m); }
+    void showPreciseAt (float fx, float fy) { spectrogram.showPreciseAt (fx, fy); }
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };
