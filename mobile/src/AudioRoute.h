@@ -32,6 +32,11 @@ bool selectInput (const juce::String& id);
 /** Note shown next to a Bluetooth input. */
 juce::String bluetoothNote();
 
+/** iOS: true when the audio session is not in measurement mode yet. Setting
+    the mode is a synchronous call to the audio server that can block the main
+    thread for seconds, so it is made only when needed. Elsewhere: true. */
+bool measurementModeNeeded();
+
 /** Where the sound plays (speaker, AirPods, AirPlay...), e.g. "AirPods Pro". */
 juce::String currentOutputName();
 /** iOS: the system's output picker (AVRoutePickerView: speaker, AirPods,

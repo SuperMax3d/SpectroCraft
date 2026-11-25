@@ -86,6 +86,9 @@ public:
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     juce::String applySetup (const juce::String& inputName, int inputChannels);
+    /** Measurement mode (no OS processing), applied only when needed. */
+    void ensureMeasurementMode();
+    juce::String measuredDevice;   // the device measurement mode was set for (Android)
 
     juce::AudioDeviceManager deviceManager;
     SignalSource gen;

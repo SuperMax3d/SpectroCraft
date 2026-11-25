@@ -271,6 +271,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         src/MobileDocument.cpp
         src/Telemetry.cpp
         src/Telemetry_none.cpp
+        src/AudioRoute_generic.cpp
         src/LoopBuffer.h
         ${SC_ENGINE_SOURCES})
     juce_generate_juce_header (SpectroCraftMobileTests)

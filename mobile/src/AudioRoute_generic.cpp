@@ -8,6 +8,7 @@ std::vector<Input> availableInputs() { return {}; }
 juce::String currentInputId() { return {}; }
 bool selectInput (const juce::String&) { return false; }
 
+bool measurementModeNeeded() { return true; }
 juce::String currentOutputName() { return {}; }
 std::unique_ptr<juce::Component> createOutputPicker() { return nullptr; }
 

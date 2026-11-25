@@ -54,6 +54,11 @@ bool selectInput (const juce::String& id)
     return false;
 }
 
+bool measurementModeNeeded()
+{
+    return ! [[[AVAudioSession sharedInstance] mode] isEqualToString: AVAudioSessionModeMeasurement];
+}
+
 juce::String currentOutputName()
 {
     for (AVAudioSessionPortDescription* p in [[AVAudioSession sharedInstance] currentRoute].outputs)

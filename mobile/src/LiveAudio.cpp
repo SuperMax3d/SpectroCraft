@@ -1,4 +1,5 @@
 #include "LiveAudio.h"
+#include "AudioRoute.h"
 #include <cmath>
 
 namespace scm
@@ -61,6 +62,7 @@ void LiveAudio::release()
     if (released || simulated || deviceManager.getCurrentAudioDevice() == nullptr) return;
     setCapturing (false);
     deviceManager.closeAudioDevice();   // the callback stays registered for the reopen
+    measuredDevice.clear();
     released = true;
 }
 
@@ -69,8 +71,24 @@ void LiveAudio::reacquire()
     if (! released) return;
     released = false;
     deviceManager.restartLastAudioDevice();
-    if (auto* d = deviceManager.getCurrentAudioDevice())
-        d->setAudioPreprocessingEnabled (false);   // measurement mode again
+    ensureMeasurementMode();
+}
+
+void LiveAudio::ensureMeasurementMode()
+{
+    auto* d = deviceManager.getCurrentAudioDevice();
+    if (d == nullptr) return;
+    if (route::platformHasRoutes())
+    {
+        // iOS: one session for the app; only switch when it is not in
+        // measurement mode already (the call blocks while the server reroutes).
+        if (route::measurementModeNeeded()) d->setAudioPreprocessingEnabled (false);
+        return;
+    }
+    const auto id = d->getTypeName() + "|" + d->getName();
+    if (id == measuredDevice) return;
+    measuredDevice = id;
+    d->setAudioPreprocessingEnabled (false);
 }
 
 void LiveAudio::simulateDevice (double sampleRate, int inputChannels)
@@ -97,9 +115,9 @@ juce::String LiveAudio::applySetup (const juce::String& inputName, int inputChan
     setup.inputChannels.clear();
     setup.inputChannels.setRange (0, juce::jlimit (1, kMaxChannels, inputChannels), true);
     setup.useDefaultOutputChannels = true;
+    measuredDevice.clear();   // a new setup may be a new stream
     const auto err = deviceManager.setAudioDeviceSetup (setup, true);
-    if (auto* d = deviceManager.getCurrentAudioDevice())
-        d->setAudioPreprocessingEnabled (false);   // measurement mode
+    ensureMeasurementMode();
     return err;
 }
 
@@ -280,8 +298,7 @@ void LiveAudio::audioDeviceIOCallbackWithContext (const float* const* in, int nu
 
 void LiveAudio::changeListenerCallback (juce::ChangeBroadcaster*)
 {
-    if (auto* d = deviceManager.getCurrentAudioDevice())
-        d->setAudioPreprocessingEnabled (false);
+    ensureMeasurementMode();   // a no-op unless the device or the session mode changed
     if (onDeviceChanged) onDeviceChanged();
 }
 } // namespace scm
