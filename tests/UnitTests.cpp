@@ -31733,6 +31733,7 @@ static void testWriteDataToNewChannels()
 #include "regression/sessions.inc"       // sessions: referenced files on the timeline (issue #21)
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 #include "regression/model.inc"         // Model panel: sound model analysis / rendering (issue #40)
+#include "regression/readability.inc"   // Spectral Controls > Readability (issue #69)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -31971,6 +31972,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("playhead line full height", testPlayheadLineFullHeight);
     SC_RUN_TEST ("playhead line bottom ruler", testPlayheadLineBottomRuler);
     SC_RUN_TEST ("spectral view paint", testSpectralViewPaint);
+    SC_RUN_TEST ("spectrogram readability: frequency / time balance (#69)", testSpectrogramReadability);
     SC_RUN_TEST ("marker axis clipping", testMarkerAxisClipping);
     SC_RUN_TEST ("spectral time ruler", testSpectralTimeRuler);
     SC_RUN_TEST ("spectral playhead into ruler", testSpectralPlayheadIntoRuler);

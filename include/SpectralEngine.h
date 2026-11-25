@@ -179,8 +179,24 @@ public:
                      const std::vector<int>& channels, std::vector<float>& db,
                      const std::atomic<bool>* cancel = nullptr);
 
+    /** Spectral Controls > Readability (issue #69): evens out the levels of a
+        dB picture from renderToDb() (row-major, `width` x `height`), for the
+        display only. Frequency balance (s.freqBalance, 0..1) moves each row
+        (frequency) by the gap between its average level (a running median
+        over the neighbouring rows: steps stay sharp, narrow lines are not
+        flattened) and the picture's average: the quiet bands rise,
+        the loud ones come down, the peaks keep their height above their
+        band. Time balance (s.timeBalance) does the same per column, with the
+        column's average taken in power (an automatic gain control following
+        the energy). Levels are read clamped to the dB window;
+        a row or column with nothing above the window's floor is never
+        lifted, and no lift exceeds half the window. Pixels beyond the audio
+        (-300) stay as they are. Does nothing unless s.readability. */
+    static void balanceLevels (std::vector<float>& db, int width, int height, const Settings& s);
+
     // Render a region to RGBA pixels (bilinear sampling, colour LUT, optional smoothing):
-    // renderToDb() mapped through the dB window and the colour map.
+    // renderToDb() mapped through the dB window and the colour map, after
+    // balanceLevels() when the Readability option is on.
     // Fills rgba with width*height*4 bytes. Returns false if cancel points at an
     // atomic set to true (rendering stops early; no partial tiles are cached).
     bool renderToPixels (const AudioEngine& engine, const Settings& s,

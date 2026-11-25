@@ -215,6 +215,12 @@ std::vector<SettingKey> settingKeys()
         b ("fft_auto", &Settings::fftAuto),
         b ("fft_multires", &Settings::fftMultiRes),
         b ("log_freq", &Settings::logFrequency),
+        // Spectral Controls > Readability (issue #69): display only.
+        b ("readability", &Settings::readability),
+        { "readability_freq", PType::Number, [] (const Settings& s) { return juce::var ((double) s.freqBalance); },
+          [] (Settings& s, const juce::var& v) { s.freqBalance = (float) std::clamp ((double) v, 0.0, 1.0); return juce::var ((double) s.freqBalance); } },
+        { "readability_time", PType::Number, [] (const Settings& s) { return juce::var ((double) s.timeBalance); },
+          [] (Settings& s, const juce::var& v) { s.timeBalance = (float) std::clamp ((double) v, 0.0, 1.0); return juce::var ((double) s.timeBalance); } },
         b ("snap_zero", &Settings::snapToZeroCrossings),
         { "fft_local_n", PType::Integer, [] (const Settings& s) { return juce::var (s.fftLocalN); },
           [] (Settings& s, const juce::var& v) { s.fftLocalN = pow2Clamp ((int) v, 1024, 65536); return juce::var (s.fftLocalN); } },

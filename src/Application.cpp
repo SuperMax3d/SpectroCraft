@@ -181,6 +181,17 @@ void Application::loadSettings ()
         settings.autoBinsPerPixel = std::isfinite (bp) ? std::clamp (bp, 0.1, 16.0) : 1.25;
     }
     settings.logFrequency  = recentStore->getIntValue ("log_freq", settings.logFrequency ? 1 : 0) != 0;
+    // Spectral Controls > Readability (issue #69).
+    settings.readability   = recentStore->getIntValue ("readability", settings.readability ? 1 : 0) != 0;
+    {
+        auto amount = [this] (const char* key, float def)
+        {
+            const double v = recentStore->getValue (key, juce::String (def)).getDoubleValue();
+            return std::isfinite (v) ? (float) std::clamp (v, 0.0, 1.0) : def;
+        };
+        settings.freqBalance = amount ("readability_freq", settings.freqBalance);
+        settings.timeBalance = amount ("readability_time", settings.timeBalance);
+    }
     settings.snapToZeroCrossings = recentStore->getIntValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0) != 0;
     settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 5);
     settings.fftLocalN     = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_local_n", settings.fftLocalN), 1024, 65536);
@@ -310,6 +321,9 @@ void Application::saveSettings ()
     recentStore->setValue ("auto_time_slices", settings.autoTargetTimeSlices);
     recentStore->setValue ("auto_bins_per_pixel", settings.autoBinsPerPixel);
     recentStore->setValue ("log_freq", settings.logFrequency ? 1 : 0);
+    recentStore->setValue ("readability", settings.readability ? 1 : 0);
+    recentStore->setValue ("readability_freq", (double) settings.freqBalance);
+    recentStore->setValue ("readability_time", (double) settings.timeBalance);
     recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
     recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);
     recentStore->setValue ("fft_local_n", settings.fftLocalN);
