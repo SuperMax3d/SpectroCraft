@@ -29,6 +29,17 @@ std::vector<Input> availableInputs();
 juce::String currentInputId();
 /** Prefers this input; false when the system refused it. */
 bool selectInput (const juce::String& id);
+/** The input to use by default whenever it is plugged in: Shure's MVX2U (XLR to
+    USB), found by name ("MVX2U", "Shure MVX2U", "MVX2U Gen 2"...); -1 when it
+    is not in `names`. */
+inline int preferredInputIndex (const juce::StringArray& names)
+{
+    for (int i = 0; i < names.size(); ++i)
+        if (names[i].toUpperCase().retainCharacters ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789").contains ("MVX2U"))
+            return i;
+    return -1;
+}
+
 /** Note shown next to a Bluetooth input. */
 juce::String bluetoothNote();
 

@@ -1,5 +1,7 @@
 #include "SpectrogramPane.h"
 #include "MobileStyle.h"
+#include "SafeArea.h"
+#include "TouchControls.h"
 #include "TimeFormat.h"
 #include <cmath>
 
@@ -161,8 +163,26 @@ SpectrogramPane::SpectrogramPane (MobileDocument& d, TimeViewport& v) : document
     };
 }
 
+// The magnifier is its own component on the screen (the pane's top ancestor
+// under the window), so it can sit above the finger even when the spectrogram
+// is short: over the waveform or the top bar if that is where the room is.
+class SpectrogramPane::Lens : public juce::Component
+{
+public:
+    explicit Lens (SpectrogramPane& o) : owner (o)
+    {
+        setInterceptsMouseClicks (false, false);
+        setAlwaysOnTop (true);
+    }
+    void paint (juce::Graphics& g) override { owner.paintLens (g, getPosition()); }
+
+private:
+    SpectrogramPane& owner;
+};
+
 SpectrogramPane::~SpectrogramPane()
 {
+    lens.reset();
     view.removeChangeListener (this);
     renderer.reset();
 }
@@ -297,6 +317,7 @@ void SpectrogramPane::imageReady (juce::Image img, const Request& r)
     if (r.serial < shown.serial) return;
     image = img;
     shown = r;
+    if (fine.active()) updateLens();
     repaint();
 }
 
@@ -366,55 +387,21 @@ void SpectrogramPane::paint (juce::Graphics& g)
 
     drawFrequencyAxis (g, plot);
     if (showRuler) drawRuler (g, plot);
-    if (precise != Precise::None) drawPrecise (g, plot);
+    if (fine.active()) drawReticle (g, plot);
 }
 
-void SpectrogramPane::drawPrecise (juce::Graphics& g, juce::Rectangle<float> plot)
+void SpectrogramPane::drawReticle (juce::Graphics& g, juce::Rectangle<float> plot)
 {
-    // reticle across the plot
+    const auto cross = fine.reticle();
     g.setColour (juce::Colours::white.withAlpha (0.55f));
     g.drawVerticalLine (juce::roundToInt (cross.x), plot.getY(), plot.getBottom());
     g.drawHorizontalLine (juce::roundToInt (cross.y), plot.getX(), plot.getRight());
+}
 
-    // magnifier above the finger: the picture around the reticle, 3x
-    const float d = 120.0f, zoom = 3.0f;
-    // Above the finger when it fits; otherwise beside it (never under the finger).
-    juce::Rectangle<float> lens (cross.x - d * 0.5f, cross.y - d - 70.0f, d, d);
-    if (lens.getY() < plot.getY())
-    {
-        const bool right = cross.x + 60.0f + d <= plot.getRight();
-        lens.setPosition (right ? cross.x + 60.0f : cross.x - 60.0f - d,
-                          juce::jlimit (plot.getY(), std::max (plot.getY(), plot.getBottom() - d), cross.y - d * 0.5f));
-    }
-    lens.setX (juce::jlimit (plot.getX(), plot.getRight() - d, lens.getX()));
-    if (image.isValid() && shown.t1 > shown.t0 && shown.settings.logFrequency == logAxis)
-    {
-        // where the image sits on screen (as paint() draws it), then the
-        // screen-space patch around the reticle mapped back into image pixels
-        const double x0 = view.timeToX (shown.t0, plot), x1 = view.timeToX (shown.t1, plot);
-        const double y0 = freqToY (shown.settings.maxFrequency), y1 = freqToY (shown.settings.minFrequency);
-        const double sx = image.getWidth() / std::max (1.0, x1 - x0), sy = image.getHeight() / std::max (1.0, y1 - y0);
-        const float half = d / zoom * 0.5f;
-        const juce::Rectangle<float> src ((float) ((cross.x - half - x0) * sx), (float) ((cross.y - half - y0) * sy),
-                                          (float) (2.0f * half * sx), (float) (2.0f * half * sy));
-        g.saveState();
-        juce::Path circle;
-        circle.addEllipse (lens);
-        g.reduceClipRegion (circle);
-        g.setColour (style::plotBackground);
-        g.fillEllipse (lens);
-        g.drawImage (image, lens.getX(), lens.getY(), lens.getWidth(), lens.getHeight(),
-                     juce::roundToInt (src.getX()), juce::roundToInt (src.getY()),
-                     std::max (1, juce::roundToInt (src.getWidth())), std::max (1, juce::roundToInt (src.getHeight())));
-        g.setColour (juce::Colours::white.withAlpha (0.8f));
-        g.drawVerticalLine (juce::roundToInt (lens.getCentreX()), lens.getY(), lens.getBottom());
-        g.drawHorizontalLine (juce::roundToInt (lens.getCentreY()), lens.getX(), lens.getRight());
-        g.restoreState();
-        g.setColour (style::selectionEdge);
-        g.drawEllipse (lens, 2.0f);
-    }
-
-    // readout: time, frequency, level
+juce::String SpectrogramPane::readoutText() const
+{
+    const auto plot = plotArea();
+    const auto cross = fine.reticle();
     const double t = view.xToTime (cross.x, plot);
     const double f = yToFreq (cross.y);
     juce::String text = formatClockTime (std::max (0.0, t), 3) + "   "
@@ -431,16 +418,73 @@ void SpectrogramPane::drawPrecise (juce::Graphics& g, juce::Rectangle<float> plo
                  << (spl ? " dB-SPL" : " dB");
         }
     }
-    g.setFont (style::font (14.0f, true));
-    const float w = std::min (plot.getWidth() - 8.0f, juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text) + 20.0f);
-    juce::Rectangle<float> box (0.0f, 0.0f, w, 24.0f);
-    box.setCentre (lens.getCentreX(), lens.getY() > plot.getY() + 30.0f ? lens.getY() - 16.0f : lens.getBottom() + 16.0f);
-    box.setX (juce::jlimit (plot.getX() + 2.0f, plot.getRight() - w - 2.0f, box.getX()));
-    box.setY (juce::jlimit (plot.getY() + 2.0f, plot.getBottom() - 26.0f, box.getY()));
+    return text;
+}
+
+void SpectrogramPane::updateLens()
+{
+    if (! fine.active())
+    {
+        lens.reset();
+        return;
+    }
+    auto& screen = safearea::screenOf (*this);
+    if (lens == nullptr || lens->getParentComponent() != &screen)
+    {
+        lens = std::make_unique<Lens> (*this);
+        screen.addAndMakeVisible (*lens);
+    }
+    lensText = readoutText();
+    const float textW = juce::GlyphArrangement::getStringWidth (style::font (14.0f, true), lensText) + 20.0f;
+    lensPlace = precise::place (screen.getLocalPoint (this, fingerNow), safearea::safeBoundsOf (*this).toFloat(), textW);
+    lens->setAlpha (fine.mode() == precise::Mode::Waiting ? 0.75f : 1.0f);   // lifted: a finger may carry on
+    lens->setBounds (lensPlace.lens.getUnion (lensPlace.readout).expanded (2.0f).getSmallestIntegerContainer());
+    lens->repaint();
+}
+
+void SpectrogramPane::paintLens (juce::Graphics& g, juce::Point<int> lensOrigin)
+{
+    const auto offset = -lensOrigin.toFloat();
+    const auto circleArea = lensPlace.lens + offset;
+    const float zoom = 3.0f;
+    const auto plot = plotArea();
+    const auto cross = fine.reticle();
+
+    // the picture around the reticle, 3x
+    g.saveState();
+    juce::Path circle;
+    circle.addEllipse (circleArea);
+    g.reduceClipRegion (circle);
+    g.setColour (style::plotBackground);
+    g.fillEllipse (circleArea);
+    if (image.isValid() && shown.t1 > shown.t0 && shown.settings.logFrequency == logAxis)
+    {
+        // image pixels -> the pane (as paint() draws it) -> the lens, 3x around
+        // the reticle. One transform, so the picture stays aligned at its edges
+        // (a source rectangle past the image would be clipped and shifted).
+        const double x0 = view.timeToX (shown.t0, plot), x1 = view.timeToX (shown.t1, plot);
+        const double y0 = freqToY (shown.settings.maxFrequency), y1 = freqToY (shown.settings.minFrequency);
+        const auto toLens = juce::AffineTransform::scale ((float) ((x1 - x0) / image.getWidth()),
+                                                          (float) ((y1 - y0) / image.getHeight()))
+                                .translated ((float) x0 - cross.x, (float) y0 - cross.y)
+                                .scaled (zoom)
+                                .translated (circleArea.getCentreX(), circleArea.getCentreY());
+        g.drawImageTransformed (image, toLens);
+    }
+    g.setColour (juce::Colours::white.withAlpha (0.8f));
+    g.drawVerticalLine (juce::roundToInt (circleArea.getCentreX()), circleArea.getY(), circleArea.getBottom());
+    g.drawHorizontalLine (juce::roundToInt (circleArea.getCentreY()), circleArea.getX(), circleArea.getRight());
+    g.restoreState();
+    g.setColour (style::selectionEdge);
+    g.drawEllipse (circleArea, 2.0f);
+
+    // readout: time, frequency, level
+    const auto box = lensPlace.readout + offset;
     g.setColour (style::barBackground.withAlpha (0.92f));
     g.fillRoundedRectangle (box, 5.0f);
     g.setColour (style::text);
-    g.drawText (text, box, juce::Justification::centred);
+    g.setFont (style::font (14.0f, true));
+    g.drawText (lensText, box, juce::Justification::centred);
 }
 
 void SpectrogramPane::drawFrequencyAxis (juce::Graphics& g, juce::Rectangle<float> plot)
@@ -521,14 +565,23 @@ void SpectrogramPane::mouseDown (const juce::MouseEvent& e)
         fingerNow = stillAt = e.position;
         stillSinceMs = juce::Time::getMillisecondCounter();
         dragging = false;
+        // a finger put down soon after a precision touch: it carries on, the
+        // playhead (or the selection's other end) staying put
+        if (fine.press (e.position, stillSinceMs))
+        {
+            stopTimer();
+            updateLens();
+            repaint();
+            return;
+        }
+        if (fine.active() || lens != nullptr) endPrecise();   // the pause was over
         startTimerHz (30);
     }
-    else if (precise != Precise::None)   // a second finger: back to pinch / pan
+    else if (fine.active())   // a second finger: back to pinch / pan
     {
-        precise = Precise::None;
-        repaint();
+        endPrecise();
     }
-    if (precise == Precise::None)
+    if (! fine.active())
         gestures.mouseDown (e);
 }
 
@@ -536,17 +589,16 @@ void SpectrogramPane::mouseDrag (const juce::MouseEvent& e)
 {
     if (axisPress) return;
     fingerNow = e.position;
-    if (precise != Precise::None)
+    if (fine.fingerDown())
     {
         const auto plot = plotArea();
-        const auto moved = crossAnchor + (fingerNow - fingerAnchor) * kPreciseGain;
-        cross = { juce::jlimit (plot.getX(), plot.getRight(), moved.x),
-                  juce::jlimit (plot.getY(), plot.getBottom(), moved.y) };
-        if (precise == Precise::Edge)
+        fine.move (fingerNow, plot);
+        if (fine.mode() == precise::Mode::Edge)
         {
-            const double t = view.xToTime (cross.x, plot);
+            const double t = view.xToTime (fine.reticle().x, plot);
             document.setSelection ({ std::min (dragFromTime, t), std::max (dragFromTime, t) });
         }
+        updateLens();
         repaint();
         return;
     }
@@ -560,20 +612,41 @@ void SpectrogramPane::mouseDrag (const juce::MouseEvent& e)
 
 void SpectrogramPane::timerCallback()
 {
-    if (precise != Precise::None || touches.size() != 1 || gestures.pinching())
+    if (fine.mode() == precise::Mode::Waiting)
+    {
+        if (fine.expire (juce::Time::getMillisecondCounter()))
+        {
+            stopTimer();
+            endPrecise();
+        }
         return;
-    if (juce::Time::getMillisecondCounter() - stillSinceMs >= (juce::uint32) kHoldMs)
+    }
+    if (fine.active() || touches.size() != 1 || gestures.pinching())
+        return;
+    if (juce::Time::getMillisecondCounter() - stillSinceMs >= (juce::uint32) precise::kHoldMs)
         enterPrecise();
 }
 
 void SpectrogramPane::enterPrecise()
 {
     if (! document.hasAudio() || ! plotArea().contains (fingerNow)) return;
-    precise = dragging ? Precise::Edge : Precise::Point;
-    fingerAnchor = crossAnchor = cross = fingerNow;
+    fine.begin (dragging ? precise::Mode::Edge : precise::Mode::Point, fingerNow);
     gestures.cancel();   // this touch is ours now
     stopTimer();
+    updateLens();
     repaint();
+}
+
+void SpectrogramPane::endPrecise()
+{
+    fine.cancel();
+    lens.reset();
+    repaint();
+}
+
+void SpectrogramPane::visibilityChanged()
+{
+    if (! isShowing() && fine.active()) endPrecise();
 }
 
 void SpectrogramPane::mouseUp (const juce::MouseEvent& e)
@@ -585,7 +658,7 @@ void SpectrogramPane::mouseUp (const juce::MouseEvent& e)
         const int serial = ++axisTapSerial;
         if (e.getNumberOfClicks() >= 2)
         {
-            setFrequencyRange (20.0, nyquist());   // double tap: the whole range
+            chooseFrequencyRange (20.0, nyquist());   // double tap: the whole range
             return;
         }
         // One tap: the menu, unless a second tap follows (double tap).
@@ -598,16 +671,21 @@ void SpectrogramPane::mouseUp (const juce::MouseEvent& e)
     }
     touches.erase (e.source.getIndex());
     if (touches.empty()) stopTimer();
-    if (precise != Precise::None)
+    if (fine.fingerDown())
     {
-        if (precise == Precise::Point)
+        // Point: the playhead goes under the reticle, and is the fixed end of
+        // the selection a finger put down again would make. Edge: the selection
+        // stays, and a finger put down again moves the same edge.
+        if (fine.release (juce::Time::getMillisecondCounter()) == precise::Mode::Point)
         {
+            dragFromTime = view.xToTime (fine.reticle().x, plotArea());
             document.setSelection ({});
-            document.setPlayhead (view.xToTime (cross.x, plotArea()));
+            document.setPlayhead (dragFromTime);
         }
-        precise = Precise::None;
         dragging = false;
         gestures.cancel();
+        startTimerHz (30);   // ends the pause
+        updateLens();
         repaint();
         return;
     }
@@ -630,33 +708,33 @@ void SpectrogramPane::showAxisMenu()
         if (safe == nullptr) return;
         if (r == 1) safe->askFrequency (true);
         if (r == 2) safe->askFrequency (false);
-        if (r == 3) safe->setFrequencyRange (20.0, safe->nyquist());
+        if (r == 3) safe->chooseFrequencyRange (20.0, safe->nyquist());
     });
 }
 
 void SpectrogramPane::askFrequency (bool minimum)
 {
-    auto* w = new juce::AlertWindow (minimum ? "Minimum frequency" : "Maximum frequency",
-                                     "In Hz (" + juce::String (minimum ? 1.0 : fLo + 10.0, 0) + " to "
-                                         + juce::String (minimum ? fHi - 10.0 : nyquist(), 0) + ")",
-                                     juce::MessageBoxIconType::NoIcon);
-    w->addTextEditor ("hz", juce::String (minimum ? fLo : fHi, 0));
-    if (auto* ed = w->getTextEditor ("hz"))
-    {
-        ed->setInputRestrictions (8, "0123456789.");
-        ed->setKeyboardType (juce::TextInputTarget::decimalKeyboard);
-    }
-    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    numpad::Request r;
+    r.title = minimum ? "Minimum frequency" : "Maximum frequency";
+    r.suffix = " Hz";
+    r.value = minimum ? fLo : fHi;
+    r.minimum = minimum ? 1.0 : fLo + 10.0;
+    r.maximum = minimum ? fHi - 10.0 : nyquist();
+    r.decimals = 0;
     juce::Component::SafePointer<SpectrogramPane> safe (this);
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w, minimum] (int r)
+    r.onEnter = [safe, minimum] (double v)
     {
-        if (safe == nullptr || r != 1) return;
-        const double v = w->getTextEditorContents ("hz").getDoubleValue();
-        if (v <= 0.0) return;
-        if (minimum) safe->setFrequencyRange (std::min (v, safe->fHi - 10.0), safe->fHi);
-        else safe->setFrequencyRange (safe->fLo, std::max (v, safe->fLo + 10.0));
-    }), true);
+        if (safe == nullptr || v <= 0.0) return;
+        if (minimum) safe->chooseFrequencyRange (v, safe->fHi);
+        else safe->chooseFrequencyRange (safe->fLo, v);
+    };
+    numpad::show (*this, std::move (r), plotArea().withX (0).withWidth ((float) kAxisW).toNearestInt());
+}
+
+void SpectrogramPane::chooseFrequencyRange (double lo, double hi)
+{
+    setFrequencyRange (lo, hi);
+    if (onFrequencyScaleChosen) onFrequencyScaleChosen (fLo, fHi);
 }
 
 void SpectrogramPane::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)

@@ -154,6 +154,7 @@ set (SC_MOBILE_SOURCES
     src/Calibration.cpp
     src/CalibrationPane.cpp
     src/GeneratorPane.cpp
+    src/TouchControls.cpp
     src/InputPane.cpp
     src/EditPane.cpp
     src/FilesPane.cpp
@@ -265,6 +266,8 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
     target_sources (SpectroCraftMobileTests PRIVATE
         tests/MobileTests.cpp
         tests/VideoTests.cpp
+        tests/TouchTests.cpp
+        tests/InputTests.cpp
         src/SignalSource.cpp
         src/StoredPlots.cpp
         src/Calibration.cpp

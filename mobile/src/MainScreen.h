@@ -7,7 +7,7 @@
 //   | spectrogram               |   | spectrogram       |           |
 //   | REC  >  []  Loop  Video  |   | REC > [] ...      | tabs      |
 //   | panel (Analysis, ...)     |   +-------------------+-----------+
-//   | Files Analyse Gen Cal ... |
+//   | Files Edit Analyse Gen ...|
 //   +---------------------------+
 #pragma once
 #include <JuceHeader.h>
@@ -57,7 +57,9 @@ public:
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };
-    enum Tab { Files = 0, Analysis, Generator, Calibrate, Input, Edit, NumTabs };
+    enum Tab { Files = 0, Analysis, Generator, Calibrate, Input, Edit, NumTabs };   // saved: keep the numbers
+    /** The tab bar, left to right. */
+    static constexpr int kTabOrder[NumTabs] = { Files, Edit, Analysis, Generator, Calibrate, Input };
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;

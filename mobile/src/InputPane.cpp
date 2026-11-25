@@ -84,6 +84,18 @@ void InputPane::refresh()
         }
         currentId = ctx.audio.devices().getAudioDeviceSetup().inputDeviceName;
     }
+    // the MVX2U by default, once the microphone is open (the audio session is set up)
+    if (const int adapter = route::preferredInputIndex (names); adapter < 0)
+        adapterSeen = false;
+    else if (! adapterSeen && ctx.audio.isOpen())
+    {
+        adapterSeen = true;
+        if (ids[adapter] != currentId)
+        {
+            choose (adapter, false);   // lists the inputs again
+            return;
+        }
+    }
     for (int i = 0; i < names.size(); ++i)
     {
         auto* b = choices.add (new juce::TextButton (names[i]));
@@ -121,25 +133,25 @@ void InputPane::refresh()
     resized();
 }
 
-void InputPane::choose (int index)
+void InputPane::choose (int index, bool byUser)
 {
     if (! juce::isPositiveAndBelow (index, ids.size())) return;
     // Statistics get the kind of input only, never the device's name.
-    const auto label = choices[index]->getButtonText().toLowerCase();
+    const auto label = byUser ? choices[index]->getButtonText().toLowerCase() : juce::String ("usb");
     const juce::String kind = label.contains ("bluetooth") || label.contains ("sco") ? "bluetooth"
                             : label.contains ("usb") ? "usb"
                             : label.contains ("built-in") || label.contains ("builtin") || label.contains ("microphone") ? "built-in"
                             : label.contains ("wired") || label.contains ("headset") ? "wired" : "other";
-    telemetry::capture ("input_changed", { { "kind", kind } });
+    telemetry::capture ("input_changed", { { "kind", kind }, { "auto", ! byUser } });
     if (route::platformHasRoutes())
     {
-        if (! route::selectInput (ids[index]))
+        if (! route::selectInput (ids[index]) && byUser)
             showMessage ("Microphone", "The system did not switch to this input.");
     }
     else
     {
         const auto err = ctx.audio.selectInputDevice (ids[index], channelsBox.getSelectedId());
-        if (err.isNotEmpty()) showMessage ("Microphone", err);
+        if (err.isNotEmpty() && byUser) showMessage ("Microphone", err);
     }
     refresh();
     if (onInputChanged) onInputChanged();

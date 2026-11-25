@@ -2,6 +2,7 @@
 // the display settings (view layout, spectrogram range, channel).
 #pragma once
 #include <JuceHeader.h>
+#include "TouchControls.h"
 #include "AppContext.h"
 
 namespace scm
@@ -32,7 +33,7 @@ private:
                      deleteButton { "Delete" }, undoButton { "Undo" }, redoButton { "Redo" },
                      cropButton { "Crop" }, cropNewButton { "Crop to new recording" },
                      gainButton { "Apply gain" };
-    juce::Slider gain;
+    TouchSlider gain;
     juce::Label displayTitle { {}, "Display" };
     juce::ComboBox channelBox, axisBox, rangeBox;
     juce::Viewport viewport;

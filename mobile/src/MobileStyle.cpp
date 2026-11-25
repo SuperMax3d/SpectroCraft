@@ -116,4 +116,28 @@ void LookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b,
     g.setColour (border);
     g.drawRoundedRectangle (r, 6.0f, 1.0f);
 }
+void LookAndFeel::drawScrollbar (juce::Graphics& g, juce::ScrollBar& bar, int x, int y, int width, int height,
+                                 bool vertical, int thumbStart, int thumbSize, bool over, bool down)
+{
+    const juce::Rectangle<float> track ((float) x, (float) y, (float) width, (float) height);
+    g.setColour (bar.findColour (juce::ScrollBar::trackColourId));
+    g.fillRoundedRectangle (track.reduced (3.0f, 2.0f), 5.0f);
+    if (thumbSize <= 0) return;
+    const auto thumb = (vertical ? juce::Rectangle<float> ((float) x, (float) thumbStart, (float) width, (float) thumbSize)
+                                 : juce::Rectangle<float> ((float) thumbStart, (float) y, (float) thumbSize, (float) height))
+                           .reduced (3.0f, 2.0f);
+    const auto c = bar.findColour (juce::ScrollBar::thumbColourId);
+    g.setColour (down ? c.brighter (0.35f) : over ? c.brighter (0.15f) : c);
+    g.fillRoundedRectangle (thumb, 5.0f);
+    // grip lines in the middle of the thumb
+    g.setColour (style::panelBackground.withAlpha (0.8f));
+    const auto mid = thumb.getCentre();
+    for (int i = -1; i <= 1; ++i)
+    {
+        if (vertical)
+            g.fillRect (thumb.getX() + 3.0f, mid.y + (float) i * 4.0f - 0.5f, thumb.getWidth() - 6.0f, 1.2f);
+        else
+            g.fillRect (mid.x + (float) i * 4.0f - 0.5f, thumb.getY() + 3.0f, 1.2f, thumb.getHeight() - 6.0f);
+    }
+}
 } // namespace scm::style

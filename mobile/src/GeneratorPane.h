@@ -4,6 +4,7 @@
 #include <JuceHeader.h>
 #include "AppContext.h"
 #include "SignalSource.h"
+#include "TouchControls.h"
 
 namespace scm
 {
@@ -19,14 +20,15 @@ private:
     void timerCallback() override;
     void push();
     void refreshVisibility();
-    void setupSlider (juce::Slider& s, double lo, double hi, double mid, const juce::String& suffix, int decimals);
+    void setupSlider (TouchSlider& s, const juce::String& title, double lo, double hi, double mid,
+                      const juce::String& suffix, int decimals);
     juce::Component* addRow (const juce::String& name, juce::Component& c);
 
     AppContext& ctx;
     GeneratorSettings settings;
     juce::TextButton onButton { "Generator off" };
     juce::ComboBox kindBox, noiseBox;
-    juce::Slider level, tone, sweepStart, sweepEnd, sweepTime, slope, lowCut, highCut;
+    TouchSlider level, tone, sweepStart, sweepEnd, sweepTime, slope, lowCut, highCut;
     juce::ToggleButton sweepLog { "Log sweep" }, sweepRepeat { "Repeat" };
     juce::Label info;
     juce::OwnedArray<juce::Label> labels;

@@ -4,6 +4,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "MobileDocument.h"
+#include "PreciseTouch.h"
 #include "TimeViewport.h"
 #include <atomic>
 #include <set>
@@ -32,6 +33,9 @@ public:
 
     /** Frequency range shown (Hz); log or linear axis. */
     void setFrequencyRange (double lo, double hi);
+    /** The scale was set on purpose (its menu, or a double tap on it), not by a
+        pinch: the range to keep for the next files, until it is set again. */
+    std::function<void (double lo, double hi)> onFrequencyScaleChosen;
     void setLogFrequency (bool log);
     /** Development hook: the precision reticle at (fx, fy), fractions of the plot. */
     void showPreciseAt (float fx, float fy)
@@ -47,6 +51,7 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void visibilityChanged() override;
 
     static constexpr int kAxisW = 44;
     static constexpr int kRulerH = 22;
@@ -65,21 +70,29 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
 
-    // Precision touch: a finger held still (~0.45 s) shows a magnifier and a
-    // readout, and moves a reticle 4x slower than itself. Held at the start of
-    // a touch it places the playhead on release (Point); held while dragging a
-    // selection it moves the selection's edge (Edge).
-    enum class Precise { None, Point, Edge };
+    // Precision touch (PreciseTouch.h): a finger held still (~0.45 s) shows a
+    // magnifier above it and a readout, and moves a reticle 4x slower than
+    // itself. Held at the start of a touch it places the playhead on release
+    // (Point); held while dragging a selection it moves the selection's edge
+    // (Edge). A finger put down again soon after a lift carries on (Edge from
+    // the playhead, or the same edge).
+    class Lens;
     void enterPrecise();
-    void drawPrecise (juce::Graphics&, juce::Rectangle<float> plot);
-    Precise precise = Precise::None;
+    void endPrecise();
+    /** The magnifier's place and readout, after the finger or the picture changed. */
+    void updateLens();
+    void paintLens (juce::Graphics&, juce::Point<int> lensOrigin);
+    void drawReticle (juce::Graphics&, juce::Rectangle<float> plot);
+    juce::String readoutText() const;
+    precise::Tracker fine;             // the precision touch's state
+    std::unique_ptr<Lens> lens;        // on the screen, above the other views
+    precise::Placement lensPlace;      // in the lens host's coordinates
+    juce::String lensText;
     std::set<int> touches;             // fingers down on the plot
-    juce::Point<float> fingerNow, fingerAnchor, crossAnchor, cross, stillAt;
+    juce::Point<float> fingerNow, stillAt;
     juce::uint32 stillSinceMs = 0;
     bool dragging = false;             // a one-finger selection drag is under way
     double dragFromTime = 0.0;         // its fixed end
-    static constexpr int kHoldMs = 450;
-    static constexpr float kPreciseGain = 0.25f;
     juce::Rectangle<float> plotArea() const;
     double nyquist() const;
     double yToFreq (double y) const;
@@ -91,8 +104,9 @@ private:
     void zoomFrequency (double anchorHz, double factor);
     /** Tap on the frequency scale: minimum / maximum frequency, full range. */
     void showAxisMenu();
-    /** Asks for the minimum (or maximum) frequency in Hz. */
+    /** Asks for the minimum (or maximum) frequency in Hz, on the number pad. */
     void askFrequency (bool minimum);
+    void chooseFrequencyRange (double lo, double hi);
 
     MobileDocument& document;
     TimeViewport& view;

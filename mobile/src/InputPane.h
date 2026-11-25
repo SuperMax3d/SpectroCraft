@@ -16,12 +16,15 @@ public:
     std::function<void()> onInputChanged;
 
 private:
-    void choose (int index);
+    void choose (int index, bool byUser = true);
 
     AppContext& ctx;
     juce::Label title { {}, "Microphone" }, status, note;
     juce::OwnedArray<juce::TextButton> choices;
     juce::StringArray ids;
+    // The MVX2U is chosen when it shows up (at launch or plugged in), once:
+    // another input picked while it stays plugged in is kept.
+    bool adapterSeen = false;
     juce::ComboBox channelsBox, rateBox;
     // Where the sound plays (generator, playback): iOS shows the system's
     // picker (speaker, AirPods, AirPlay); elsewhere a list of output devices.

@@ -18,15 +18,11 @@ CalibrationPane::CalibrationPane (AppContext& c) : ctx (c)
     resultLabel.setColour (juce::Label::textColourId, style::textDim);
     resultLabel.setJustificationType (juce::Justification::topLeft);
 
+    // numbers come from the app's number pad, not the system keyboard (TouchControls.h)
     for (auto* e : { &refLevel, &refFreq, &typedValue })
-    {
-        e->setInputRestrictions (8, "0123456789.-");
-        e->setFont (style::font (16.0f));
-        e->setJustification (juce::Justification::centredLeft);
         content.addAndMakeVisible (e);
-    }
-    refLevel.setText (ctx.props.getValue ("calibratorDb", "94.0"));
-    refFreq.setText (ctx.props.getValue ("calibratorHz", "1000"));
+    refLevel.setValue (ctx.props.getValue ("calibratorDb", "94.0").getDoubleValue());
+    refFreq.setValue (ctx.props.getValue ("calibratorHz", "1000").getDoubleValue());
 
     calibrateButton.onClick = [this] { startCalibrator(); };
     typedButton.onClick = [this] { applyTyped(); };
@@ -47,8 +43,7 @@ CalibrationPane::CalibrationPane (AppContext& c) : ctx (c)
         content.addAndMakeVisible (b);
 
     viewport.setViewedComponent (&content, false);
-    viewport.setScrollBarsShown (true, false);
-    viewport.setScrollOnDragMode (juce::Viewport::ScrollOnDragMode::all);
+    setupScrolling (viewport);
     addAndMakeVisible (viewport);
     refresh();
     startTimerHz (10);
@@ -65,8 +60,8 @@ void CalibrationPane::refresh()
                             juce::dontSendNotification);
     else
         stateLabel.setText ("Not calibrated: levels in dBFS.", juce::dontSendNotification);
-    typedValue.setText (currentCal.valid() ? juce::String (cal::fullScaleDbSpl (currentCal.fullScalePa), 2)
-                                           : juce::String());
+    typedValue.setValue (currentCal.valid() ? std::optional<double> (cal::fullScaleDbSpl (currentCal.fullScalePa))
+                                            : std::nullopt);
     repaint();
 }
 
@@ -83,8 +78,8 @@ void CalibrationPane::startCalibrator()
         showMessage ("Calibration", "The microphone is not available.");
         return;
     }
-    ctx.props.setValue ("calibratorDb", refLevel.getText());
-    ctx.props.setValue ("calibratorHz", refFreq.getText());
+    ctx.props.setValue ("calibratorDb", juce::String (refLevel.getValue().value_or (94.0)));
+    ctx.props.setValue ("calibratorHz", juce::String (refFreq.getValue().value_or (1000.0)));
     ctx.audio.startShot (3.0);
     calibrateButton.setEnabled (false);
     resultLabel.setText ("Measuring... keep the calibrator on the microphone.", juce::dontSendNotification);
@@ -94,8 +89,8 @@ void CalibrationPane::finishCalibrator()
 {
     calibrateButton.setEnabled (true);
     const auto shot = ctx.audio.takeShot();
-    const double refDb = refLevel.getText().getDoubleValue();
-    const double hz = refFreq.getText().getDoubleValue();
+    const double refDb = refLevel.getValue().value_or (0.0);
+    const double hz = refFreq.getValue().value_or (0.0);
     if (refDb < 40.0 || refDb > 160.0 || hz < 20.0 || hz > 20000.0)
     {
         resultLabel.setText ("Check the calibrator level (40-160 dB) and frequency (20-20000 Hz).",
@@ -126,7 +121,7 @@ void CalibrationPane::finishCalibrator()
 
 void CalibrationPane::applyTyped()
 {
-    const double db = typedValue.getText().getDoubleValue();
+    const double db = typedValue.getValue().value_or (0.0);
     if (db < 60.0 || db > 200.0)
     {
         resultLabel.setText ("Type the level of a full-scale signal, between 60 and 200 dB-SPL "
@@ -168,25 +163,25 @@ void CalibrationPane::paint (juce::Graphics& g)
 void CalibrationPane::resized()
 {
     viewport.setBounds (getLocalBounds());
-    const int w = getWidth() - 12, x = style::kGap;
+    const int w = getWidth() - kScrollBarW - style::kGap, x = style::kGap;
     int y = style::kGap;
     const auto row = [&] (juce::Component& c, int h) { c.setBounds (x, y, w, h); y += h + 4; };
     row (inputLabel, 24);
     row (stateLabel, 40);
     row (meterLabel, 34);
     y += 6;
-    refLabel.setBounds (x, y, w - 110, style::kTouch); refLevel.setBounds (x + w - 100, y + 4, 100, 36); y += style::kTouch;
-    freqLabel.setBounds (x, y, w - 110, style::kTouch); refFreq.setBounds (x + w - 100, y + 4, 100, 36); y += style::kTouch + 4;
+    refLabel.setBounds (x, y, w - 118, style::kTouch); refLevel.setBounds (x + w - 110, y + 4, 110, 36); y += style::kTouch;
+    freqLabel.setBounds (x, y, w - 118, style::kTouch); refFreq.setBounds (x + w - 110, y + 4, 110, 36); y += style::kTouch + 4;
     row (calibrateButton, style::kTouch);
     y += 8;
-    typedLabel.setBounds (x, y, w - 180, style::kTouch);
-    typedValue.setBounds (x + w - 170, y + 4, 100, 36);
+    typedLabel.setBounds (x, y, w - 188, style::kTouch);
+    typedValue.setBounds (x + w - 180, y + 4, 110, 36);
     typedButton.setBounds (x + w - 64, y, 64, style::kTouch);
     y += style::kTouch + 4;
     clearButton.setBounds (x, y, w / 2 - 3, style::kTouch);
     applyFileButton.setBounds (x + w / 2 + 3, y, w / 2 - 3, style::kTouch);
     y += style::kTouch + 6;
     row (resultLabel, 80);
-    content.setSize (getWidth() - 8, y);
+    content.setSize (getWidth() - kScrollBarW, y);
 }
 } // namespace scm

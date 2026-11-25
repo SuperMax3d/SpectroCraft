@@ -11,12 +11,13 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 
 | | |
 |---|---|
-| Views | Waveform, spectrogram, or both (top bar W / S / W+S). Pinch to zoom (horizontal = time, vertical = frequency on the spectrogram, amplitude on the waveform), two fingers to pan, double tap to show all. One-finger drag selects a time range; a tap sets the playhead. |
+| Views | Waveform, spectrogram, or both (top bar W / S / W+S). Pinch to zoom (horizontal = time, vertical = frequency on the spectrogram, amplitude on the waveform), two fingers to pan, double tap to show all. One-finger drag selects a time range; a tap sets the playhead. On the spectrogram, a finger held still shows a magnifier above it (over the views above when the spectrogram is short) with the time, frequency and level, and moves a reticle 4x slower than itself: let go to place the playhead there. Put the finger down again within 1.5 s and it carries on as if it had not been lifted, selecting from the playhead to the reticle (or, after a held selection drag, moving the same edge), as many strokes as needed. A second finger goes back to pinch / pan. A tap on the frequency scale sets its minimum or maximum, or the full range (a double tap); the range set there is kept for the next files and launches until it is set again (a pinch only zooms the file on screen). |
 | Files | Open a WAV (the recordings list, or *Open...* for the Files app / the Android file picker), save, share (with its video), delete. Recordings go to the app's Documents folder (visible in the iOS Files app). |
 | Recording | *Unlimited* (until the memory limit shown next to the time, then the take is kept) or *Loop N s* (keeps the last N seconds; the saved file starts with the oldest sample). Every take is saved when it stops. |
-| Microphone | Built-in, USB or Bluetooth (*Input* tab), mono or stereo, sample rate. The input runs in measurement mode (no automatic gain or noise suppression). |
+| Microphone | Built-in, USB or Bluetooth (*Input* tab), mono or stereo, sample rate. The input runs in measurement mode (no automatic gain or noise suppression). A Shure MVX2U (XLR to USB) is chosen by default whenever it is plugged in (at launch, or when it is connected); another input picked while it stays plugged in is kept. |
 | Calibration | Per input (*Calibrate* tab): typed (the dB-SPL a full-scale signal stands for) or with an acoustic calibrator (default 1 kHz, 94 dB-SPL; any level and frequency can be typed). The calibration goes into every new recording, so the desktop shows it in dB-SPL. |
 | Analysis | *Analyse* tab: FFT Linear, FFT Log and 1/3 octave of the selection (the visible range when nothing is selected, the last second while recording), with RMS and peak, through the desktop's `sc::measures`. *Store* keeps the curve (8 slots); stored plots are saved in the file. |
+| Typing numbers | Values (generator, gain, calibration, frequency scale) are typed on the app's own number pad, which opens beside the value instead of the system keyboard; OK sets it, a tap elsewhere cancels. Sliders in a panel do not scroll it and do not jump when tapped; a panel scrolls from its labels or its scroll bar. |
 | Generator | *Generate* tab: manual tone, linear or log sweep (repeating or one-shot), white / pink / brown / custom noise (slope in dB/octave, band edges). It plays while recording. Level = RMS dBFS. |
 | Editing | *Edit* tab: delete the selection, change its gain (or the whole file's), undo / redo; display options (log / linear frequency, dB range, channel). |
 | Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. The picture gets its own part of the screen beside the waveform and spectrogram (a column for a portrait picture, a strip on top for a landscape one; a tap on its title row hides it). With *Video* on it shows the camera; *Play* shows the take's movie in step with the sound, and *Stop* goes back to the camera. A file opened with a movie shows it. |
@@ -31,7 +32,7 @@ When the build has keys (see *CI and store builds*), the app sends:
 - **usage statistics** to PostHog: events such as `recording_started` (mode, loop length, channels,
   sample rate, calibrated, video), `recording_stopped` (duration), `file_opened`, `calibration` (method,
   result code), `analysis_settings`, `plot_stored`, `generator_toggled`, `input_changed` (built-in /
-  USB / Bluetooth), `edit`, `video_enabled`. Each carries a random install id, the app version, the OS
+  USB / Bluetooth, chosen by hand or not), `edit`, `video_enabled`. Each carries a random install id, the app version, the OS
   and its version, and the phone model. PostHog keeps no person profile (`$process_person_profile`
   false).
 

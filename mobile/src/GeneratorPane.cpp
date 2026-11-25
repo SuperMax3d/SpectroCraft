@@ -2,6 +2,7 @@
 #include "LiveAudio.h"
 #include "MobileStyle.h"
 #include "Telemetry.h"
+#include "TouchControls.h"
 
 namespace scm
 {
@@ -28,44 +29,41 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
     kindBox.onChange = [this] { refreshVisibility(); push(); };
     addRow ("Signal", kindBox);
 
-    setupSlider (level, -80.0, 0.0, -20.0, " dBFS", 1);
+    setupSlider (level, "Level (RMS)", -80.0, 0.0, -20.0, " dBFS", 1);
     level.setValue (settings.levelDb, juce::dontSendNotification);
     addRow ("Level (RMS)", level);
 
-    setupSlider (tone, 10.0, 24000.0, 1000.0, " Hz", 1);
+    setupSlider (tone, "Frequency", 10.0, 24000.0, 1000.0, " Hz", 1);
     tone.setValue (settings.toneHz, juce::dontSendNotification);
     addRow ("Frequency", tone);
 
-    setupSlider (sweepStart, 10.0, 24000.0, 1000.0, " Hz", 0);
+    setupSlider (sweepStart, "Sweep from", 10.0, 24000.0, 1000.0, " Hz", 0);
     sweepStart.setValue (settings.sweepStartHz, juce::dontSendNotification);
     addRow ("Sweep from", sweepStart);
-    setupSlider (sweepEnd, 10.0, 24000.0, 1000.0, " Hz", 0);
+    setupSlider (sweepEnd, "Sweep to", 10.0, 24000.0, 1000.0, " Hz", 0);
     sweepEnd.setValue (settings.sweepEndHz, juce::dontSendNotification);
     addRow ("Sweep to", sweepEnd);
-    setupSlider (sweepTime, 0.5, 120.0, 10.0, " s", 1);
+    setupSlider (sweepTime, "Sweep duration", 0.5, 120.0, 10.0, " s", 1);
     sweepTime.setValue (settings.sweepSeconds, juce::dontSendNotification);
     addRow ("Duration", sweepTime);
     sweepLog.setToggleState (settings.sweepLog, juce::dontSendNotification);
     sweepRepeat.setToggleState (settings.sweepRepeat, juce::dontSendNotification);
     sweepLog.onClick = sweepRepeat.onClick = [this] { push(); };
-    addRow ("", sweepLog);
-    addRow ("", sweepRepeat);
+    addRow ("", sweepLog);   // with Repeat beside it (resized)
+    content.addAndMakeVisible (sweepRepeat);
 
     noiseBox.addItemList ({ "White", "Pink", "Brown", "Custom" }, 1);
     noiseBox.setSelectedId ((int) settings.noise + 1, juce::dontSendNotification);
     noiseBox.onChange = [this] { refreshVisibility(); push(); };
     addRow ("Noise", noiseBox);
-    slope.setRange (-12.0, 6.0, 0.5);
-    slope.setSliderStyle (juce::Slider::LinearHorizontal);
-    slope.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 30);
-    slope.setTextValueSuffix (" dB/oct");
+    slope.setup ("Slope", -12.0, 6.0, 0.5, " dB/oct", 1, 96);
     slope.setValue (settings.slopeDbPerOctave, juce::dontSendNotification);
     slope.onValueChange = [this] { push(); };
     addRow ("Slope", slope);
-    setupSlider (lowCut, 10.0, 24000.0, 1000.0, " Hz", 0);
+    setupSlider (lowCut, "Low edge", 10.0, 24000.0, 1000.0, " Hz", 0);
     lowCut.setValue (settings.lowHz, juce::dontSendNotification);
     addRow ("Low edge", lowCut);
-    setupSlider (highCut, 10.0, 24000.0, 1000.0, " Hz", 0);
+    setupSlider (highCut, "High edge", 10.0, 24000.0, 1000.0, " Hz", 0);
     highCut.setValue (settings.highHz, juce::dontSendNotification);
     addRow ("High edge", highCut);
 
@@ -74,8 +72,7 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
     content.addAndMakeVisible (info);
 
     viewport.setViewedComponent (&content, false);
-    viewport.setScrollBarsShown (true, false);
-    viewport.setScrollOnDragMode (juce::Viewport::ScrollOnDragMode::all);
+    setupScrolling (viewport);
     addAndMakeVisible (viewport);
 
     refreshVisibility();
@@ -88,15 +85,11 @@ GeneratorPane::~GeneratorPane()
     ctx.audio.generator().setEnabled (false);
 }
 
-void GeneratorPane::setupSlider (juce::Slider& s, double lo, double hi, double mid,
+void GeneratorPane::setupSlider (TouchSlider& s, const juce::String& title, double lo, double hi, double mid,
                                  const juce::String& suffix, int decimals)
 {
-    s.setSliderStyle (juce::Slider::LinearHorizontal);
-    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 96, 30);
-    s.setRange (lo, hi, 0.0);
+    s.setup (title, lo, hi, 0.0, suffix, decimals);
     if (mid > lo && mid < hi) s.setSkewFactorFromMidPoint (mid);
-    s.setNumDecimalPlacesToDisplay (decimals);
-    s.setTextValueSuffix (suffix);
     s.onValueChange = [this] { push(); };
 }
 
@@ -169,7 +162,7 @@ void GeneratorPane::paint (juce::Graphics& g)
 void GeneratorPane::resized()
 {
     viewport.setBounds (getLocalBounds());
-    const int w = getWidth() - 12;
+    const int w = getWidth() - kScrollBarW - style::kGap;   // the scroll bar keeps its own strip
     int y = style::kGap;
     onButton.setBounds (style::kGap, y, std::min (220, w), style::kTouch);
     y += style::kTouch + style::kGap;
@@ -178,11 +171,14 @@ void GeneratorPane::resized()
     {
         if (! comp->isVisible()) continue;
         label->setBounds (style::kGap, y, labelW, style::kTouch);
-        comp->setBounds (style::kGap + labelW, y, w - labelW - style::kGap, style::kTouch);
+        auto area = juce::Rectangle<int> (style::kGap + labelW, y, w - labelW - style::kGap, style::kTouch);
+        if (comp == &sweepLog)
+            sweepRepeat.setBounds (area.removeFromRight (area.getWidth() / 2));
+        comp->setBounds (area);
         y += style::kTouch + 2;
     }
     info.setBounds (style::kGap, y, w, 24);
     y += 30;
-    content.setSize (getWidth() - 8, y);
+    content.setSize (getWidth() - kScrollBarW, y);
 }
 } // namespace scm

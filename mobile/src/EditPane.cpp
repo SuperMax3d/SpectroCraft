@@ -42,11 +42,8 @@ EditPane::EditPane (AppContext& c) : ctx (c)
         if (! ctx.document.gainSelection ((float) gain.getValue(), err)) showMessage ("Gain", err);
         else telemetry::capture ("edit", { { "op", "gain" } });
     };
-    gain.setSliderStyle (juce::Slider::LinearHorizontal);
-    gain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 30);
-    gain.setRange (-40.0, 40.0, 0.1);
+    gain.setup ("Gain", -40.0, 40.0, 0.1, " dB", 1, 80);
     gain.setValue (-6.0, juce::dontSendNotification);
-    gain.setTextValueSuffix (" dB");
     for (auto* comp : std::initializer_list<juce::Component*> { &selectAll, &zoomSel, &deleteButton, &cropButton, &cropNewButton, &undoButton,
                                                                 &redoButton, &gainButton, &gain })
         content.addAndMakeVisible (comp);
@@ -72,8 +69,7 @@ EditPane::EditPane (AppContext& c) : ctx (c)
     for (auto* b : { &axisBox, &rangeBox, &channelBox }) content.addAndMakeVisible (b);
 
     viewport.setViewedComponent (&content, false);
-    viewport.setScrollBarsShown (true, false);
-    viewport.setScrollOnDragMode (juce::Viewport::ScrollOnDragMode::all);
+    setupScrolling (viewport);
     addAndMakeVisible (viewport);
 
     ctx.document.addChangeListener (this);
@@ -125,7 +121,7 @@ void EditPane::paint (juce::Graphics& g)
 void EditPane::resized()
 {
     viewport.setBounds (getLocalBounds());
-    const int w = getWidth() - 12, x = style::kGap;
+    const int w = getWidth() - kScrollBarW - style::kGap, x = style::kGap;
     int y = style::kGap;
     selLabel.setBounds (x, y, w, 26); y += 30;
     const int third = (w - 8) / 3;
@@ -147,6 +143,6 @@ void EditPane::resized()
     rangeBox.setBounds (x + w / 2 + 2, y, w / 2 - 2, 38);
     y += 42;
     if (channelBox.isVisible()) { channelBox.setBounds (x, y, w / 2 - 2, 38); y += 42; }
-    content.setSize (getWidth() - 8, y + 6);
+    content.setSize (getWidth() - kScrollBarW, y + 6);
 }
 } // namespace scm

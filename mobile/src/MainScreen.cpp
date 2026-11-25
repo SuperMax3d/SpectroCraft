@@ -96,6 +96,12 @@ MainScreen::MainScreen (AppContext& c)
     inputPane->onInputChanged = [this] { calibrationPane->refresh(); };
     editPane->onChannelChanged = [this] (int ch) { waveform.setChannel (ch); spectrogram.setChannel (ch); };
     editPane->onLogFrequencyChanged = [this] (bool log) { spectrogram.setLogFrequency (log); };
+    spectrogram.onFrequencyScaleChosen = [this] (double lo, double hi)
+    {
+        // kept for the next files and the next launches, until it is set again
+        ctx.props.setValue ("spectroMinHz", lo);
+        ctx.props.setValue ("spectroMaxHz", hi >= ctx.document.sampleRate() * 0.5 - 0.5 ? 0.0 : hi);
+    };
     editPane->onDisplayChanged = [this] { ctx.document.spectral().clearCache(); spectrogram.contentChanged(); };
     editPane->onZoomToSelection = [this] { zoomToSelection(); };
     editPane->onOpenFile = [this] (const juce::File& f)
@@ -197,7 +203,11 @@ void MainScreen::documentReplaced()
         ctx.audio.setPlaybackSource (&d->engine);
     ctx.view.setDuration (ctx.document.duration(), ctx.recorder.isRecording());
     if (! ctx.recorder.isRecording()) ctx.view.showAll();
-    spectrogram.setFrequencyRange (20.0, ctx.document.sampleRate() * 0.5);
+    {
+        // the scale last set on purpose (0 = up to the file's Nyquist frequency)
+        const double nyquist = ctx.document.sampleRate() * 0.5, hi = ctx.props.getDoubleValue ("spectroMaxHz", 0.0);
+        spectrogram.setFrequencyRange (ctx.props.getDoubleValue ("spectroMinHz", 20.0), hi > 0.0 ? std::min (hi, nyquist) : nyquist);
+    }
     waveform.setChannel (0);
     spectrogram.setChannel (0);
     updateTransport();
@@ -526,7 +536,7 @@ void MainScreen::resized()
     {
         auto t = tabsArea.reduced (2, 2);
         const int w = t.getWidth() / NumTabs;
-        for (auto* b : tabButtons) b->setBounds (t.removeFromLeft (w).reduced (1, 0));
+        for (int tab : kTabOrder) tabButtons[tab]->setBounds (t.removeFromLeft (w).reduced (1, 0));
     }
     if (auto* c = tabContent (currentTab); c != nullptr && panelOpen)
         c->setBounds (panelArea);
