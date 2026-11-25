@@ -23,6 +23,7 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 | Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. The picture gets its own part of the screen beside the waveform and spectrogram (a column for a portrait picture, a strip on top for a landscape one; a tap on its title row hides it). With *Video* on it shows the camera; *Play* shows the take's movie in step with the sound, and *Stop* goes back to the camera. A file opened with a movie shows it. |
 | Tablets | When the screen's smaller side is at least 600 points (every iPad, Android tablets), two panel groups show at once, as in the desktop's left column: *Files \| Analyse* and *Edit \| Generate \| Calibrate \| Input*, so the analysis stays in view while the generator, the calibration or the edit tools are open. Landscape: the groups stacked left of the views, the transport along the bottom. Portrait: the groups side by side under the views. Drag the bars between them to share the room (double tap: the default). The top bar's panel button hides the groups; *Undo* / *Redo* sit next to the view buttons. Phones keep one panel at a time. |
 | Keyboard | A hardware keyboard (iPad, Android tablet) gets the desktop's shortcuts, Cmd on iPad and Ctrl on Android: Space play / pause, Cmd+. stop, Shift+F10 record, Home / End, Cmd+A select all, Esc clear the selection, Delete, Cmd+Z undo, Cmd+Y or Cmd+Shift+Z redo, Cmd+S save, Cmd+= / Cmd+- / Cmd+0 zoom in / out / all, Cmd+Shift+Return show or hide the panels. |
+| Sound map | *Map* tab (the last tab; on a tablet it is in the first group and, open, takes the screen): takes at many points of a space with the position of each (x, y, z) from printed AprilTag markers seen by the camera, and a map of the levels per band. Survey the markers, measure points (countdown, picture, take, picture), view the top or side map. Tag sheets (PDF) and a periodic pink source signal from the menu. Procedure and precision: `docs/sound-map.md`. |
 
 ## Crash reports and statistics
 
@@ -132,3 +133,5 @@ the code means a fork or a pull request never reports to them.
 - Android 10 (API 29) or later: JUCE 9's Android font code needs it. iOS 16 or later.
 - iPad: full screen only (no Split View or Slide Over, `REQUIRES_FULL_SCREEN`): in multitasking iPadOS
   stops the camera of an app that does not ask for multitasking camera access.
+- Sound map: the camera code (iOS still patch, Android stills) is compiled in CI but not yet tried on
+  a phone; Android stills are 1080p (iOS about 4K). See `docs/sound-map.md`, section 8.

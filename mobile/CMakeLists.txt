@@ -90,6 +90,37 @@ foreach (f IN LISTS SC_ENGINE_SOURCES)
     endif()
 endforeach()
 
+# ---------------------------------------------------------------- sound map
+# AprilTag 3 (AprilRobotics, BSD-2-Clause; the files the detector needs, see
+# extern/apriltag/README.md) for the sound map's markers. Always optimised: a
+# Debug detector is about 10x slower on a full picture.
+set (SC_APRILTAG_DIR ${SC_ROOT}/extern/apriltag)
+file (GLOB SC_APRILTAG_COMMON ${SC_APRILTAG_DIR}/common/*.c)
+add_library (sc_apriltag STATIC
+    ${SC_APRILTAG_DIR}/apriltag.c
+    ${SC_APRILTAG_DIR}/apriltag_quad_thresh.c
+    ${SC_APRILTAG_DIR}/tag36h11.c
+    ${SC_APRILTAG_COMMON})
+target_include_directories (sc_apriltag SYSTEM PUBLIC ${SC_APRILTAG_DIR})
+set_target_properties (sc_apriltag PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+target_compile_options (sc_apriltag PRIVATE -O2 -w)
+target_compile_definitions (sc_apriltag PRIVATE NDEBUG)
+find_package (Threads REQUIRED)
+target_link_libraries (sc_apriltag PUBLIC Threads::Threads)
+if (NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries (sc_apriltag PUBLIC m)
+endif()
+
+# Headless sound map code (geometry, survey, levels, files), shared by the app and the tests.
+set (SC_SOUNDMAP_SOURCES
+    src/soundmap/SmPose.cpp
+    src/soundmap/SmSurvey.cpp
+    src/soundmap/SmTagDetector.cpp
+    src/soundmap/SmLevels.cpp
+    src/soundmap/SmInterp.cpp
+    src/soundmap/SmProject.cpp
+    src/soundmap/SmMarkersPdf.cpp)
+
 if (APPLE)
     set (SC_ENGINE_MM ${SC_ROOT}/src/VideoFrames_mac.mm ${SC_ROOT}/src/VideoAudio_mac.mm)
     set_source_files_properties (${SC_ENGINE_MM} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -162,7 +193,10 @@ set (SC_MOBILE_SOURCES
     src/VideoPane.cpp
     src/Telemetry.cpp
     src/ScreenLayout.cpp
-    src/MainScreen.cpp)
+    src/SoundMapView.cpp
+    src/SoundMapPane.cpp
+    src/MainScreen.cpp
+    ${SC_SOUNDMAP_SOURCES})
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set_source_files_properties (src/AudioRoute_ios.mm src/Telemetry_ios.mm src/SafeArea_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -184,6 +218,7 @@ target_include_directories (SpectroCraftMobile PRIVATE
 target_link_libraries (SpectroCraftMobile
     PRIVATE
         sc_mobile_fonts
+        sc_apriltag
         soxr
         soundtouch
         juce::juce_audio_basics
@@ -269,6 +304,8 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         tests/VideoTests.cpp
         tests/TouchTests.cpp
         tests/InputTests.cpp
+        tests/SoundMapTests.cpp
+        ${SC_SOUNDMAP_SOURCES}
         src/SignalSource.cpp
         src/StoredPlots.cpp
         src/Calibration.cpp
@@ -285,7 +322,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
     target_include_directories (SpectroCraftMobileTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src ${SC_ROOT}/include)
     target_link_libraries (SpectroCraftMobileTests PRIVATE
-        soxr soundtouch
+        sc_apriltag soxr soundtouch
         juce::juce_audio_basics juce::juce_audio_devices juce::juce_audio_formats juce::juce_core
         juce::juce_data_structures juce::juce_dsp juce::juce_events juce::juce_graphics juce::juce_gui_basics
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
