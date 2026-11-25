@@ -4,6 +4,7 @@
  */
 #include "ModelPanel.h"
 #include "Application.h"
+#include "FileDialogs.h"   // system file dialogs everywhere (issue #71)
 
 #include <algorithm>
 #include <cmath>
@@ -1055,7 +1056,8 @@ void ModelPanel::togglePick (int mode)
 void ModelPanel::chooseFile (bool save, const juce::String& title, const juce::String& patterns,
                              std::function<void (const juce::File&)> then)
 {
-    chooser_ = std::make_unique<juce::FileChooser> (title, juce::File(), patterns);
+    chooser_ = std::make_unique<juce::FileChooser> (title, juce::File(), patterns,
+                                                    sc::files::useNativeDialogs());
     const int flags = save ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting)
                            : juce::FileBrowserComponent::openMode;
     juce::Component::SafePointer<ModelPanel> safe (this);

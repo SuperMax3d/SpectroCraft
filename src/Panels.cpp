@@ -9,6 +9,7 @@
 #include "FFTHelpers.h"
 #include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "WorkProgress.h"
+#include "FileDialogs.h"   // system file dialogs everywhere (issue #71)
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -6387,10 +6388,6 @@ void MarkerListPanel::showMarkerContextMenu()
         showFindDialog();
 }
 
-// useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some
-// systems; JUCE's built-in browser is pure GDI and works everywhere.
-static constexpr bool kUseNativeFileChooser = false;
-
 void MarkerListPanel::exportMarkersCsv()
 {
     if (app.markers().count() == 0)
@@ -6399,7 +6396,7 @@ void MarkerListPanel::exportMarkersCsv()
     juce::FileChooser chooser ("Export Markers as CSV",
         app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
                                          : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
-        "*.csv", kUseNativeFileChooser);
+        "*.csv", sc::files::useNativeDialogs ());
 
     if (!chooser.browseForFileToSave (true))
         return;
@@ -6421,7 +6418,7 @@ int MarkerListPanel::importMarkersCsv()
 
     juce::FileChooser chooser ("Import Markers from CSV",
         app.audioEngine().getFile().getParentDirectory(),
-        "*.csv", kUseNativeFileChooser);
+        "*.csv", sc::files::useNativeDialogs ());
 
     if (!chooser.browseForFileToOpen())
         return 0;
@@ -12832,7 +12829,8 @@ void ActionBatchWindow::browseInput()
 {
     juce::FileChooser fc ("Choose the input folder...",
                           inputField.getText ().isEmpty () ? juce::File ()
-                                                           : juce::File (inputField.getText()));
+                                                           : juce::File (inputField.getText()),
+                          "", sc::files::useNativeDialogs ());
     if (fc.browseForDirectory ())
         inputField.setText (fc.getResult().getFullPathName (), juce::NotificationType::dontSendNotification);
 }
@@ -12842,7 +12840,8 @@ void ActionBatchWindow::browseOutput()
     if (sameOutBox.getToggleState ()) return;   // mirrored - nothing to browse for
     juce::FileChooser fc ("Choose the output folder...",
                           outputField.getText ().isEmpty () ? juce::File ()
-                                                           : juce::File (outputField.getText()));
+                                                           : juce::File (outputField.getText()),
+                          "", sc::files::useNativeDialogs ());
     if (fc.browseForDirectory ())
         outputField.setText (fc.getResult().getFullPathName (), juce::NotificationType::dontSendNotification);
 }

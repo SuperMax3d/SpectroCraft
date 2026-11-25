@@ -38,6 +38,7 @@
 #endif
 #include "IconData.h"
 #include "ScaleForm.h"
+#include "FileDialogs.h"   // system file dialogs everywhere (issue #71)
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include <algorithm>
 #include <limits>
@@ -89,6 +90,8 @@ public:
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment (lib, "dwmapi.lib")
 #endif
 
 // The icon is embedded at runtime rather than via a .rc resource: the rc.exe in
@@ -313,6 +316,48 @@ private:
 #endif
     }
 };
+
+namespace
+{
+/** The background of the toolbar's own row or column (issue #65): the menu
+    bar's look. A right-click on it shows the toolbar menu. */
+class ToolbarStrip : public juce::Component
+{
+public:
+    explicit ToolbarStrip (juce::MenuBarComponent& bar) : menuBar (bar) { setComponentID ("toolbar-strip"); }
+    std::function<void()> onContextMenu;
+    void paint (juce::Graphics& g) override
+    {
+        getLookAndFeel().drawMenuBarBackground (g, getWidth(), getHeight(), false, menuBar);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() && onContextMenu)
+            onContextMenu();
+    }
+private:
+    juce::MenuBarComponent& menuBar;
+};
+
+/** Where a drag of the toolbar's grip would put it (issue #65). */
+class ToolbarDropHint : public juce::Component
+{
+public:
+    ToolbarDropHint()
+    {
+        setComponentID ("toolbar-drop-hint");
+        setInterceptsMouseClicks (false, false);
+    }
+    void paint (juce::Graphics& g) override
+    {
+        const auto r = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (juce::Colour (0xff4ea1f5).withAlpha (0.25f));
+        g.fillRoundedRectangle (r, 3.0f);
+        g.setColour (juce::Colour (0xff4ea1f5));
+        g.drawRoundedRectangle (r, 3.0f, 1.5f);
+    }
+};
+} // namespace
 
 namespace
 {
@@ -720,6 +765,17 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     };
     toolbar_->setCustom (sc::toolbar::parse (app.recentStore->getValue ("toolbar_shortcuts")));
     toolbarVisible_ = app.recentStore->getIntValue ("toolbar_visible", 1) != 0;
+    // Issue #65: the toolbar moves by its grip; a row or column of its own
+    // gets a background strip (added first: behind the toolbar).
+    toolbarPlacement_ = sc::toolbar::Placement::fromString (app.recentStore->getValue ("toolbar_placement"));
+    {
+        auto strip = std::make_unique<ToolbarStrip> (menuBar);
+        strip->onContextMenu = [this] { showToolbarMenu ({}); };
+        toolbarStrip_ = std::move (strip);
+        juce::Component::addChildComponent (toolbarStrip_.get ());
+    }
+    toolbar_->onDragMove = [this] (juce::Point<int> screen) { toolbarDragMoved (getLocalPoint (nullptr, screen)); };
+    toolbar_->onDragEnd = [this] (juce::Point<int> screen) { toolbarDragEnded (getLocalPoint (nullptr, screen)); };
     juce::Component::addChildComponent (toolbar_.get ());
     toolbar_->setVisible (toolbarVisible_);
     // Issue #50: the buttons the user hid, and the calculator right of them.
@@ -743,6 +799,8 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         juce::Component::addChildComponent (c);
     if (titleBarHidingSupported () && app.recentStore->getIntValue ("title_bar_hidden", 0) != 0)
         setTitleBarHidden (true);
+    toolbarDropHint_ = std::make_unique<ToolbarDropHint> ();
+    juce::Component::addChildComponent (toolbarDropHint_.get ());
 
     splitter = std::make_unique<ViewSplitter>();
     splitter->onDrag = [this] (const juce::MouseEvent& e) { handleSplitterDrag (e); };
@@ -1352,6 +1410,7 @@ void MainWindow::resized()
         captionMax_->setBounds (menuRow.removeFromRight (kCaptionButtonW));
         captionMin_->setBounds (menuRow.removeFromRight (kCaptionButtonW));
     }
+    updateExtendedFrame ();   // issue #66: no white line when maximised
     menuBar.setBounds (menuRow);
     {
         int namesW = 8;
@@ -1368,32 +1427,18 @@ void MainWindow::resized()
         const int w = std::min (workspaceBar_->idealWidth (), std::max (0, menuRow.getWidth () / 2));
         workspaceBar_->setBounds (menuRow.removeFromRight (w));
     }
-    // The toolbar (issues #43, #50) starts right after the menu names; the
-    // groups that do not fit before the workspace bar are hidden. The
-    // calculator follows it when there is room.
-    if (toolbar_ != nullptr && toolbarVisible_)
-    {
-        const int room = std::max (0, menuRow.getRight () - menuNamesRight_);
-        const int w = std::min (toolbar_->idealWidth (), room);
-        toolbar_->setBounds (menuNamesRight_, menuRow.getY (), w, menuRow.getHeight ());
-        if (calculator_ != nullptr)
-        {
-            const int calcX = toolbar_->getRight () + (w > 0 ? 6 : 0);
-            const int calcW = std::min (sc::toolbar::Calculator::kWidth, menuRow.getRight () - 4 - calcX);
-            const bool fits = isToolbarButtonShown ("calculator") && calcW >= 120;
-            calculator_->setVisible (fits);
-            if (fits)
-                calculator_->setBounds (calcX, menuRow.getY (), calcW, menuRow.getHeight ());
-        }
-    }
-    else if (calculator_ != nullptr)
-        calculator_->setVisible (false);
+    toolbarMenuRow_ = menuRow;
 
     // Status bar at the very bottom, full window width. (resized() can run
     // from setUsingNativeTitleBar() during construction, before these members
     // exist, so guard every pointer member.)
     if (statusBar)
         statusBar->setBounds (bounds.removeFromBottom (20));
+
+    // The toolbar (issues #43, #50, #65) and the calculator: in the menu row,
+    // or in a row or column of their own taken from the content area.
+    toolbarContentArea_ = bounds;
+    layoutToolbar (bounds);
 
     // Everything in between is the docking workspace; the Editor panel is
     // one of its groups.
@@ -2545,6 +2590,50 @@ juce::PopupMenu MainWindow::buildRecordingDeviceMenu (const Application& app)
         m.addSubMenu (plugins[(size_t) i].name,
                      buildRecordingDeviceItems (app, i));
     return m;
+}
+
+std::vector<MainWindow::PlaybackDeviceMenuItem> MainWindow::playbackDeviceItems (
+        const juce::StringArray& names, const juce::String& preferred)
+{
+    std::vector<PlaybackDeviceMenuItem> out;
+    const juce::String used = Application::resolvePlaybackDevice (preferred, names);
+    const bool missing = preferred.isNotEmpty () && used.isEmpty ();
+
+    PlaybackDeviceMenuItem def;
+    def.id      = PlaybackDeviceDefault;
+    def.text    = "System Default";
+    def.checked = preferred.isEmpty () || (missing && ! names.isEmpty ());
+    out.push_back (def);
+
+    for (int i = 0; i < juce::jmin (names.size (), (int) (PlaybackDeviceEnd - PlaybackDeviceBase)); ++i)
+    {
+        PlaybackDeviceMenuItem item;
+        item.id      = PlaybackDeviceBase + i;
+        item.text    = names[i];
+        item.checked = names[i] == used && used.isNotEmpty ();
+        out.push_back (item);
+    }
+
+    if (missing)
+    {
+        // The saved choice is kept: listed (disabled) so the user knows the
+        // default plays only because that device is not there.
+        PlaybackDeviceMenuItem gone;
+        gone.id      = PlaybackDeviceNone;
+        gone.text    = names.isEmpty () ? preferred : preferred + " (not connected)";
+        gone.enabled = false;
+        gone.checked = names.isEmpty ();
+        out.push_back (gone);
+    }
+    else if (names.isEmpty ())
+    {
+        PlaybackDeviceMenuItem none;
+        none.id      = PlaybackDeviceNone;
+        none.text    = "(no output devices)";
+        none.enabled = false;
+        out.push_back (none);
+    }
+    return out;
 }
 
 void MainWindow::handleStartStopRecording ()
@@ -4143,7 +4232,8 @@ void MainWindow::addVideoTrackFromPicker ()
     const juce::String exts = sc::videoContainerExtensions ();
     juce::FileChooser fc ("Add a video track...",
                           juce::File(),
-                          exts.isEmpty () ? "mp4|mov|m4v|3gp|avi|mkv|webm" : exts);
+                          exts.isEmpty () ? "mp4|mov|m4v|3gp|avi|mkv|webm" : exts,
+                          sc::files::useNativeDialogs ());
     if (!fc.browseForFileToOpen ())
         return;
 
@@ -4335,18 +4425,13 @@ juce::String MainWindow::statusBarFileName() const
     return statusBar ? statusBar->getFileName() : juce::String();
 }
 
-// useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some
-// systems (COM class not registered / activation crashes with STATUS_NO_MEMORY);
-// JUCE's built-in browser is pure GDI and works everywhere.
-static constexpr bool kUseNativeFileChooser = false;
-
 void MainWindow::handleFileOpen()
 {
     juce::FileChooser chooser ("Open Audio File",
         app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
                                        : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         openAudioWildcard(),
-        kUseNativeFileChooser);
+        sc::files::useNativeDialogs ());
 
     if (chooser.browseForFileToOpen())
         openFile (chooser.getResult());
@@ -4445,7 +4530,7 @@ void MainWindow::handleFileSaveAs()
         app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
                                          : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         "*.wav;*.aiff;*.aif;*.flac;*.ogg",
-        kUseNativeFileChooser);
+        sc::files::useNativeDialogs ());
 
     if (chooser.browseForFileToSave (true))
         runSaveAsync (chooser.getResult(), true);
@@ -4578,7 +4663,7 @@ void MainWindow::handleExportSpectral()
     if (!spectralView || !app.audioEngine().isFileLoaded()) return;
     juce::FileChooser chooser ("Save Spectrogram As",
         app.audioEngine().getFile().getParentDirectory(), "*.png",
-        kUseNativeFileChooser);
+        sc::files::useNativeDialogs ());
     if (chooser.browseForFileToSave (true))
         exportSpectralAsync (chooser.getResult(),
                              spectralExportOptionsFromSettings (app.settings));
@@ -4596,7 +4681,7 @@ void MainWindow::takeSpectrogramSnapshot()
     if (f.getFullPathName().isEmpty())
     {
         juce::FileChooser chooser ("Save Spectrogram As",
-            f.getParentDirectory(), "*.png", kUseNativeFileChooser);
+            f.getParentDirectory(), "*.png", sc::files::useNativeDialogs ());
         if (!chooser.browseForFileToSave (true)) return;
         target = chooser.getResult();
     }
@@ -4829,6 +4914,23 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
         handleRecDevicePick (menuItemID);
+        return;
+    }
+
+    // Transport > Playback Device (issue #64).
+    if (menuItemID == PlaybackDeviceDefault
+        || (menuItemID >= PlaybackDeviceBase && menuItemID < PlaybackDeviceEnd))
+    {
+        const juce::String name = menuItemID == PlaybackDeviceDefault
+                                      ? juce::String ()
+                                      : playbackMenuNames_[menuItemID - PlaybackDeviceBase];
+        if (menuItemID != PlaybackDeviceDefault && name.isEmpty ())
+            return;
+        if (! app.setPlaybackDevice (name))
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Playback Device",
+                                       "Could not open \"" + name + "\". "
+                                       "Playback uses the system default for now; "
+                                       "the choice is kept for the next start.");
         return;
     }
 
@@ -5420,7 +5522,7 @@ void MainWindow::showSupportBundleDialog ()
     const auto now = juce::Time::getCurrentTime ();
     const juce::File initial = juce::File::getSpecialLocation (juce::File::userDesktopDirectory)
         .getChildFile ("SpectroCraft-support-" + now.formatted ("%Y%m%d-%H%M") + ".zip");
-    juce::FileChooser chooser ("Save the support bundle", initial, "*.zip");
+    juce::FileChooser chooser ("Save the support bundle", initial, "*.zip", sc::files::useNativeDialogs ());
     if (! chooser.browseForFileToSave (true))
         return;
     const juce::File zip = chooser.getResult ().withFileExtension ("zip");
@@ -9813,7 +9915,7 @@ void MainWindow::showTranscribeFolderDialog()
     // Step 1: pick the folder.
     juce::FileChooser chooser ("Transcribe Folder",
                                juce::File::getSpecialLocation (juce::File::userHomeDirectory),
-                               "", false);
+                               "", sc::files::useNativeDialogs ());
     if (!chooser.browseForDirectory ())
         return;
     const juce::File folder = chooser.getResult ();
@@ -10248,6 +10350,18 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             menu.addSubMenu ("Recording Options", opts);
         }
         menu.addSubMenu ("Recording Device", buildRecordingDeviceMenu (app));
+
+        // Playback Device (issue #64): where the player's output goes.
+        menu.addSeparator ();
+        playbackMenuNames_ = app.playbackDeviceNames ();
+        juce::PopupMenu devices;
+        for (const auto& item : playbackDeviceItems (playbackMenuNames_, app.settings.playbackDevice))
+        {
+            devices.addItem (item.id, item.text, item.enabled, item.checked);
+            if (item.id == PlaybackDeviceDefault)
+                devices.addSeparator ();
+        }
+        menu.addSubMenu ("Playback Device", devices);
     }
     else if (menuName == "Effects")
     {
@@ -11049,6 +11163,7 @@ void MainWindow::setTitleBarHidden (bool hidden)
     if (hidden == titleBarHidden_)
         return;
     titleBarHidden_ = hidden;
+    extendedFrameHwnd_ = nullptr;   // a new native window: apply the frame again
     // The window keeps its frame-less, title-bar-less peer (the system still
     // draws its shadow and snaps it); its buttons and caption come from the
     // hit test. Changing the title bar recreates the native window.
@@ -11062,6 +11177,36 @@ void MainWindow::setTitleBarHidden (bool hidden)
     resized ();
     repaint ();
     menuItemsChanged ();
+}
+
+juce::BorderSize<int> MainWindow::extendedFrameFor (bool titleBarHidden, bool maximised)
+{
+    // JUCE extends the system frame 1 px into the left and right edges of a
+    // window without a title bar (its shadow and the snap flyout). Maximised,
+    // Windows draws no border and that column showed as a white line along
+    // the left edge (issue #66): no extension then.
+    if (! titleBarHidden || maximised)
+        return {};
+    return { 0, 1, 0, 1 };
+}
+
+void MainWindow::updateExtendedFrame ()
+{
+#if JUCE_WINDOWS
+    auto* peer = getPeer ();
+    if (! titleBarHidden_ || peer == nullptr
+        || (peer->getStyleFlags () & juce::ComponentPeer::windowHasDropShadow) == 0)
+        return;   // JUCE extended nothing: leave the frame alone
+    const bool maximised = isFullScreen ();
+    void* hwnd = peer->getNativeHandle ();
+    if (hwnd == extendedFrameHwnd_ && maximised == extendedFrameMaximised_)
+        return;
+    extendedFrameHwnd_ = hwnd;
+    extendedFrameMaximised_ = maximised;
+    const auto b = extendedFrameFor (true, maximised);
+    const MARGINS m { b.getLeft (), b.getRight (), b.getTop (), b.getBottom () };
+    ::DwmExtendFrameIntoClientArea (static_cast<HWND> (hwnd), &m);
+#endif
 }
 
 juce::Rectangle<int> MainWindow::captionPartBounds (int part) const
@@ -11108,11 +11253,24 @@ juce::Component::WindowControlKind MainWindow::findControlAtPoint (juce::Point<f
         return local.translated (bar->getX (), bar->getY ()).toFloat ().contains (pt);
     };
     if (toolbar_ != nullptr && toolbar_->isVisible () && toolbar_->getBounds ().toFloat ().contains (pt))
+    {
+        if (overChild (toolbar_.get (), toolbar_->gripBounds ()))
+            return Kind::client;   // the grip moves the toolbar (issue #65)
         for (int i = 0; i < toolbar_->numButtons (); ++i)
             if (auto* b = toolbar_->buttonAt (i); b != nullptr && b->isVisible () && overChild (toolbar_.get (), b->getBounds ()))
                 return Kind::client;
+    }
     if (calculator_ != nullptr && calculator_->isVisible () && calculator_->getBounds ().toFloat ().contains (pt))
-        return Kind::client;
+    {
+        // The field types; the answer beside it moves the window like the
+        // empty row (issue #66), except under a right-click, which must
+        // reach it for its Copy menu. The hit test runs while the system
+        // routes the button press, so the button is already down.
+        const auto field = calculator_->field ().getBounds () + calculator_->getPosition ();
+        if (field.toFloat ().contains (pt)
+            || juce::ModifierKeys::getCurrentModifiersRealtime ().isRightButtonDown ())
+            return Kind::client;
+    }
     if (workspaceBar_ != nullptr && workspaceBar_->isVisible () && workspaceBar_->getBounds ().toFloat ().contains (pt))
     {
         for (const auto& slot : workspaceBar_->layoutSlots ())
@@ -11133,6 +11291,147 @@ void MainWindow::refreshToolbar()
     toolbarRefreshedAt_ = juce::Time::getMillisecondCounter ();
     if (toolbar_ != nullptr && toolbarVisible_)
         toolbar_->refresh ();
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar placement (issue #65): menu row, a row or a column of its own.
+// ---------------------------------------------------------------------------
+
+MainWindow::ToolbarLayout MainWindow::toolbarLayoutFor (sc::toolbar::Placement p,
+                                                        juce::Rectangle<int> content) const
+{
+    using Dock = sc::toolbar::Placement::Dock;
+    using Align = sc::toolbar::Placement::Align;
+    using sc::toolbar::Toolbar;
+    ToolbarLayout out;
+    if (toolbar_ == nullptr)
+        return out;
+    const bool withCalc = calculator_ != nullptr && isToolbarButtonShown ("calculator");
+    constexpr int kRowH = 26, kColW = Toolbar::kButtonW + 6, gap = 6;
+
+    // Left to right in `row` from `lo`: `barLen` of toolbar (0 = none
+    // here), then the calculator when it still fits; the run aligned.
+    auto run = [&] (juce::Rectangle<int> row, int lo, int barLen, Align align)
+    {
+        const int tw = std::min (barLen, std::max (0, row.getRight () - lo));
+        const int calcX0 = lo + tw + (tw > 0 ? gap : 0);
+        const int calcW = std::min (sc::toolbar::Calculator::kWidth, row.getRight () - 4 - calcX0);
+        const bool calcFits = withCalc && calcW >= 120;
+        const int runW = calcFits ? calcX0 + calcW - lo : tw;
+        const int hi = calcFits ? row.getRight () - 4 : row.getRight ();
+        const int x = sc::toolbar::alignedStart (align, lo, hi, runW, getWidth () / 2);
+        if (tw > 0)
+            out.bar = { x, row.getY (), tw, row.getHeight () };
+        if (calcFits)
+            out.calc = { x + (calcX0 - lo), row.getY (), calcW, row.getHeight () };
+    };
+
+    const int ideal = toolbar_->idealWidth ();
+    switch (p.dock)
+    {
+        case Dock::menuRow:
+            run (toolbarMenuRow_, menuNamesRight_, ideal, p.align);
+            break;
+        case Dock::top:
+        case Dock::bottom:
+        {
+            out.strip = p.dock == Dock::top ? content.withHeight (kRowH)
+                                            : content.withTrimmedTop (std::max (0, content.getHeight () - kRowH));
+            run (out.strip.reduced (0, 1), out.strip.getX () + 4, ideal, p.align);
+            break;
+        }
+        case Dock::left:
+        case Dock::right:
+        {
+            out.strip = p.dock == Dock::left ? content.withWidth (kColW)
+                                             : content.withTrimmedLeft (std::max (0, content.getWidth () - kColW));
+            const int lo = out.strip.getY () + 4, hi = out.strip.getBottom () - 4;
+            const int th = std::min (ideal, std::max (0, hi - lo));
+            if (th > 0)
+                out.bar = { out.strip.getX () + 3,
+                            sc::toolbar::alignedStart (p.align, lo, hi, th, out.strip.getCentreY ()),
+                            Toolbar::kButtonW, th };
+            // The calculator stays in the menu row, after the menus.
+            run (toolbarMenuRow_, menuNamesRight_, 0, Align::start);
+            break;
+        }
+    }
+    return out;
+}
+
+void MainWindow::layoutToolbar (juce::Rectangle<int>& content)
+{
+    using Dock = sc::toolbar::Placement::Dock;
+    if (toolbar_ == nullptr || ! toolbarVisible_)
+    {
+        if (calculator_ != nullptr) calculator_->setVisible (false);
+        if (toolbarStrip_ != nullptr) toolbarStrip_->setVisible (false);
+        return;
+    }
+    const auto l = toolbarLayoutFor (toolbarPlacement_, content);
+    toolbar_->setVertical (toolbarPlacement_.vertical ());
+    toolbar_->setBounds (l.bar);
+    if (calculator_ != nullptr)
+    {
+        calculator_->setVisible (! l.calc.isEmpty ());
+        if (! l.calc.isEmpty ())
+            calculator_->setBounds (l.calc);
+    }
+    if (toolbarStrip_ != nullptr)
+    {
+        toolbarStrip_->setVisible (! l.strip.isEmpty ());
+        toolbarStrip_->setBounds (l.strip);
+    }
+    if (l.strip.isEmpty ())
+        return;
+    switch (toolbarPlacement_.dock)
+    {
+        case Dock::top:    content.setTop (l.strip.getBottom ()); break;
+        case Dock::bottom: content.setBottom (l.strip.getY ()); break;
+        case Dock::left:   content.setLeft (l.strip.getRight ()); break;
+        case Dock::right:  content.setRight (l.strip.getX ()); break;
+        case Dock::menuRow: break;
+    }
+}
+
+void MainWindow::setToolbarPlacement (sc::toolbar::Placement p)
+{
+    toolbarPlacement_ = p;
+    if (app.recentStore != nullptr)
+        app.recentStore->setValue ("toolbar_placement", p.toString ());
+    resized ();
+    if (toolbar_ != nullptr)
+        toolbar_->repaint ();
+}
+
+juce::Rectangle<int> MainWindow::toolbarDropHintBounds () const
+{
+    if (! toolbarDragTarget_.has_value ())
+        return {};
+    const auto l = toolbarLayoutFor (*toolbarDragTarget_, toolbarContentArea_);
+    return (l.bar.isEmpty () ? l.strip : l.bar).expanded (2).getIntersection (getLocalBounds ());
+}
+
+void MainWindow::toolbarDragMoved (juce::Point<int> windowPos)
+{
+    toolbarDragTarget_ = sc::toolbar::placementAt (windowPos, menuRowBounds_, toolbarContentArea_);
+    if (toolbarDropHint_ == nullptr)
+        return;
+    const auto r = toolbarDropHintBounds ();
+    toolbarDropHint_->setBounds (r);
+    toolbarDropHint_->setVisible (! r.isEmpty ());
+    toolbarDropHint_->toFront (false);
+}
+
+void MainWindow::toolbarDragEnded (juce::Point<int> windowPos)
+{
+    toolbarDragMoved (windowPos);
+    const auto target = toolbarDragTarget_;
+    toolbarDragTarget_.reset ();
+    if (toolbarDropHint_ != nullptr)
+        toolbarDropHint_->setVisible (false);
+    if (target.has_value ())
+        setToolbarPlacement (*target);
 }
 
 void MainWindow::setToolbarVisible (bool on)
@@ -11388,7 +11687,19 @@ void MainWindow::fillToolbarMenu (const juce::String& id, juce::PopupMenu& m)
     const auto name = id == "calculator" ? juce::String ("Calculator") : sc::toolbar::Toolbar::nameOf (id);
     if (name.isNotEmpty ())
         m.addItem (TbHideButton, "Hide " + name);
+    // Issue #65: also by dragging the grip at the toolbar's start.
+    juce::PopupMenu pos;
+    const char* const docks[] = { "Menu Bar", "Top Row", "Bottom Row", "Left Column", "Right Column" };
+    for (int i = 0; i < 5; ++i)
+        pos.addItem (TbDockBase + i, docks[i], true, (int) toolbarPlacement_.dock == i);
+    pos.addSeparator ();
+    const bool vertical = toolbarPlacement_.vertical ();
+    const char* const aligns[] = { vertical ? "Align Top" : "Align Left", "Align Center",
+                                   vertical ? "Align Bottom" : "Align Right" };
+    for (int i = 0; i < 3; ++i)
+        pos.addItem (TbAlignBase + i, aligns[i], true, (int) toolbarPlacement_.align == i);
     m.addSeparator ();
+    m.addSubMenu ("Position", pos);
     m.addItem (TbHideToolbar, "Hide Toolbar");
 }
 
@@ -11403,7 +11714,18 @@ void MainWindow::runToolbarMenuItem (const juce::String& id, int item)
         case TbManage:       showManageButtonsDialog (); break;
         case TbHideButton:   setToolbarButtonShown (id, false); break;
         case TbHideToolbar:  setToolbarVisible (false); break;
-        default: break;
+        default:
+        {
+            auto p = toolbarPlacement_;
+            if (item >= TbDockBase && item < TbDockBase + 5)
+                p.dock = (sc::toolbar::Placement::Dock) (item - TbDockBase);
+            else if (item >= TbAlignBase && item < TbAlignBase + 3)
+                p.align = (sc::toolbar::Placement::Align) (item - TbAlignBase);
+            else
+                break;
+            setToolbarPlacement (p);
+            break;
+        }
     }
 }
 
@@ -11537,7 +11859,8 @@ void MainWindow::showCustomShortcutDialog (int slot)
         browse->setTooltip ("Pick the .py file this shortcut runs.");
         browse->onClick = [&w]
         {
-            juce::FileChooser fc ("Python script", juce::File (w.getTextEditorContents ("script")), "*.py");
+            juce::FileChooser fc ("Python script", juce::File (w.getTextEditorContents ("script")), "*.py",
+                                  sc::files::useNativeDialogs ());
             if (fc.browseForFileToOpen ())
                 if (auto* e = w.getTextEditor ("script")) e->setText (fc.getResult ().getFullPathName ());
         };

@@ -207,6 +207,7 @@ void Application::loadSettings ()
     // Help > Check for Updates: also look once a day at startup (off by default).
     settings.checkUpdatesAtStartup = recentStore->getIntValue ("check_updates_startup", 0) != 0;
     settings.showTooltips = recentStore->getIntValue ("show_tooltips", 1) != 0;
+    settings.playbackDevice = recentStore->getValue ("playback_device", {});
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -324,6 +325,7 @@ void Application::saveSettings ()
     recentStore->setValue ("diag_log_enabled", settings.diagLogEnabled ? 1 : 0);
     recentStore->setValue ("check_updates_startup", settings.checkUpdatesAtStartup ? 1 : 0);
     recentStore->setValue ("show_tooltips", settings.showTooltips ? 1 : 0);
+    recentStore->setValue ("playback_device", settings.playbackDevice);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -5310,8 +5312,10 @@ void Application::startAudioInitAsync()
         types.clear (false);   // ownership moved to the manager
     }
 
-    audioInitThread = std::thread ([this] {
-        audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
+    // The saved playback device (issue #64) is read here, on the message
+    // thread: the worker never touches the settings.
+    audioInitThread = std::thread ([this, preferred = settings.playbackDevice] {
+        openPlaybackDevice (preferred);
         {
             std::lock_guard<std::mutex> g (audioInitLock);
             audioDeviceIsReady.store (true);
@@ -5338,6 +5342,82 @@ bool Application::ensureAudioReady (int timeoutMs)
                                  [this] { return audioDeviceIsReady.load(); });
 }
 
+juce::String Application::resolvePlaybackDevice (const juce::String& preferred,
+                                                 const juce::StringArray& available)
+{
+    return preferred.isNotEmpty() && available.contains (preferred) ? preferred : juce::String();
+}
+
+juce::StringArray Application::playbackDeviceNames() const
+{
+    if (audioOutputDisabled() || ! audioDeviceIsReady.load())
+        return {};
+    if (auto* type = audioDevice->getCurrentDeviceTypeObject())
+        return type->getDeviceNames (false);   // outputs
+    return {};
+}
+
+juce::String Application::currentPlaybackDeviceName() const
+{
+    if (auto* dev = audioDevice->getCurrentAudioDevice())
+        return dev->getName();
+    return {};
+}
+
+juce::String Application::openPlaybackDevice (const juce::String& preferred)
+{
+    if (audioDevice->getCurrentAudioDevice() == nullptr)
+    {
+        // First open (or self-heal): try the chosen device, then the system
+        // default. A name that is not connected makes the device type return
+        // no device and initialise() an error, with nothing opened.
+        if (preferred.isNotEmpty())
+        {
+            juce::AudioDeviceManager::AudioDeviceSetup setup;
+            setup.outputDeviceName = preferred;
+            const auto err = audioDevice->initialise (0, 2, nullptr, true, {}, &setup);
+            if (err.isEmpty() && audioDevice->getCurrentAudioDevice() != nullptr)
+                return {};
+        }
+        return audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
+    }
+
+    // Already open: switch. "" or a device that is not connected = the
+    // device type's default output.
+    auto* type = audioDevice->getCurrentDeviceTypeObject();
+    if (type == nullptr)
+        return {};
+    const auto names = type->getDeviceNames (false);
+    auto name = resolvePlaybackDevice (preferred, names);
+    if (name.isEmpty())
+        name = names[juce::jmax (0, type->getDefaultDeviceIndex (false))];
+    auto setup = audioDevice->getAudioDeviceSetup();
+    if (name.isEmpty() || name == setup.outputDeviceName)
+        return {};
+    setup.outputDeviceName = name;
+    setup.useDefaultOutputChannels = true;
+    return audioDevice->setAudioDeviceSetup (setup, true);
+}
+
+bool Application::setPlaybackDevice (const juce::String& name)
+{
+    settings.playbackDevice = name;
+    saveSettings();
+    if (audioOutputDisabled())
+        return true;
+    ensureAudioReady();
+    const auto err = openPlaybackDevice (name);
+    if (err.isNotEmpty())
+    {
+        DBG ("Playback device: " << err);
+        // Never stay without output: fall back to the system default.
+        if (audioDevice->getCurrentAudioDevice() == nullptr)
+            openPlaybackDevice ({});
+        return false;
+    }
+    return true;
+}
+
 void Application::play()
 {
     if (!audioEngine().isFileLoaded()) return;
@@ -5347,9 +5427,18 @@ void Application::play()
     ensureAudioReady();
 
     // Self-heal: if no output device is running (initialisation can fail when
-    // the default device isn't available yet), try again now.
-    if (audioDevice->getCurrentAudioDevice() == nullptr && !audioOutputDisabled())
-        audioDevice->initialiseWithDefaultDevices (0, 2);
+    // the default device isn't available yet), try again now. Same when the
+    // chosen playback device (issue #64) was missing at startup and has been
+    // plugged in since: switch back to it.
+    if (! audioOutputDisabled())
+    {
+        if (audioDevice->getCurrentAudioDevice() == nullptr)
+            openPlaybackDevice (settings.playbackDevice);
+        else if (settings.playbackDevice.isNotEmpty()
+                 && currentPlaybackDeviceName() != settings.playbackDevice
+                 && playbackDeviceNames().contains (settings.playbackDevice))
+            openPlaybackDevice (settings.playbackDevice);
+    }
 
     // Restart from the beginning when playback is at (or past) the end.
     if (audioEngine().position() >= audioEngine().duration() - 1e-6)

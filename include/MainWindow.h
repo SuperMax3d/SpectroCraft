@@ -397,7 +397,22 @@ public:
     void showToolbarMenu (const juce::String& id);
     void fillToolbarMenu (const juce::String& id, juce::PopupMenu& m);
     void runToolbarMenuItem (const juce::String& id, int item);
-    enum ToolbarMenuItems { TbEditCustom = 1, TbRemoveCustom, TbAddCustom, TbManage, TbHideButton, TbHideToolbar };
+    enum ToolbarMenuItems { TbEditCustom = 1, TbRemoveCustom, TbAddCustom, TbManage, TbHideButton, TbHideToolbar,
+                            // Position submenu (issue #65): TbDockBase + Placement::Dock,
+                            // TbAlignBase + Placement::Align.
+                            TbDockBase = 100, TbAlignBase = 110 };
+    /** Where the toolbar sits (issue #65): the menu bar row, a row of its own
+        (top / bottom) or a column (left / right), aligned at the start, the
+        centre or the end; saved as "toolbar_placement". */
+    sc::toolbar::Placement toolbarPlacement() const noexcept { return toolbarPlacement_; }
+    void setToolbarPlacement (sc::toolbar::Placement p);
+    /** A drag of the toolbar's grip at `windowPos` (this window's
+        coordinates): shows where it would go (toolbarDragTarget, the hint's
+        bounds); the drop moves it there. */
+    void toolbarDragMoved (juce::Point<int> windowPos);
+    void toolbarDragEnded (juce::Point<int> windowPos);
+    std::optional<sc::toolbar::Placement> toolbarDragTarget() const { return toolbarDragTarget_; }
+    juce::Rectangle<int> toolbarDropHintBounds() const;
     /** Add Custom Button: the form for the first free slot (1, then 2...);
         returns that slot, -1 when all nine are used. */
     int addCustomButton();
@@ -432,6 +447,9 @@ public:
         Remembered ("title_bar_hidden"), off by default. */
     static bool titleBarHidingSupported() noexcept;
     bool isTitleBarHidden() const noexcept { return titleBarHidden_; }
+    /** How far the system frame reaches into the client (Windows, title bar
+        hidden): 1 px left and right, none when maximised (issue #66). */
+    static juce::BorderSize<int> extendedFrameFor (bool titleBarHidden, bool maximised);
     void setTitleBarHidden (bool hidden);
     /** The merged row's parts, in window coordinates (empty when shown):
         0 = the icon, 1 = minimise, 2 = maximise, 3 = close. */
@@ -664,6 +682,14 @@ public:
                                                                 int pluginIndex);
     static juce::PopupMenu buildRecordingDeviceItems (const Application& app, int pluginIndex);
 
+    /** Transport > Playback Device (issue #64): "System Default", then each
+        output device; a chosen device that is not connected is listed,
+        disabled, so the user sees why the default plays. Public static so
+        headless tests can check it. */
+    struct PlaybackDeviceMenuItem { int id = 0; juce::String text; bool enabled = true; bool checked = false; };
+    static std::vector<PlaybackDeviceMenuItem> playbackDeviceItems (const juce::StringArray& names,
+                                                                    const juce::String& preferred);
+
     void handleStartStopRecording();
     void handleRecDevicePick (int id);
     /** File Open dialog wildcard: every extension the engine can open as
@@ -759,6 +785,10 @@ public:
         RecOptUnlimited = 4100,   // Recording Options submenu
         RecOptLoop,
         RecOptTimed,
+        // Transport > Playback Device (issue #64): the default, a disabled
+        // placeholder, then PlaybackDeviceBase + index of the output device.
+        PlaybackDeviceDefault = 4300, PlaybackDeviceNone = 4301,
+        PlaybackDeviceBase = 4310, PlaybackDeviceEnd = 4400,
         RecNoDeviceItem = 4200,   // disabled "(no devices)" / "(no recorder plugins found)" placeholders (ID 0 is reserved by PopupMenu)
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
@@ -821,6 +851,9 @@ public:
 
 private:
     Application& app;
+    // The Playback Device menu's names when it was last built: a pick maps its
+    // index back to the same name even if a device was plugged in since.
+    juce::StringArray playbackMenuNames_;
 
     juce::MenuBarComponent menuBar;
     std::unique_ptr<WaveformView> waveformView;
@@ -951,9 +984,25 @@ private:
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
     std::unique_ptr<sc::toolbar::Toolbar> toolbar_;           // left of the workspace bar (issue #43)
     bool toolbarVisible_ = true;
+    // Issue #65: where the toolbar sits; the background of its own row or
+    // column; the hint a grip drag shows; the menu row (workspace bar left
+    // out) and the area between the menus and the status bar, as last laid
+    // out: where the drop zones are.
+    sc::toolbar::Placement toolbarPlacement_;
+    std::unique_ptr<juce::Component> toolbarStrip_, toolbarDropHint_;
+    std::optional<sc::toolbar::Placement> toolbarDragTarget_;
+    juce::Rectangle<int> toolbarMenuRow_, toolbarContentArea_;
+    /** Lays the toolbar and the calculator out for `p`: their bounds, and
+        the strip of its own a row or column takes out of `content`. */
+    struct ToolbarLayout { juce::Rectangle<int> bar, calc, strip; };
+    ToolbarLayout toolbarLayoutFor (sc::toolbar::Placement p, juce::Rectangle<int> content) const;
+    void layoutToolbar (juce::Rectangle<int>& content);
     std::unique_ptr<sc::toolbar::Calculator> calculator_;   // right of the toolbar (issue #50)
     void saveToolbarHidden();                 // "toolbar_hidden": the hidden buttons, "calculator" included
     bool titleBarHidden_ = false;             // View > Hide Title Bar (issue #52)
+    void updateExtendedFrame();               // issue #66: see extendedFrameFor
+    void* extendedFrameHwnd_ = nullptr;       // the window and state last applied
+    bool extendedFrameMaximised_ = false;
     static constexpr int kCaptionButtonW = 46;   // the window buttons of the merged row
     class CaptionPart;                        // the icon and the window buttons of the merged row
     std::unique_ptr<CaptionPart> captionIcon_, captionMin_, captionMax_, captionClose_;

@@ -773,7 +773,7 @@ void Toolbar::refresh()
 
 int Toolbar::idealWidth() const
 {
-    int w = 6, groupsShown = 0;
+    int w = kGripW + 3, groupsShown = 0;
     for (int gi = 0; gi < numGroups(); ++gi)
     {
         int n = 0;
@@ -786,20 +786,34 @@ int Toolbar::idealWidth() const
     return groupsShown > 0 ? w : 0;
 }
 
+void Toolbar::setVertical (bool v)
+{
+    if (v == vertical_) return;
+    vertical_ = v;
+    resized();
+}
+
+juce::Rectangle<int> Toolbar::gripBounds() const
+{
+    return vertical_ ? getLocalBounds().withHeight (kGripW) : getLocalBounds().withWidth (kGripW);
+}
+
 void Toolbar::resized()
 {
-    // Groups left to right; the groups that do not fit are hidden, the
-    // custom shortcuts first.
+    // Groups along the bar after the grip (left to right, or top to bottom
+    // in a column); the groups that do not fit are hidden, the custom
+    // shortcuts first.
     // Hidden buttons and empty custom slots take no room (issue #50).
     separatorsX_.clear();
-    int x = 3, groupsShown = 0;
+    const int length = vertical_ ? getHeight() : getWidth();
+    int x = kGripW, groupsShown = 0;
     for (int gi = 0; gi < numGroups(); ++gi)
     {
         int n = 0;
         for (size_t i = 0; i < buttons_.size(); ++i)
             if (groupOf_[i] == gi && isShown (buttons_[i]->getComponentID())) ++n;
         const int need = n * kButtonW + (groupsShown > 0 ? kGapW : 0);
-        const bool fits = n > 0 && x + need <= getWidth() - 3;
+        const bool fits = n > 0 && x + need <= length - 3;
         if (fits && groupsShown > 0)
         {
             separatorsX_.push_back (x + kGapW / 2);
@@ -812,27 +826,131 @@ void Toolbar::resized()
                 buttons_[i]->setVisible (show);
                 if (show)
                 {
-                    buttons_[i]->setBounds (x, 0, kButtonW, getHeight());
+                    buttons_[i]->setBounds (vertical_ ? juce::Rectangle<int> (0, x, getWidth(), kButtonW)
+                                                      : juce::Rectangle<int> (x, 0, kButtonW, getHeight()));
                     x += kButtonW;
                 }
             }
         if (fits) ++groupsShown;
-        else if (n > 0) x = getWidth();   // keep the order: nothing after a group that did not fit
+        else if (n > 0) x = length;   // keep the order: nothing after a group that did not fit
     }
     repaint();
 }
 
 void Toolbar::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isPopupMenu() && onContextMenu)
-        onContextMenu ({});   // between the buttons
+    if (e.mods.isPopupMenu())
+    {
+        if (onContextMenu)
+            onContextMenu ({});   // between the buttons, or the grip
+        return;
+    }
+    gripDown_ = gripBounds().contains (e.getPosition());
+    gripDragging_ = false;
+}
+
+void Toolbar::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! gripDown_) return;
+    if (! gripDragging_ && e.getDistanceFromDragStart() < 4) return;
+    gripDragging_ = true;
+    if (onDragMove) onDragMove (e.getScreenPosition());
+}
+
+void Toolbar::mouseUp (const juce::MouseEvent& e)
+{
+    const bool dropped = gripDown_ && gripDragging_;
+    gripDown_ = gripDragging_ = false;
+    if (dropped && onDragEnd) onDragEnd (e.getScreenPosition());
+}
+
+void Toolbar::mouseMove (const juce::MouseEvent& e)
+{
+    setMouseCursor (gripBounds().contains (e.getPosition()) ? juce::MouseCursor::DraggingHandCursor
+                                                            : juce::MouseCursor::NormalCursor);
 }
 
 void Toolbar::paint (juce::Graphics& g)
 {
+    // The grip: two lines of dots across the bar's start.
+    g.setColour (juce::Colour (0xff6a6a6a));
+    const auto c = gripBounds().getCentre().toFloat();
+    for (int i = -2; i <= 2; ++i)
+        for (float along : { -1.5f, 1.5f })
+        {
+            const float across = (float) i * 3.0f;
+            const auto dot = vertical_ ? c + juce::Point<float> (across, along)
+                                       : c + juce::Point<float> (along, across);
+            g.fillRect (juce::Rectangle<float> (1.5f, 1.5f).withCentre (dot));
+        }
     g.setColour (juce::Colour (0xff3a3a3a));
     for (int sx : separatorsX_)
-        g.fillRect (sx, getHeight() / 2 - 7, 1, 14);
+    {
+        if (vertical_)
+            g.fillRect (getWidth() / 2 - 7, sx, 14, 1);
+        else
+            g.fillRect (sx, getHeight() / 2 - 7, 1, 14);
+    }
+}
+
+// ---------------------------------------------------------------- placement
+
+juce::String Placement::toString() const
+{
+    static const char* const docks[] = { "menuRow", "top", "bottom", "left", "right" };
+    static const char* const aligns[] = { "start", "centre", "end" };
+    return juce::String (docks[(int) dock]) + ":" + aligns[(int) align];
+}
+
+Placement Placement::fromString (const juce::String& s)
+{
+    static const juce::StringArray docks { "menuRow", "top", "bottom", "left", "right" };
+    static const juce::StringArray aligns { "start", "centre", "end" };
+    const int d = docks.indexOf (s.upToFirstOccurrenceOf (":", false, false));
+    const int a = aligns.indexOf (s.fromFirstOccurrenceOf (":", false, false));
+    if (d < 0 || a < 0)
+        return {};
+    return { (Dock) d, (Align) a };
+}
+
+std::optional<Placement> placementAt (juce::Point<int> p, juce::Rectangle<int> menuRow,
+                                      juce::Rectangle<int> content)
+{
+    using Dock = Placement::Dock;
+    using Align = Placement::Align;
+    auto third = [] (int v, int lo, int len)
+    {
+        if (len <= 0) return Align::start;
+        const int t = juce::jlimit (0, 2, (v - lo) * 3 / len);
+        return t == 0 ? Align::start : (t == 1 ? Align::centre : Align::end);
+    };
+    // The menu row (a few pixels of slack above and below).
+    if (p.y < menuRow.getBottom() + 4 && p.x >= menuRow.getX() && p.x < menuRow.getRight())
+        return Placement { Dock::menuRow, third (p.x, menuRow.getX(), menuRow.getWidth()) };
+    if (! content.contains (p))
+        return std::nullopt;
+    const int zone = juce::jmin (kDropZone, content.getWidth() / 4, content.getHeight() / 4);
+    if (p.x < content.getX() + zone)
+        return Placement { Dock::left, third (p.y, content.getY(), content.getHeight()) };
+    if (p.x >= content.getRight() - zone)
+        return Placement { Dock::right, third (p.y, content.getY(), content.getHeight()) };
+    if (p.y < content.getY() + zone)
+        return Placement { Dock::top, third (p.x, content.getX(), content.getWidth()) };
+    if (p.y >= content.getBottom() - zone)
+        return Placement { Dock::bottom, third (p.x, content.getX(), content.getWidth()) };
+    return std::nullopt;
+}
+
+int alignedStart (Placement::Align a, int lo, int hi, int length, int centre)
+{
+    const int maxStart = juce::jmax (lo, hi - length);
+    switch (a)
+    {
+        case Placement::Align::start:  return lo;
+        case Placement::Align::end:    return maxStart;
+        case Placement::Align::centre: return juce::jlimit (lo, maxStart, centre - length / 2);
+    }
+    return lo;
 }
 
 // ============================================================== icon picker
@@ -1227,9 +1345,49 @@ void Calculator::resized()
     field_.setBounds (getLocalBounds().withWidth (getWidth() * 11 / 20).reduced (0, 3));
 }
 
+juce::String Calculator::answerValue() const
+{
+    if (error_ || ! result_.startsWith ("= "))
+        return {};
+    return result_.substring (2);
+}
+
+juce::Rectangle<int> Calculator::answerBounds() const
+{
+    return getLocalBounds().withTrimmedLeft (field_.getRight());
+}
+
+juce::PopupMenu Calculator::answerMenu() const
+{
+    juce::PopupMenu m;
+    m.addItem (kCopyAnswerId, "Copy", answerValue().isNotEmpty());
+    return m;
+}
+
+void Calculator::copyAnswer() const
+{
+    if (const auto v = answerValue(); v.isNotEmpty())
+        juce::SystemClipboard::copyTextToClipboard (v);
+}
+
 void Calculator::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isPopupMenu() && onContextMenu)
+    if (! e.mods.isPopupMenu())
+        return;
+    // The answer's own menu (issue #66); elsewhere, the toolbar menu.
+    if (answerValue().isNotEmpty() && answerBounds().contains (e.getPosition()))
+    {
+        juce::Component::SafePointer<Calculator> safe (this);
+        answerMenu().showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                                               .withMousePosition(),
+                                    [safe] (int id)
+                                    {
+                                        if (safe != nullptr && id == kCopyAnswerId)
+                                            safe->copyAnswer();
+                                    });
+        return;
+    }
+    if (onContextMenu)
         onContextMenu();
 }
 

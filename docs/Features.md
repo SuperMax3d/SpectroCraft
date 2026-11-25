@@ -549,6 +549,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       paths in `src/MainToolbar.cpp`, no third-party icon set). Groups that do
       not fit a narrow window are left out, the custom buttons first. **View >
       Toolbar** shows or hides it (remembered).
+    - **Moving the toolbar** (issue #65): drag the grip (the dots at its
+      start). A blue outline shows where it goes: on the **menu bar row**, its
+      left, centre or right third aligns it after the menus, centred on the
+      window or before the workspaces (the calculator follows it); near the
+      top or bottom edge of the panels, a **row of its own** under the menus or
+      above the status bar; near the left or right edge, a **column** with the
+      buttons top to bottom (the third under the mouse aligns it; the
+      calculator stays in the menu row). The toolbar menu's **Position**
+      submenu does the same (Menu Bar, Top Row, Bottom Row, Left Column, Right
+      Column; Align Left / Center / Right, or Top / Center / Bottom in a
+      column). Remembered (settings key `toolbar_placement`).
     - Right-click any button, or the toolbar between them: **Add Custom
       Button...**, **Manage Visible Buttons...**, **Hide** *that button*,
       **Hide Toolbar**; on a custom button also **Edit Custom Button N...**
@@ -580,7 +591,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       equation for each value: `(1,2,3)+1` = 2, 3, 4 (two lists combine
       element by element). Division by zero, the log of a value <= 0 or an
       unknown character give **Error**. Enter keeps the result as the new
-      expression, Esc clears it. It can be hidden like a button.
+      expression, Esc clears it. Right-click the result: **Copy** puts its
+      value on the clipboard (issue #66). It can be hidden like a button.
     - **View > Side Panels Visible** (Ctrl+Shift+Enter; was *Panels*)
       maximises the Editor's group to hide every other panel, and brings them
       back.
@@ -591,7 +603,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       bar: drag it to move the window and snap it to a screen edge, double-click
       it to maximise or restore; hovering Maximise shows the snap layouts. A
       click on the icon opens the window menu (Restore, Move, Size, Minimize,
-      Maximize, Close). The edges still resize the window. The choice is
+      Maximize, Close). The calculator's result counts as an empty part (its
+      field does not); a right-click still reaches its Copy menu (issue #66).
+      Maximised, the window has no frame column of its own along its edges
+      (it showed as a white line on the left). The edges still resize the
+      window. The choice is
       remembered (settings key `title_bar_hidden`); it is off for a new user.
       Other platforms do not offer it: only Windows asks the window what lies
       under the mouse, which is what makes the row a title bar.
@@ -1224,6 +1240,16 @@ recording the view stays exactly where you left it; once you come back within
 ~1.5 s of the end, following resumes automatically. While recording, the status
 bar shows a red dot followed by `REC <seconds> s` counting up in real time.
 
+### Playback device
+
+**Transport > Playback Device** (issue #64) chooses where playback goes:
+**System Default** first, then every output device of the current audio
+system (Windows Audio, CoreAudio, ALSA...). The choice is remembered (settings
+key `playback_device`). When that device is not connected as the app opens its
+output, the system default plays instead and the menu lists the device,
+greyed out, as *(not connected)*; the choice is kept, and the next Play
+switches back to it once it is plugged in again.
+
 ### Using it
 
 1. **Transport > Recording Device** — pick a plugin and device. The submenu is
@@ -1408,6 +1434,13 @@ Notes:
 
 - The project enables C and C++ (JUCE 9 requires both) and sets C++20.
 - `SpectroCraft` defines `JUCE_MODAL_LOOPS_PERMITTED=1` so the file dialogs work.
+- Every file and folder pick (open, save, exports, markers CSV, video track,
+  Python scripts, Transcribe Folder, the batch folders, the Model panel) uses
+  the operating system's own dialog (issue #71; `include/FileDialogs.h`). On
+  Windows the app first checks once that the system's dialog can be created
+  (on some systems it is not registered, or creating it crashed) and keeps
+  JUCE's own browser otherwise; on Linux JUCE uses zenity or kdialog when
+  installed. `SC_NATIVE_FILE_DIALOGS=0` forces JUCE's browser everywhere.
 - On other platforms, point CMake at your JUCE (the vendored copy works anywhere;
   you may also use `FetchContent` instead).
 

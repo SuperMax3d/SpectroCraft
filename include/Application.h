@@ -1109,6 +1109,22 @@ public:
     static bool audioOutputDisabled();
     bool ensureAudioReady (int timeoutMs = -1);
 
+    // Transport > Playback Device (issue #64). The names are the output
+    // devices of the current device type (Windows Audio, CoreAudio, ALSA...),
+    // empty while the output is not ready or disabled (SC_NO_AUDIO_DEVICE).
+    juce::StringArray playbackDeviceNames() const;
+    /** Name of the output device now open ("" when none). */
+    juce::String currentPlaybackDeviceName() const;
+    /** Chooses the output: a device name, or "" for the system default.
+        Saves the choice, waits for the audio init, then opens the device (the
+        system default when that name is not connected). Returns false when
+        the device could not be opened; the choice is saved either way. */
+    bool setPlaybackDevice (const juce::String& name);
+    /** The device a name stands for: `preferred` when it is in `available`,
+        otherwise "" (the system default). Pure; used by the init and tests. */
+    static juce::String resolvePlaybackDevice (const juce::String& preferred,
+                                               const juce::StringArray& available);
+
     void play(); void stop(); void pause();
     // Toggle looping. When enabling, the loop range is taken from the current
     // selection (or the whole file if there is no selection).
@@ -1213,6 +1229,11 @@ private:
     mutable std::mutex audioInitLock;
     std::condition_variable audioInitCv;
     std::thread audioInitThread;
+    // Opens the playback device `preferred` (issue #64), or the system default
+    // when it is "" or not connected; returns JUCE's error text ("" = done).
+    // Runs on the audio init worker, then on the message thread (play()'s
+    // self-heal, setPlaybackDevice).
+    juce::String openPlaybackDevice (const juce::String& preferred);
 
     // Recording session state (see startRecording/stopRecording).
     FileDoc* recDoc_ = nullptr;      // document being recorded into (validated on every tick)
