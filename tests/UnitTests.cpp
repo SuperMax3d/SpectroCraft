@@ -31513,6 +31513,51 @@ static void testVideoTrackMetadata()
                "video tracks: a missing key preserves the current list");
     }
 
+    // Issue #73: a movie recorded on another machine (the mobile app) or a moved
+    // folder is found next to the audio through "relFile" or its bare name.
+    {
+        const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                             .getChildFile ("sc-video-rel-" + juce::String (juce::Random::getSystemRandom().nextInt (1 << 30)));
+        dir.getChildFile ("clips").createDirectory();
+        const auto movie = dir.getChildFile ("clips").getChildFile ("take.mov");
+        movie.replaceWithText ("x");
+
+        sc::MetaBundle phone;
+        CHECK (sc::parseBundle (R"({"videoTracks":[{"file":"/var/mobile/Docs/take.mov","relFile":"clips/take.mov","offset":0.5}]})",
+                                phone, nullptr) && phone.videoTracks.size() == 1,
+               "video tracks: a track with relFile is read");
+        sc::resolveVideoTracks (phone.videoTracks, dir);
+        CHECK (! phone.videoTracks.empty() && phone.videoTracks[0].file == movie,
+               "video tracks: relFile resolved against the audio folder");
+
+        sc::MetaBundle bare;
+        CHECK (sc::parseBundle (R"({"videoTracks":[{"file":"take.mov"}]})", bare, nullptr)
+                   && bare.videoTracks.size() == 1 && bare.videoTracks[0].file == juce::File(),
+               "video tracks: a relative file is kept as relPath, not as a cwd-relative File");
+        sc::resolveVideoTracks (bare.videoTracks, dir.getChildFile ("clips"));
+        CHECK (! bare.videoTracks.empty() && bare.videoTracks[0].file == movie,
+               "video tracks: a bare name is found next to the audio");
+
+        std::vector<sc::VideoTrackData> out { sc::VideoTrackData {} };
+        out[0].file = movie;
+        sc::fillVideoRelativePaths (out, dir);
+        CHECK (out[0].relPath == "clips/take.mov", "video tracks: relFile written with / separators");
+        dir.deleteRecursively();
+    }
+
+    // Issue #73: the mobile app's stored plots survive a desktop round trip.
+    {
+        sc::MetaBundle pb;
+        CHECK (sc::parseBundle (R"({"storedPlots":[{"name":"Plot 1","freqs":[100,1000],"db":[40,94]}]})", pb, nullptr)
+                   && pb.haveStoredPlots && pb.storedPlots.size() == 1,
+               "stored plots: read");
+        FileDoc d4;
+        d4.applyBundle (pb);
+        sc::MetaBundle back;
+        CHECK (sc::parseBundle (juce::String (d4.buildScmdJson()), back, nullptr) && back.storedPlots.size() == 1,
+               "stored plots: written back by the desktop");
+    }
+
     // Load path (regression): videoTracks stored in the .meta.json sidecar or
     // embedded SCMD chunk must be restored when the document loads - they used
     // to be parsed but never applied, so saved tracks silently vanished.

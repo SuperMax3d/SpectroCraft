@@ -162,6 +162,9 @@ public:
     // Model panel (issue #40): the sound model learned from this file,
     // persisted with its metadata bundle ("soundModel").
     sc::model::Model soundModel;
+    /** Stored analysis plots written by the mobile app (issue #73), kept as
+        JSON and carried through saves (metadata key "storedPlots"). */
+    juce::var storedPlots;
 
     /** Replaces the table list (and optionally the display mode) and marks
         the document metadata-dirty. */

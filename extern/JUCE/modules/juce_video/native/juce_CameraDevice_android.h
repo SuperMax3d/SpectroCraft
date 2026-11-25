@@ -1362,8 +1362,14 @@ private:
 
             // NB: the order of function calls here is enforced, and exceptions will be thrown if
             //     the order is changed.
+            // SPECTROCRAFT PATCH: JUCE_CAMERA_RECORD_AUDIO=0 records the picture only.
+            // SpectroCraft Mobile captures the microphone itself (calibrated WAV);
+            // a second capture of the same microphone by MediaRecorder would fight
+            // it for the input. Default 1 keeps JUCE's behaviour.
+           #if ! defined (JUCE_CAMERA_RECORD_AUDIO) || JUCE_CAMERA_RECORD_AUDIO
             static constexpr int audioSourceMic = 1;
             env->CallVoidMethod (mediaRecorder, AndroidMediaRecorder.setAudioSource, (jint) audioSourceMic);
+           #endif
 
             static constexpr int videoSourceSurface = 2;
             env->CallVoidMethod (mediaRecorder, AndroidMediaRecorder.setVideoSource, (jint) videoSourceSurface);
@@ -1371,8 +1377,10 @@ private:
             static constexpr int outputFormatMPEG4 = 2;
             env->CallVoidMethod (mediaRecorder, AndroidMediaRecorder.setOutputFormat, (jint) outputFormatMPEG4);
 
+           #if ! defined (JUCE_CAMERA_RECORD_AUDIO) || JUCE_CAMERA_RECORD_AUDIO
             static constexpr int audioEncoderAAC = 3;
             env->CallVoidMethod (mediaRecorder, AndroidMediaRecorder.setAudioEncoder, (jint) audioEncoderAAC);
+           #endif
 
             static constexpr int videoEncoderH264 = 2;
             env->CallVoidMethod (mediaRecorder, AndroidMediaRecorder.setVideoEncoder, (jint) videoEncoderH264);

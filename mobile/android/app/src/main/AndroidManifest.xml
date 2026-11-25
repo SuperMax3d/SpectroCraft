@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SpectroCraft Mobile (issue #73). JUCE's bootstrap: the application class
+     com.rmsl.juce.JuceApp loads libjuce_jni.so, MainActivity hosts the JUCE
+     window, the provider serves files to the share sheet. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <application
+        android:name="com.rmsl.juce.JuceApp"
+        android:label="SpectroCraft"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:hardwareAccelerated="false"
+        android:requestLegacyExternalStorage="false">
+
+        <!-- Our own activity: JuceActivity needs natives JUCE registers only for
+             push notifications / in-app purchases (see MainActivity.java). -->
+        <activity
+            android:name="com.spectrocraft.mobile.MainActivity"
+            android:label="SpectroCraft"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.NoTitleBar"
+            android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|keyboard|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Sentry starts from code (com.spectrocraft.mobile.Telemetry), after the
+             user's choice is known: no automatic start. -->
+        <meta-data android:name="io.sentry.auto-init" android:value="false" />
+
+        <provider
+            android:name="com.rmsl.juce.JuceSharingContentProvider"
+            android:authorities="${applicationId}.sharingcontentprovider"
+            android:grantUriPermissions="true"
+            android:exported="true" />
+    </application>
+</manifest>

@@ -148,6 +148,16 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `SC_BENCH=1 SC_TEST_FILTER=bench` (optional `SC_BENCH_MINUTES`), meaningful in a Release build.
 - File dialogs: pass `sc::files::useNativeDialogs()` (`include/FileDialogs.h`) as every `juce::FileChooser`'s
   `useOSNativeDialogBox` (issue #71): the system's dialog, JUCE's where Windows cannot create it.
+- Mobile app (issue #73; iOS / Android, JUCE): its own CMake project in `mobile/` (configure
+  `mobile/`, not the root) that compiles the desktop's UI-free engine sources (`AudioEngine`,
+  `SpectralEngine`, `Measures`, `FileDoc`, `FileMeta`, `AxisScale`, `TimeFormat`, ...) with a touch UI
+  in `mobile/src`; Android wrapper `mobile/android` (Gradle), CI `.github/workflows/mobile.yml`, unit
+  tests `mobile/tests/MobileTests.cpp` (`-DSC_MOBILE_APP=OFF` builds only them). Keep those engine
+  files free of `Application` / view includes: the UI halves live in `AxisScaleApp.cpp` and the views.
+  Files written by the app: `videoTracks[].relFile` (resolved next to the WAV, `sc::resolveVideoTracks`)
+  and `storedPlots` (carried by the desktop). Crash reports (Sentry) and statistics (PostHog) live in
+  `mobile/src/Telemetry*`, compiled in only with keys (`SC_SENTRY_DSN`, `SC_POSTHOG_KEY`); never send
+  file names, paths or device names in events or error texts. Details: `mobile/README.md`.
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as
   a garbage glyph. Use `...` in menus, or `juce::String::fromUTF8 (u8"…")` when a real
