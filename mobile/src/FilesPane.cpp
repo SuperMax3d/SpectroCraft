@@ -33,11 +33,25 @@ FilesPane::~FilesPane()
 
 void FilesPane::changeListenerCallback (juce::ChangeBroadcaster*)
 {
+    // A new recording or crop is not in the list yet: list the folder again,
+    // once per file. A file that stays out of the list (opened from elsewhere,
+    // deleted) must not list it on every change.
+    const auto f = ctx.document.file();
+    if (f != juce::File() && f != listedFor && ! files.contains (f))
+    {
+        listedFor = f;
+        refresh();
+        return;
+    }
+    updateStatus();
+}
+
+void FilesPane::updateStatus()
+{
     current.setText (ctx.document.displayName() + (ctx.document.hasUnsavedChanges() ? "  (not saved)" : ""),
                      juce::dontSendNotification);
     saveButton.setEnabled (ctx.document.hasAudio() && ! ctx.recorder.isRecording());
     shareButton.setEnabled (targetFile().existsAsFile());
-    if (ctx.document.file() != juce::File() && ! files.contains (ctx.document.file())) refresh();
 }
 
 void FilesPane::refresh()
@@ -51,7 +65,7 @@ void FilesPane::refresh()
     });
     list.updateContent();
     list.repaint();
-    changeListenerCallback (nullptr);
+    updateStatus();   // not changeListenerCallback: it can call refresh()
 }
 
 int FilesPane::getNumRows() { return files.size(); }

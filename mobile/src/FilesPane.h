@@ -27,6 +27,7 @@ private:
     void listBoxItemClicked (int row, const juce::MouseEvent&) override;
     void selectedRowsChanged (int lastRowSelected) override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void updateStatus();   // the current file's name, Save and Share
     void openFromElsewhere();
     void share();
     /** The file Share and Delete act on: the selected recording, else the open one. */
@@ -43,6 +44,7 @@ private:
                deleteButton { "Delete", IconButton::Icon::Delete };
     juce::ListBox list;
     juce::Array<juce::File> files;
+    juce::File listedFor;   // the document file the folder was last listed for
     std::unique_ptr<juce::FileChooser> chooser;
     juce::ScopedMessageBox shareBox;
 };
