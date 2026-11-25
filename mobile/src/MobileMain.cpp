@@ -172,9 +172,16 @@ public:
         if (props) props->saveIfNeeded();
         if (mainWindow != nullptr)
             if (auto* s = dynamic_cast<MainScreen*> (mainWindow->getContentComponent())) s->suspended();
+        // A take keeps recording in the background (UIBackgroundModes audio);
+        // otherwise let the system have the microphone back.
+        if (audio != nullptr && recorder != nullptr && ! recorder->isRecording())
+            audio->release();
     }
 
-    void resumed() override {}
+    void resumed() override
+    {
+        if (audio != nullptr) audio->reacquire();
+    }
 
     void systemRequestedQuit() override { quit(); }
     void anotherInstanceStarted (const juce::String&) override {}

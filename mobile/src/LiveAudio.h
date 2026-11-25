@@ -33,6 +33,13 @@ public:
     /** Reopens with another input (a JUCE device name; "" = default). */
     juce::String selectInputDevice (const juce::String& name, int inputChannels);
     bool isOpen() const;
+    /** App going to the background without recording: close the device so the
+        system releases the microphone (iOS / Android show it in use while an
+        input stream is open). */
+    void release();
+    /** Back in the foreground: reopen the device closed by release(). */
+    void reacquire();
+    bool isReleased() const noexcept { return released; }
     /** Tests: behave as if a device were open at this rate with these inputs,
         and feed audioDeviceIOCallbackWithContext() by hand. */
     void simulateDevice (double sampleRate, int inputChannels);
@@ -89,6 +96,7 @@ private:
     int blockSize = 512;
 
     bool simulated = false;
+    bool released = false;
     std::atomic<double> rate { 48000.0 };
     std::atomic<int> inputs { 1 };
 

@@ -56,6 +56,23 @@ bool LiveAudio::isOpen() const
     return simulated || deviceManager.getCurrentAudioDevice() != nullptr;
 }
 
+void LiveAudio::release()
+{
+    if (released || simulated || deviceManager.getCurrentAudioDevice() == nullptr) return;
+    setCapturing (false);
+    deviceManager.closeAudioDevice();   // the callback stays registered for the reopen
+    released = true;
+}
+
+void LiveAudio::reacquire()
+{
+    if (! released) return;
+    released = false;
+    deviceManager.restartLastAudioDevice();
+    if (auto* d = deviceManager.getCurrentAudioDevice())
+        d->setAudioPreprocessingEnabled (false);   // measurement mode again
+}
+
 void LiveAudio::simulateDevice (double sampleRate, int inputChannels)
 {
     simulated = true;

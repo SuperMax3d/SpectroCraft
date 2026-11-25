@@ -171,6 +171,11 @@ void MainScreen::suspended()
     {
         stopPlayback();
         ctx.audio.generator().setEnabled (false);
+        if (videoButton.getToggleState())   // the camera is released too
+        {
+            videoButton.setToggleState (false, juce::dontSendNotification);
+            toggleVideo();
+        }
     }
 }
 
