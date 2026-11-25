@@ -111,8 +111,8 @@ jobs:
           KS: ${{ secrets.SC_ANDROID_KEYSTORE_BASE64 }}
         run: |
           if [ -n "$KS" ]; then
-            echo "$KS" | base64 -d > "$RUNNER_TEMP/upload.jks"
-            echo "SC_KEYSTORE_FILE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/upload.p12"
+            echo "SC_KEYSTORE_FILE=$RUNNER_TEMP/upload.p12" >> "$GITHUB_ENV"
             echo "SIGNED=1" >> "$GITHUB_ENV"
           fi
       - name: Build APK and AAB
@@ -156,14 +156,19 @@ jobs:
           if [ -z "$PLAY_JSON" ]; then echo "No SC_PLAY_SERVICE_ACCOUNT_JSON: skipped."; exit 0; fi
           echo "$PLAY_JSON" > "$RUNNER_TEMP/play.json"
           echo "PLAY_JSON_FILE=$RUNNER_TEMP/play.json" >> "$GITHUB_ENV"
+      # Google Play takes API uploads only once the app exists in the Play Console
+      # and its first AAB was uploaded by hand: until then this step warns
+      # instead of failing the build. A new (draft) app may also need
+      # SC_PLAY_RELEASE_STATUS=draft until its store listing is set up.
       - uses: r0adkll/upload-google-play@v1
+        continue-on-error: true
         if: env.UPLOAD == 'true' && env.SIGNED == '1' && env.PLAY_JSON_FILE != ''
         with:
           serviceAccountJson: ${{ env.PLAY_JSON_FILE }}
           packageName: ${{ env.BUNDLE_ID }}
           releaseFiles: out/*.aab
           track: internal
-          status: completed
+          status: ${{ vars.SC_PLAY_RELEASE_STATUS || 'completed' }}
 
   ios:
     runs-on: macos-15

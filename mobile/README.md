@@ -100,7 +100,7 @@ branch, so a fork testing a branch uses the variable):
 
 | Secret | |
 |---|---|
-| `SC_ANDROID_KEYSTORE_BASE64` | the upload keystore (`base64 -i upload.jks`) |
+| `SC_ANDROID_KEYSTORE_BASE64` | the upload keystore, PKCS12 (`base64 -i upload.p12`; set the variable `SC_KEYSTORE_TYPE=jks` in the workflow env for a JKS file) |
 | `SC_ANDROID_KEYSTORE_PASSWORD`, `SC_ANDROID_KEY_ALIAS`, `SC_ANDROID_KEY_PASSWORD` | its passwords and alias |
 | `SC_PLAY_SERVICE_ACCOUNT_JSON` | a Google Play service account allowed to release; the AAB goes to the *internal testing* track. The app must exist in the Play Console (the first AAB is uploaded by hand). |
 | `SC_APPLE_TEAM_ID` | the Apple developer team |

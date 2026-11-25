@@ -11,7 +11,7 @@
 //   posthogKey    PostHog project API key (usage statistics; empty = none)
 //   posthogHost   PostHog ingestion host (default https://us.i.posthog.com)
 // Release signing reads SC_KEYSTORE_FILE, SC_KEYSTORE_PASSWORD, SC_KEY_ALIAS and
-// SC_KEY_PASSWORD from the environment; without them the release APK is signed
+// SC_KEY_PASSWORD (and SC_KEYSTORE_TYPE, default pkcs12) from the environment; without them the release APK is signed
 // with the debug key (installable by hand, not uploadable to Google Play).
 
 plugins {
@@ -71,6 +71,7 @@ android {
             def ks = System.getenv("SC_KEYSTORE_FILE")
             if (ks != null && file(ks).exists()) {
                 storeFile file(ks)
+                storeType System.getenv("SC_KEYSTORE_TYPE") ?: "pkcs12"
                 storePassword System.getenv("SC_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("SC_KEY_ALIAS")
                 keyPassword System.getenv("SC_KEY_PASSWORD")
