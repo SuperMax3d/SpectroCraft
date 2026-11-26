@@ -25,6 +25,7 @@ private:
     // The MVX2U is chosen when it shows up (at launch or plugged in), once:
     // another input picked while it stays plugged in is kept.
     bool adapterSeen = false;
+    bool rateRestored = false;   // the saved sample rate was applied once
     juce::ComboBox channelsBox, rateBox;
     // Where the sound plays (generator, playback): iOS shows the system's
     // picker (speaker, AirPods, AirPlay); elsewhere a list of output devices.
@@ -32,5 +33,7 @@ private:
     std::unique_ptr<juce::Component> outputPicker;
     juce::ComboBox outputBox;
     juce::Label channelsLabel { {}, "Channels" }, rateLabel { {}, "Sample rate" };
+    juce::Viewport viewport;
+    juce::Component content;
 };
 } // namespace scm

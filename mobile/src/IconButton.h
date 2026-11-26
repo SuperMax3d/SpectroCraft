@@ -9,7 +9,7 @@ namespace scm
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Open, Save, Share, Delete, Undo, Redo, Panels };
+    enum class Icon { Open, Save, Share, Delete, Undo, Redo, Panels, Menu };
 
     IconButton (const juce::String& name, Icon i) : juce::Button (name), icon (i)
     {
@@ -95,6 +95,13 @@ public:
                 p.lineTo (6.8f, 8.5f);
                 p.startNewSubPath (4.8f, 11.5f);
                 p.lineTo (6.8f, 11.5f);
+                break;
+            case Icon::Menu:      // three lines (the phone's top bar menu)
+                for (float y : { 6.5f, 12.0f, 17.5f })
+                {
+                    p.startNewSubPath (4.0f, y);
+                    p.lineTo (20.0f, y);
+                }
                 break;
         }
         return p;

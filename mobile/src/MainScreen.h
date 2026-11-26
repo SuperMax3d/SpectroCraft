@@ -109,6 +109,12 @@ private:
     void applyPanels();
     bool panelShown (int t) const;
     void togglePanels();
+    /** The phone's top bar menu: views, spectrogram log / linear and range,
+        Save, Save As. */
+    void showMainMenu();
+    void saveDocument();
+    /** Asks a name, then saves to the recordings folder under it. */
+    void saveDocumentAs();
     void runCommand (screen::Command);
     void layoutPhone (juce::Rectangle<int> r);
     void layoutTablet (juce::Rectangle<int> r);
@@ -122,7 +128,9 @@ private:
 
     // top bar
     juce::Label title;
+    // tablet: W / S / W+S and Save; phone: one menu button (issue #79)
     juce::TextButton layoutW { "W" }, layoutS { "S" }, layoutWS { "W+S" }, saveButton { "Save" };
+    IconButton menuButton { "Menu", IconButton::Icon::Menu };
     // tablet only: show / hide the panels, undo, redo (the desktop's toolbar)
     IconButton panelsButton { "Panels", IconButton::Icon::Panels },
                undoButton { "Undo", IconButton::Icon::Undo },

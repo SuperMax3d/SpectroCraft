@@ -110,7 +110,8 @@ void Recorder::timerCallback()
         stop (err);
         if (onAutoStop)
             onAutoStop ("The recording reached the memory limit ("
-                        + juce::String (maxSeconds() / 60.0, 1) + " min) and was saved.");
+                        + juce::String (maxSeconds() / 60.0, 1) + " min) and was stopped."
+                        + (customTarget ? juce::String() : juce::String (" Save it to keep it.")));
         return;
     }
     if (onUpdate) onUpdate();
@@ -152,7 +153,16 @@ juce::File Recorder::stop (juce::String& error, std::function<void()> beforeSave
 
     if (beforeSave) beforeSave();
     juce::File saved;
-    if (eng.numSamples() > 0)
+    if (eng.numSamples() > 0 && ! customTarget)
+    {
+        // Issue #79: nothing goes to the recordings folder until Save. The
+        // take keeps the name chosen at start for it, and a recovery copy
+        // outside the recordings folder brings it back if the app is closed.
+        document.setPlannedFile (target);
+        document.markUnsaved();
+        document.writeRecovery();
+    }
+    else if (eng.numSamples() > 0)
     {
         const auto file = target != juce::File() ? target : MobileDocument::newRecordingFile();
         if (document.saveAs (file, error)) saved = file;

@@ -72,6 +72,9 @@ public:
     // ---- meters (dBFS, decaying peak hold; -200 when silent)
     float inputPeakDb (int ch) const noexcept;
     float inputRmsDb (int ch) const noexcept;
+    /** The file playing (first output channel, before the generator). */
+    float playbackPeakDb() const noexcept { return outPeak.load(); }
+    float playbackRmsDb() const noexcept { return outRms.load(); }
 
     std::function<void()> onDeviceChanged;   // message thread
 
@@ -117,6 +120,7 @@ private:
 
     std::atomic<float> peak[kMaxChannels];
     std::atomic<float> rms[kMaxChannels];
+    std::atomic<float> outPeak { -200.0f }, outRms { -200.0f };
     std::vector<float> scratchOut;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LiveAudio)

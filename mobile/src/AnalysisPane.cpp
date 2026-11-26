@@ -1,4 +1,5 @@
 #include "AnalysisPane.h"
+#include "AnalysisRange.h"
 #include "MobileStyle.h"
 #include "Measures.h"
 #include "Telemetry.h"
@@ -252,22 +253,17 @@ void AnalysisPane::request()
     j.fftSize = 1024 << (fftBox.getSelectedId() - 1);
     j.cal = document.calibration();
     j.channel = 0;
-    const double dur = document.duration();
-    if (live)
-    {
-        j.t1 = dur;
-        j.t0 = std::max (0.0, dur - 1.0);
-    }
-    else if (! document.selection().isEmpty())
-    {
-        j.t0 = document.selection().getStart();
-        j.t1 = document.selection().getEnd();
-    }
-    else
-    {
-        j.t0 = std::max (0.0, view.start());
-        j.t1 = std::min (dur, view.end());
-    }
+    analysis::RangeInput in;
+    in.live = live;
+    in.duration = document.duration();
+    in.selection = document.selection();
+    in.playheadByHand = document.playheadPlacedByHand();
+    in.playhead = document.playhead();
+    in.windowSeconds = (double) j.fftSize / std::max (1.0, document.sampleRate());
+    in.visible = { view.start(), view.end() };
+    const auto range = analysis::rangeFor (in);
+    j.t0 = range.getStart();
+    j.t1 = range.getEnd();
     if (j.t1 - j.t0 < 1e-3) return;
     j.serial = ++serial;
     worker->submit (j);

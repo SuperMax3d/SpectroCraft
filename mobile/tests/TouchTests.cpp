@@ -3,6 +3,7 @@
 // carrying on after a lift, the magnifier's place on the screen) and the number
 // pad's entry (mobile/src/NumberEntry.h).
 #include <JuceHeader.h>
+#include "AnalysisRange.h"
 #include "NumberEntry.h"
 #include "PreciseTouch.h"
 
@@ -243,6 +244,45 @@ public:
     }
 };
 
+class AnalysisRangeTests : public juce::UnitTest
+{
+public:
+    AnalysisRangeTests() : juce::UnitTest ("analysis range", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        using namespace scm::analysis;
+        RangeInput in;
+        in.duration = 10.0;
+        in.visible = { 2.0, 6.0 };
+        in.windowSeconds = 8192.0 / 48000.0;
+
+        beginTest ("nothing chosen: the visible range");
+        expect (rangeFor (in) == juce::Range<double> (2.0, 6.0));
+
+        beginTest ("#79: a playhead placed by hand: one FFT window around it, inside the file");
+        in.playheadByHand = true;
+        in.playhead = 4.0;
+        auto r = rangeFor (in);
+        expectWithinAbsoluteError (r.getLength(), in.windowSeconds, 1e-9);
+        expectWithinAbsoluteError (r.getStart() + r.getLength() * 0.5, 4.0, 1e-9);
+        in.playhead = 0.01;
+        r = rangeFor (in);
+        expectEquals (r.getStart(), 0.0);
+        expectWithinAbsoluteError (r.getLength(), in.windowSeconds, 1e-9);
+        in.playhead = 10.0;
+        r = rangeFor (in);
+        expectWithinAbsoluteError (r.getEnd(), 10.0, 1e-9);
+
+        beginTest ("a selection wins over the playhead; recording: the last second");
+        in.selection = { 1.0, 3.0 };
+        expect (rangeFor (in) == juce::Range<double> (1.0, 3.0));
+        in.live = true;
+        expect (rangeFor (in) == juce::Range<double> (9.0, 10.0));
+    }
+};
+
 static PreciseTouchTests preciseTouchTests;
+static AnalysisRangeTests analysisRangeTests;
 static NumberEntryTests numberEntryTests;
 } // namespace

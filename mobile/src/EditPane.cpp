@@ -138,11 +138,22 @@ void EditPane::resized()
     undoButton.setBounds (x, y, w / 2 - 2, style::kTouch);
     redoButton.setBounds (x + w / 2 + 2, y, w / 2 - 2, style::kTouch);
     y += style::kTouch + 12;
-    displayTitle.setBounds (x, y, w, 24); y += 28;
-    axisBox.setBounds (x, y, w / 2 - 2, 38);
-    rangeBox.setBounds (x + w / 2 + 2, y, w / 2 - 2, 38);
-    y += 42;
+    displayTitle.setVisible (axisBox.isVisible() || channelBox.isVisible());
+    if (displayTitle.isVisible()) { displayTitle.setBounds (x, y, w, 24); y += 28; }
+    if (axisBox.isVisible())
+    {
+        axisBox.setBounds (x, y, w / 2 - 2, 38);
+        rangeBox.setBounds (x + w / 2 + 2, y, w / 2 - 2, 38);
+        y += 42;
+    }
     if (channelBox.isVisible()) { channelBox.setBounds (x, y, w / 2 - 2, 38); y += 42; }
     content.setSize (getWidth() - kScrollBarW, y + 6);
+}
+void EditPane::showSpectrogramOptions (bool show)
+{
+    if (axisBox.isVisible() == show) return;
+    axisBox.setVisible (show);
+    rangeBox.setVisible (show);
+    resized();
 }
 } // namespace scm
