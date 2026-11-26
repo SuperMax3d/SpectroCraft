@@ -412,6 +412,17 @@ public:
         return played;
     }
 
+    /** Stops a take and saves it, as the Save button does (issue #79: stop
+        alone writes nothing to the recordings folder). */
+    juce::File stopAndSave (scm::Recorder& rec, scm::MobileDocument& doc, juce::String& err)
+    {
+        expect (rec.stop (err) == juce::File(), "stop saves nothing");
+        expect (doc.isUnsavedTake());
+        if (! doc.save (err)) return {};
+        expect (! doc.isUnsavedTake());
+        return doc.file();
+    }
+
     void runTest() override
     {
         const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
@@ -434,7 +445,7 @@ public:
             expect (rec.start (cal, err), err);
             int64_t frame = 0;
             feed (audio, rec, 2.0, frame, [] (int64_t i) { return 0.25f * (float) std::sin (0.1309 * (double) i); });
-            const auto saved = rec.stop (err);
+            const auto saved = stopAndSave (rec, doc, err);
             expect (saved.existsAsFile(), "saved: " + err);
             FileDoc back;
             expect (back.load (saved));
@@ -456,7 +467,7 @@ public:
             // each frame carries its own index (scaled), so the order can be checked
             feed (audio, rec, 2.5, frame, [] (int64_t i) { return (float) i / 1.0e6f; });
             expect (rec.wrapped());
-            const auto saved = rec.stop (err);
+            const auto saved = stopAndSave (rec, doc, err);
             FileDoc back;
             expect (back.load (saved));
             expectEquals ((int64_t) back.engine.numSamples(), (int64_t) 48000);
@@ -485,7 +496,7 @@ public:
             expect (rec.start ({}, err), err);
             int64_t frame = 0;
             const auto played = feed (audio, rec, 1.0, frame, [] (int64_t) { return 0.01f; });
-            const auto saved = rec.stop (err);
+            const auto saved = stopAndSave (rec, doc, err);
             audio.generator().setEnabled (false);
             expectWithinAbsoluteError (rmsDb (played, 4800), -20.0, 0.05);
             FileDoc back;
@@ -506,6 +517,99 @@ public:
             const auto r = scm::cal::analyseCalibrator (shot.data(), (int) shot.size(), 48000.0);
             expect (r.ok, r.problem);
             expectWithinAbsoluteError (scm::cal::fullScaleDbSpl (r.fullScalePa), 94.0 - 20.0 * std::log10 (rms), 0.02);
+        }
+
+        beginTest ("#79: a take is written only on Save; a recovery copy keeps it meanwhile");
+        {
+            juce::String err;
+            const auto wavsBefore = dir.findChildFiles (juce::File::findFiles, false, "*.wav").size();
+            rec.setMode (scm::Recorder::Mode::Unlimited, 0.0);
+            expect (rec.start ({}, err), err);
+            const auto planned = rec.targetFile();
+            int64_t frame = 0;
+            feed (audio, rec, 0.5, frame, [] (int64_t i) { return 0.1f * (float) std::sin (0.04 * (double) i); });
+            expect (rec.stop (err) == juce::File());
+            expect (doc.isUnsavedTake() && doc.hasUnsavedChanges());
+            expect (doc.file() == juce::File());
+            expectEquals (doc.displayName(), planned.getFileNameWithoutExtension());
+            expectEquals (dir.findChildFiles (juce::File::findFiles, false, "*.wav").size(), wavsBefore, "nothing in the recordings folder");
+            const auto recovery = scm::MobileDocument::recoveryFolder().getChildFile ("take.wav");
+            expect (recovery.existsAsFile(), "a recovery copy");
+            expect (! recovery.isAChildOf (dir) || recovery.getParentDirectory() != dir, "not in the recordings list");
+
+            // the app closes: the take comes back, unsaved, at its planned name
+            doc.close();
+            expect (doc.recoverTake());
+            expect (doc.isUnsavedTake() && doc.hasUnsavedChanges());
+            expectEquals (doc.plannedFile().getFileName(), planned.getFileName());
+            expectEquals ((int64_t) doc.doc()->engine.numSamples(), frame);
+
+            // Save writes it at its planned name and the recovery copy goes
+            expect (doc.save (err), err);
+            expect (doc.file() == planned && planned.existsAsFile());
+            expect (! recovery.existsAsFile());
+            expect (! doc.hasUnsavedChanges());
+
+            // Discard: the recovery copy goes, nothing is written
+            expect (rec.start ({}, err), err);
+            const auto planned2 = rec.targetFile();
+            feed (audio, rec, 0.3, frame, [] (int64_t) { return 0.05f; });
+            rec.stop (err);
+            expect (recovery.existsAsFile());
+            doc.discardUnsavedTake();
+            expect (! recovery.existsAsFile());
+            expect (! planned2.existsAsFile());
+            doc.close();
+            expect (! doc.recoverTake(), "nothing to recover after a discard");
+        }
+
+        // Issue #79: crashes reported on Android when the second take stops.
+        beginTest ("#79: loop take, delete a part, more takes, stop");
+        {
+            juce::String err;
+            rec.setMode (scm::Recorder::Mode::Loop, 1.0);
+            expect (rec.start ({}, err), err);
+            int64_t frame = 0;
+            feed (audio, rec, 2.5, frame, [] (int64_t i) { return 0.1f * (float) std::sin (0.05 * (double) i); });
+            expect (stopAndSave (rec, doc, err).existsAsFile(), err);
+            doc.setSelection ({ 0.2, 0.5 });
+            expect (doc.deleteSelection (err), err);
+            expect (doc.save (err), err);   // MainScreen keeps the edit before the next take
+            for (int take = 0; take < 3; ++take)
+            {
+                expect (rec.start ({}, err), err);
+                feed (audio, rec, 1.7 + 0.3 * take, frame, [] (int64_t i) { return 0.1f * (float) std::sin (0.03 * (double) i); });
+                const auto saved = stopAndSave (rec, doc, err);
+                expect (saved.existsAsFile(), err);
+                expectEquals ((int64_t) doc.doc()->engine.numSamples(), (int64_t) 48000);
+                doc.setSelection ({ 0.1, 0.3 });
+                expect (doc.deleteSelection (err), err);
+                expect (doc.save (err), err);
+            }
+        }
+
+        beginTest ("#79: a take, play and move the playhead, another take, stop");
+        {
+            juce::String err;
+            rec.setMode (scm::Recorder::Mode::Unlimited, 0.0);
+            expect (rec.start ({}, err), err);
+            int64_t frame = 0;
+            feed (audio, rec, 1.0, frame, [] (int64_t i) { return 0.1f * (float) std::sin (0.02 * (double) i); });
+            expect (stopAndSave (rec, doc, err).existsAsFile(), err);
+            // play the take and move the playhead (as MainScreen does), then record again
+            audio.setPlaybackSource (&doc.doc()->engine);
+            doc.doc()->engine.setPosition (0.3);
+            doc.doc()->engine.play();
+            feed (audio, rec, 0.3, frame, [] (int64_t) { return 0.0f; });
+            doc.setPlayhead (0.6);
+            doc.doc()->engine.setPosition (0.6);
+            feed (audio, rec, 0.2, frame, [] (int64_t) { return 0.0f; });
+            doc.doc()->engine.stop();
+            audio.setPlaybackSource (nullptr);   // MainScreen's onAboutToReplace
+            expect (rec.start ({}, err), err);
+            feed (audio, rec, 1.2, frame, [] (int64_t i) { return 0.1f * (float) std::sin (0.02 * (double) i); });
+            expect (stopAndSave (rec, doc, err).existsAsFile(), err);
+            expect (doc.doc()->engine.numSamples() > 48000);
         }
 
         unsetenv ("SC_MOBILE_RECORDINGS");

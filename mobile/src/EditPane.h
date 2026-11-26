@@ -23,6 +23,16 @@ public:
         edits of the current file first). */
     std::function<void (const juce::File&)> onOpenFile;
 
+    /** The spectrogram's display options (log / linear, dB range). On the
+        phone they are in the top bar's menu (issue #79) and Edit shows only
+        the channel; the tablet keeps them here. */
+    void showSpectrogramOptions (bool show);
+    bool logFrequency() const { return axisBox.getSelectedId() == 1; }
+    int displayRangeDb() const { return rangeBox.getSelectedId(); }
+    /** As if chosen in Edit (the callbacks run). */
+    void setLogFrequency (bool log) { axisBox.setSelectedId (log ? 1 : 2, juce::sendNotificationSync); }
+    void setDisplayRangeDb (int db) { rangeBox.setSelectedId (db, juce::sendNotificationSync); }
+
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void refresh();

@@ -232,26 +232,28 @@ void LiveAudio::audioDeviceIOCallbackWithContext (const float* const* in, int nu
     for (int c = 0; c < numOut; ++c)
         if (out[c] != nullptr) juce::FloatVectorOperations::clear (out[c], n);
 
-    // ---- input: meters, FIFO, one-shot capture
-    const int ch = std::min (numIn, kMaxChannels);
-    for (int c = 0; c < ch; ++c)
+    // Meters. Peak: instant attack, ~20 dB/s release (the UI polls at 30 Hz).
+    const float decay = 20.0f * (float) n / (float) rate.load();
+    const auto meter = [n, decay] (const float* x, std::atomic<float>& peakDb, std::atomic<float>& rmsDb)
     {
-        if (in[c] == nullptr) continue;
         float pk = 0.0f;
         double sum = 0.0;
         for (int i = 0; i < n; ++i)
         {
-            pk = std::max (pk, std::abs (in[c][i]));
-            sum += (double) in[c][i] * in[c][i];
+            pk = std::max (pk, std::abs (x[i]));
+            sum += (double) x[i] * x[i];
         }
-        const float pkDb = pk > 0.0f ? 20.0f * std::log10 (pk) : -200.0f;
-        const float rmsDb = sum > 0.0 ? 10.0f * (float) std::log10 (sum / n) : -200.0f;
-        // Peak: instant attack, ~20 dB/s release (the UI polls at 30 Hz).
-        const float decay = 20.0f * (float) n / (float) rate.load();
-        peak[c].store (std::max (pkDb, peak[c].load() - decay));
-        const float prev = rms[c].load();
-        rms[c].store (prev < -150.0f ? rmsDb : prev + 0.3f * (rmsDb - prev));
-    }
+        const float pkNow = pk > 0.0f ? 20.0f * std::log10 (pk) : -200.0f;
+        const float rmsNow = sum > 0.0 ? 10.0f * (float) std::log10 (sum / n) : -200.0f;
+        peakDb.store (std::max (pkNow, peakDb.load() - decay));
+        const float prev = rmsDb.load();
+        rmsDb.store (prev < -150.0f ? rmsNow : prev + 0.3f * (rmsNow - prev));
+    };
+
+    // ---- input: meters, FIFO, one-shot capture
+    const int ch = std::min (numIn, kMaxChannels);
+    for (int c = 0; c < ch; ++c)
+        if (in[c] != nullptr) meter (in[c], peak[c], rms[c]);
 
     if (capturing.load() && ch > 0)
     {
@@ -293,6 +295,7 @@ void LiveAudio::audioDeviceIOCallbackWithContext (const float* const* in, int nu
             source->getNextAudioBlock (info);
         }
     }
+    if (numOut > 0 && out[0] != nullptr) meter (out[0], outPeak, outRms);   // the file, not the generator
     gen.addTo (out, numOut, n);
 }
 

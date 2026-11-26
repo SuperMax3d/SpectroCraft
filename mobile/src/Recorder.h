@@ -3,8 +3,11 @@
 // Unlimited: frames are appended while memory allows (the cap is shown in the
 // UI; the take stops and is kept when it is reached). Loop: the last N seconds
 // are kept (LoopPlan) and rotated at stop so the file starts with the oldest
-// frame. The calibration of the current input is attached to the new document,
-// and the take is saved to the recordings folder when it stops.
+// frame. The calibration of the current input is attached to the new document.
+// A take is not written to the recordings folder when it stops (issue #79): it
+// stays an unsaved document until Save (MobileDocument::isUnsavedTake), with a
+// recovery copy elsewhere. A take with a chosen file (the sound map's) is
+// saved there when it stops.
 #pragma once
 #include <JuceHeader.h>
 #include "LoopBuffer.h"
@@ -30,10 +33,12 @@ public:
         folder is created) or, when empty, to a new file of the recordings
         folder. */
     bool start (const ScaleCalibration& cal, juce::String& error, const juce::File& saveTo = {});
-    /** Stops, rotates a wrapped loop, calls `beforeSave` (to attach metadata
-        such as the video link) and saves to targetFile(); returns the saved
-        file (or {}). When a chosen target cannot be written, the take goes to
-        a new file of the recordings folder instead (and `error` says so). */
+    /** Stops, rotates a wrapped loop and calls `beforeSave` (to attach
+        metadata such as the video link). A take with a chosen file is saved
+        there and that file is returned (when it cannot be written, the take
+        goes to a new file of the recordings folder instead, and `error` says
+        so). Any other take is left unsaved, planned at targetFile(): {} is
+        returned. */
     juce::File stop (juce::String& error, std::function<void()> beforeSave = {});
     /** The WAV the take will be saved to (chosen at start). */
     juce::File targetFile() const { return target; }
