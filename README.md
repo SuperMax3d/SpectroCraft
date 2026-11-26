@@ -37,6 +37,18 @@ All releases are **portable**: download the zip for your platform, extract it an
 1. Download `SpectroCraft-linux-x64.zip` from the [releases page](https://github.com/SuperMax3d/SpectroCraft/releases) and extract it.
 2. Make the binary executable: `chmod +x SpectroCraft`, then run it from a desktop session (the runtime libraries ship in the archive; `RUNPATH=$ORIGIN` finds them). Tested on Ubuntu 24.04 x86_64.
 
+### Android
+
+1. Download `SpectroCraftMobile-android.apk` from the [releases page](https://github.com/SuperMax3d/SpectroCraft/releases) and copy it to your phone (or open the link in a phone browser and tap the file).
+2. Tap the APK and, when prompted, allow **Install unknown apps** for your browser or file manager. The release APK is signed with CI's debug key: it installs by hand, not through Google Play.
+3. Launch SpectroCraft Mobile and grant the microphone permission on first start.
+
+### iOS (via Xcode)
+
+1. Download `SpectroCraftMobile-ios-simulator.zip` from the [releases page](https://github.com/SuperMax3d/SpectroCraft/releases) and extract it - you get an unsigned `SpectroCraft.app` built for the simulator.
+2. Install [Xcode](https://developer.apple.com/xcode/) on a Mac, start the Simulator (or `xcrun simctl boot "iPhone 16"`) and install the app: drag the `.app` into the Simulator window, or run `xcrun simctl install booted SpectroCraft.app`. No Apple account is needed for this; note that the simulator's microphone is your Mac's.
+3. To run on a real iPhone instead, build from source ([mobile/README.md](mobile/README.md)) and sign with a free Apple ID (*Signing & Capabilities* → Team = your personal team) - no paid developer account required. Free signing expires after 7 days: re-run from Xcode to renew.
+
 ## Feature
 
 The complete feature reference — waveform & spectral views, video window and tracks, recording, AI features (noise suppression, transcription, stem separation, super resolution), content aware time scale, tables, markers, keyboard shortcuts, CLI flags and the MCP / AI-control protocol — is in **[docs/Features.md](docs/Features.md)**.
