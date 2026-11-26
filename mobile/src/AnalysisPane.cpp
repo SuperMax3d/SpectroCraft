@@ -21,6 +21,7 @@ public:
         int channel = 0;
         int fftSize = 8192;
         ScaleCalibration cal;
+        miccomp::Compensation comp;   // the recording's microphone compensation (issue #80)
         int serial = 0;
     };
 
@@ -97,6 +98,7 @@ public:
             c.t1 = j.t1;
             c.channel = j.channel;
             c.serial = j.serial;
+            c.compensated = j.comp.valid();
             const bool calibrated = j.cal.isCalibratedFor (j.channel);
             const double offset = calibrated ? j.cal.levelOffsetDb (j.channel) : 0.0;
             c.unit = calibrated ? juce::String (j.cal.levelUnitLabel()) : juce::String ("dBFS");
@@ -119,7 +121,7 @@ public:
                 {
                     if (b < ch.noData.size() && ch.noData[b]) continue;
                     c.f.push_back (r.centresHz[b]);
-                    c.db.push_back ((double) ch.relDb[b] + ch.cal.levelOffsetDb);
+                    c.db.push_back ((double) ch.relDb[b] + ch.cal.levelOffsetDb + j.comp.at (r.centresHz[b]));
                 }
                 c.fftSize = r.fftSize;
             }
@@ -137,7 +139,7 @@ public:
                 for (size_t k = 1; k < ch.relDb.size(); ++k)
                 {
                     c.f.push_back ((double) k * r.binHz);
-                    c.db.push_back (ch.relDb[k] + ch.cal.levelOffsetDb);
+                    c.db.push_back (ch.relDb[k] + ch.cal.levelOffsetDb + j.comp.at ((double) k * r.binHz));
                 }
                 c.fftSize = r.fftSize;
             }
@@ -322,6 +324,7 @@ void AnalysisPane::request()
     j.mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
     j.fftSize = 1024 << (fftBox.getSelectedId() - 1);
     j.cal = document.calibration();
+    j.comp = document.micCompensation();
     j.channel = 0;
     analysis::RangeInput in;
     in.live = live;
@@ -348,7 +351,8 @@ void AnalysisPane::curveReady (Curve c)
         : juce::String (current.t0, 3) + " - " + juce::String (current.t1, 3) + " s";
     summary.setText ("RMS " + juce::String (current.rmsDb, 1) + " " + current.unit
                      + "   Peak " + juce::String (current.peakDb, 1) + " " + current.unit
-                     + "   (" + region + ")", juce::dontSendNotification);
+                     + "   (" + region + ")" + (current.compensated ? "   mic compensated" : ""),
+                     juce::dontSendNotification);
     repaint();
 }
 

@@ -186,6 +186,7 @@ set (SC_MOBILE_SOURCES
     src/CalibrationPane.cpp
     src/GeneratorPane.cpp
     src/TouchControls.cpp
+    src/MicCompensation.cpp
     src/InputPane.cpp
     src/EditPane.cpp
     src/FilesPane.cpp
@@ -304,6 +305,8 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         tests/VideoTests.cpp
         tests/TouchTests.cpp
         tests/InputTests.cpp
+        tests/MicCompensationTests.cpp
+        src/MicCompensation.cpp
         tests/SoundMapTests.cpp
         ${SC_SOUNDMAP_SOURCES}
         src/SignalSource.cpp

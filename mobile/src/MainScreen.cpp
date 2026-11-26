@@ -395,6 +395,9 @@ bool MainScreen::startRecording (const juce::File& saveTo, bool withVideoIfOn)
         showMessage ("Recording", err);
         return false;
     }
+    // the input's compensation (issue #80) goes with its recordings, as its calibration does
+    if (const auto comp = miccomp::forInput (ctx.inputKey()); comp.valid())
+        ctx.document.setMicCompensation (comp);
     const bool withVideo = withVideoIfOn && videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera;
     if (withVideo)
         ctx.video.start (VideoCapture::movieFileFor (ctx.recorder.targetFile()));
