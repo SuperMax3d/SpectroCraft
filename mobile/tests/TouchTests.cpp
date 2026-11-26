@@ -3,6 +3,7 @@
 // carrying on after a lift, the magnifier's place on the screen) and the number
 // pad's entry (mobile/src/NumberEntry.h).
 #include <JuceHeader.h>
+#include "AnalysisRange.h"
 #include "NumberEntry.h"
 #include "PreciseTouch.h"
 
@@ -243,6 +244,78 @@ public:
     }
 };
 
+class AnalysisRangeTests : public juce::UnitTest
+{
+public:
+    AnalysisRangeTests() : juce::UnitTest ("analysis range", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        using namespace scm::analysis;
+        RangeInput in;
+        in.duration = 10.0;
+        in.visible = { 2.0, 6.0 };
+        in.windowSeconds = 8192.0 / 48000.0;
+
+        beginTest ("nothing chosen: the visible range");
+        expect (rangeFor (in) == juce::Range<double> (2.0, 6.0));
+
+        beginTest ("#79: a playhead placed by hand: one FFT window around it, inside the file");
+        in.playheadByHand = true;
+        in.playhead = 4.0;
+        auto r = rangeFor (in);
+        expectWithinAbsoluteError (r.getLength(), in.windowSeconds, 1e-9);
+        expectWithinAbsoluteError (r.getStart() + r.getLength() * 0.5, 4.0, 1e-9);
+        in.playhead = 0.01;
+        r = rangeFor (in);
+        expectEquals (r.getStart(), 0.0);
+        expectWithinAbsoluteError (r.getLength(), in.windowSeconds, 1e-9);
+        in.playhead = 10.0;
+        r = rangeFor (in);
+        expectWithinAbsoluteError (r.getEnd(), 10.0, 1e-9);
+
+        beginTest ("a selection wins over the playhead; recording: the last second");
+        in.selection = { 1.0, 3.0 };
+        expect (rangeFor (in) == juce::Range<double> (1.0, 3.0));
+        in.live = true;
+        expect (rangeFor (in) == juce::Range<double> (9.0, 10.0));
+        beginTest ("#79: a pinch zooms about the fingers and pans with them");
+        {
+            // zoom x2 about the middle of a linear axis
+            auto r = zoomAxis (0.0, 1000.0, 0.5, 0.5, 2.0, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.first, 250.0, 1e-9);
+            expectWithinAbsoluteError (r.second, 750.0, 1e-9);
+            // the value under the fingers follows them (pan without zoom)
+            r = zoomAxis (200.0, 600.0, 0.5, 0.75, 1.0, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.first + 0.75 * (r.second - r.first), 400.0, 1e-9);
+            // log axis: 100 Hz - 10 kHz (a ratio of 100) shrunk log2 (100) times
+            // is one octave, still centred on 1 kHz
+            r = zoomAxis (100.0, 10000.0, 0.5, 0.5, std::log2 (100.0), true, 5.0, 24000.0, 1.5);
+            expectWithinAbsoluteError (std::sqrt (r.first * r.second), 1000.0, 1e-6);
+            expectWithinAbsoluteError (r.second / r.first, 2.0, 1e-6);
+            // limits: never past the bounds, never narrower than the minimum
+            r = zoomAxis (0.0, 1000.0, 0.0, 0.0, 0.1, false, 0.0, 1000.0, 10.0);
+            expect (r.first >= 0.0 && r.second <= 1000.0);
+            r = zoomAxis (0.0, 1000.0, 0.5, 0.5, 1.0e6, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.second - r.first, 10.0, 1e-9);
+            r = zoomAxis (0.0, 1000.0, 0.5, 0.0, 1.0, false, 0.0, 1000.0, 10.0);   // dragged past the start
+            expectEquals (r.first, 0.0);
+        }
+
+        beginTest ("#79: the stored curve's level at a frequency (bands and spectrum)");
+        {
+            const std::vector<double> bf { 100.0, 125.0, 160.0 }, bdb { -10.0, -20.0, -30.0 };
+            expect (valueAt (bf, bdb, 126.0, true) == -20.0);
+            expect (! valueAt (bf, bdb, 1000.0, true).has_value(), "outside every band");
+            const std::vector<double> sf { 10.0, 20.0, 30.0 }, sdb { 0.0, -10.0, -20.0 };
+            expectWithinAbsoluteError (*valueAt (sf, sdb, 25.0, false), -15.0, 1e-9);
+            expect (! valueAt (sf, sdb, 40.0, false).has_value());
+            expect (! valueAt ({}, {}, 40.0, false).has_value());
+        }
+    }
+};
+
 static PreciseTouchTests preciseTouchTests;
+static AnalysisRangeTests analysisRangeTests;
 static NumberEntryTests numberEntryTests;
 } // namespace

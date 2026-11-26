@@ -31572,6 +31572,20 @@ static void testVideoTrackMetadata()
                "sound map position: written back by the desktop");
     }
 
+    // The mobile microphone compensation (issue #80): survives a desktop round trip.
+    {
+        sc::MetaBundle pb;
+        CHECK (sc::parseBundle (R"({"micCompensation":{"input":"iPhone Microphone","hz":[20,25],"db":[3.5,-1.25]}})", pb, nullptr)
+                   && pb.haveMicCompensation && pb.micCompensation.isObject(),
+               "mic compensation: read");
+        FileDoc d6;
+        d6.applyBundle (pb);
+        sc::MetaBundle back;
+        CHECK (sc::parseBundle (juce::String (d6.buildScmdJson()), back, nullptr) && back.micCompensation.isObject()
+                   && std::abs ((double) back.micCompensation["db"][1] + 1.25) < 1e-9,
+               "mic compensation: written back by the desktop");
+    }
+
     // Load path (regression): videoTracks stored in the .meta.json sidecar or
     // embedded SCMD chunk must be restored when the document loads - they used
     // to be parsed but never applied, so saved tracks silently vanished.

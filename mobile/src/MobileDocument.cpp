@@ -63,7 +63,8 @@ juce::File MobileDocument::file() const
 juce::String MobileDocument::displayName() const
 {
     if (current == nullptr) return "No file";
-    if (current->file == juce::File()) return "New recording";
+    if (current->file == juce::File())
+        return planned != juce::File() ? planned.getFileNameWithoutExtension() : juce::String ("New recording");
     return current->file.getFileNameWithoutExtension();
 }
 
@@ -76,9 +77,11 @@ void MobileDocument::adoptDocument (std::unique_ptr<FileDoc> d)
 {
     if (onAboutToReplace) onAboutToReplace();
     current = std::move (d);
+    planned = juce::File();
     spectralEngine.clearCache();
     sel = {};
     head = 0.0;
+    headByHand = false;
     storedPlots.clear();
     if (current != nullptr)
         storedPlots.fromVar (current->storedPlots);
@@ -120,7 +123,8 @@ bool MobileDocument::save (juce::String& error)
     if (! hasAudio()) { error = "Nothing to save."; return false; }
     const auto target = current->file != juce::File()
                          && current->file.getFileExtension().equalsIgnoreCase (".wav")
-                            ? current->file : newRecordingFile();
+                            ? current->file
+                            : planned != juce::File() ? planned : newRecordingFile();
     return saveAs (target, error);
 }
 
@@ -134,9 +138,15 @@ bool MobileDocument::saveAs (const juce::File& f, juce::String& error)
         error = "Could not write " + f.getFileName() + ".";
         return false;
     }
+    const bool wasTake = isUnsavedTake();
     current->file = f;
     current->name = f.getFileName();
     current->metaDirty = false;
+    if (wasTake)
+    {
+        planned = juce::File();
+        clearRecovery();
+    }
     changed();
     return true;
 }
@@ -147,12 +157,14 @@ void MobileDocument::setSelection (juce::Range<double> r)
     r = juce::Range<double> (juce::jlimit (0.0, d, r.getStart()), juce::jlimit (0.0, d, r.getEnd()));
     if (r == sel) return;
     sel = r;
+    if (! sel.isEmpty()) headByHand = false;   // the selection is analysed now
     changed();
 }
 
-void MobileDocument::setPlayhead (double t)
+void MobileDocument::setPlayhead (double t, bool byHand)
 {
     head = juce::jlimit (0.0, duration(), t);
+    headByHand = byHand;
     if (hasAudio()) current->engine.setPosition (head);
     changed();
 }
@@ -297,6 +309,19 @@ ScaleCalibration MobileDocument::calibration() const
     return current->scale;
 }
 
+miccomp::Compensation MobileDocument::micCompensation() const
+{
+    return current != nullptr ? miccomp::Compensation::fromVar (current->micCompensation) : miccomp::Compensation {};
+}
+
+void MobileDocument::setMicCompensation (const miccomp::Compensation& c)
+{
+    if (current == nullptr) return;
+    current->micCompensation = c.valid() ? c.toVar() : juce::var();
+    current->metaDirty = true;
+    changed();
+}
+
 void MobileDocument::setCalibration (const ScaleCalibration& c)
 {
     if (current == nullptr) return;
@@ -345,5 +370,86 @@ void MobileDocument::plotsChanged()
     current->storedPlots = storedPlots.toVar();
     current->metaDirty = true;
     changed();
+}
+// ---- unsaved takes (issue #79)
+
+juce::File MobileDocument::recoveryFolder()
+{
+   #if ! (JUCE_IOS || JUCE_ANDROID)
+    // desktop development builds and tests: next to their recordings
+    const auto custom = juce::SystemStats::getEnvironmentVariable ("SC_MOBILE_RECORDINGS", {});
+    if (custom.isNotEmpty())
+        return juce::File (custom).getChildFile (".unsaved");
+   #endif
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("SpectroCraftMobile").getChildFile ("Unsaved");
+}
+
+namespace
+{
+juce::File recoveryWav()  { return MobileDocument::recoveryFolder().getChildFile ("take.wav"); }
+juce::File recoveryInfo() { return MobileDocument::recoveryFolder().getChildFile ("take.json"); }
+} // namespace
+
+void MobileDocument::markUnsaved()
+{
+    if (current == nullptr) return;
+    current->metaDirty = true;
+    changed();
+}
+
+void MobileDocument::writeRecovery()
+{
+    if (! isUnsavedTake() || ! hasAudio()) return;
+    const auto dir = recoveryFolder();
+    dir.createDirectory();
+    current->storedPlots = storedPlots.toVar();
+    current->metaMode = sc::MetaMode::Embedded;
+    // saveFile (not saveFileAs): the take keeps no file and stays unsaved
+    if (! current->engine.saveFile (recoveryWav())) return;
+    auto* info = new juce::DynamicObject();
+    info->setProperty ("planned", planned.getFullPathName());
+    info->setProperty ("movie", linkedVideo().getFullPathName());
+    info->setProperty ("movieOffset", linkedVideoOffset());
+    recoveryInfo().replaceWithText (juce::JSON::toString (juce::var (info)));
+}
+
+void MobileDocument::clearRecovery()
+{
+    recoveryWav().deleteFile();
+    recoveryInfo().deleteFile();
+}
+
+void MobileDocument::discardUnsavedTake()
+{
+    if (! isUnsavedTake()) return;
+    const auto movie = linkedVideo();
+    if (movie.existsAsFile() && ! movie.withFileExtension (".wav").existsAsFile())
+        movie.deleteFile();   // filmed with the take, never saved
+    clearRecovery();
+    planned = juce::File();
+}
+
+bool MobileDocument::recoverTake()
+{
+    const auto wav = recoveryWav();
+    if (! wav.existsAsFile()) return false;
+    const auto info = juce::JSON::parse (recoveryInfo());
+    juce::String err;
+    if (! open (wav, err)) { clearRecovery(); return false; }
+    // a new take again: no file, its planned name, and changes to save
+    juce::File target (info.getProperty ("planned", "").toString());
+    if (! juce::File::isAbsolutePath (target.getFullPathName()) || target.existsAsFile())
+        target = newRecordingFile();
+    current->file = juce::File();
+    current->name = target.getFileName();
+    planned = target;
+    const juce::File movie (info.getProperty ("movie", "").toString());
+    if (juce::File::isAbsolutePath (movie.getFullPathName()) && movie.existsAsFile())
+        linkVideo (movie, (double) info.getProperty ("movieOffset", 0.0));
+    else if (current != nullptr)
+        current->videoTracks.clear();
+    markUnsaved();
+    return true;
 }
 } // namespace scm

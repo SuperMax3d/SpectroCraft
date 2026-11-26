@@ -6,6 +6,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "FileDoc.h"
+#include "MicCompensation.h"
 #include "Settings.h"
 #include "SpectralEngine.h"
 #include "StoredPlots.h"
@@ -44,16 +45,42 @@ public:
     /** An empty in-memory document to record into. */
     bool startNew (int channels, double rate);
     void close();
-    /** Saves to the document's file (a new name in the recordings folder for
-        a recording that was never saved). */
+    /** Saves to the document's file (for a take never saved: the name it was
+        given when it started, else a new name in the recordings folder). */
     bool save (juce::String& error);
     bool saveAs (const juce::File& f, juce::String& error);
+
+    // ---- a take not saved yet (issue #79: nothing is written to the
+    // recordings folder until Save). Its file is empty; Save puts it at its
+    // planned file. A recovery copy kept outside the recordings folder brings
+    // it back at the next launch if the app is closed first.
+    void setPlannedFile (const juce::File& f) { planned = f; }
+    juce::File plannedFile() const { return planned; }
+    bool isUnsavedTake() const noexcept { return current != nullptr && current->file == juce::File() && planned != juce::File(); }
+    /** The take now has changes to save (a new take, or a recovered one). */
+    void markUnsaved();
+    /** Copies the take to the recovery folder, without changing its state. */
+    void writeRecovery();
+    /** The take was saved or discarded: no recovery any more. */
+    void clearRecovery();
+    /** Discard of an unsaved take: its recovery copy and the movie filmed
+        with it go too. */
+    void discardUnsavedTake();
+    /** At launch: reopens a take left unsaved. True when there was one. */
+    bool recoverTake();
+    /** The app's own folder for the recovery copy (not visible in the Files
+        list, the iOS Files app or the Android file manager). */
+    static juce::File recoveryFolder();
 
     // ---- selection (seconds); an empty range = no selection
     juce::Range<double> selection() const noexcept { return sel; }
     void setSelection (juce::Range<double> r);
     double playhead() const noexcept { return head; }
-    void setPlayhead (double t);
+    /** byHand: a tap, the lens, Home / End (not Stop's return to the start). */
+    void setPlayhead (double t, bool byHand = true);
+    /** The playhead was placed by hand since the last selection (issue #79:
+        the analysis then takes one FFT window around it). */
+    bool playheadPlacedByHand() const noexcept { return headByHand; }
     /** The playhead follows playback: no seek and no change message (the
         views only repaint their cursor). */
     void followPlayback (double t) noexcept { head = t; }
@@ -76,6 +103,10 @@ public:
     //      entry when the file has Scale-form axes, which take precedence)
     ScaleCalibration calibration() const;
     void setCalibration (const ScaleCalibration& c);
+    /** The microphone compensation the recording carries (issue #80;
+        metadata "micCompensation"): the analysis adds it to its levels. */
+    miccomp::Compensation micCompensation() const;
+    void setMicCompensation (const miccomp::Compensation& c);
 
     // ---- video linked to the recording
     void linkVideo (const juce::File& movie, double offsetSecs);
@@ -104,6 +135,8 @@ private:
     StoredPlots storedPlots;
     juce::Range<double> sel;
     double head = 0.0;
+    bool headByHand = false;
+    juce::File planned;   // an unsaved take's file
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MobileDocument)
 };

@@ -103,19 +103,28 @@ void FilesPane::listBoxItemClicked (int row, const juce::MouseEvent&)
 void FilesPane::confirmDiscard (std::function<void()> then)
 {
     if (! ctx.document.hasUnsavedChanges()) { then(); return; }
+    const bool take = ctx.document.isUnsavedTake();
     auto options = juce::MessageBoxOptions::makeOptionsYesNoCancel (juce::MessageBoxIconType::QuestionIcon,
-        "Unsaved changes", ctx.document.displayName() + " has changes that are not saved.",
+        take ? "Recording not saved" : "Unsaved changes",
+        take ? ctx.document.displayName() + " is not saved."
+             : ctx.document.displayName() + " has changes that are not saved.",
         "Save", "Discard", "Cancel");
-    juce::AlertWindow::showAsync (options, [this, then] (int r)
+    juce::Component::SafePointer<FilesPane> safe (this);
+    juce::AlertWindow::showAsync (options, [safe, then] (int r)
     {
+        if (safe == nullptr) return;
         if (r == 1)
         {
             juce::String err;
-            if (! ctx.document.save (err)) { showMessage ("Save", err); return; }
+            if (! safe->ctx.document.save (err)) { showMessage ("Save", err); return; }
+            safe->refresh();
             then();
         }
         else if (r == 2)
+        {
+            safe->ctx.document.discardUnsavedTake();   // its recovery copy and movie go too
             then();
+        }
     });
 }
 

@@ -144,7 +144,7 @@ struct MetaBundle
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
          haveTranscription = false, haveTables = false, haveVideoTracks = false,
          haveAxes = false, haveSession = false, haveSoundModel = false,
-         haveStoredPlots = false, haveSoundMapPoint = false;
+         haveStoredPlots = false, haveSoundMapPoint = false, haveMicCompensation = false;
 
     /** Session (issue #21): the referenced files with their lanes and
         offsets, as written by sc::session::toVar (kept as JSON here; the
@@ -162,6 +162,11 @@ struct MetaBundle
         located it wrote it (map, point, x, y, z in metres, uncertainty; an
         object, kept as JSON here). The desktop carries it through its saves. */
     juce::var soundMapPoint;
+    /** Microphone compensation (mobile app, issue #80): the frequency
+        correction of the microphone that made the recording (input, bands in
+        Hz, correction in dB; an object, kept as JSON here). The mobile app's
+        analysis applies it; the desktop carries it through its saves. */
+    juce::var micCompensation;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
@@ -172,7 +177,7 @@ struct MetaBundle
             || !videoTracks.empty() || !axes.empty() || session.isObject()
             || soundModel.isObject()
             || (storedPlots.isArray() && storedPlots.size() > 0)
-            || soundMapPoint.isObject();
+            || soundMapPoint.isObject() || micCompensation.isObject();
     }
 };
 

@@ -24,17 +24,40 @@ void LevelMeter::paint (juce::Graphics& g)
     auto r = getLocalBounds().toFloat();
     g.setColour (style::barBackground);
     g.fillRoundedRectangle (r, 3.0f);
+
+    // Issue #79: a level only while recording (the input) or playing (the
+    // file); nothing otherwise.
+    const bool rec = ctx.recorder.isRecording();
+    const auto* d = ctx.document.doc();
+    const bool playing = ! rec && d != nullptr && d->engine.isPlaying();
+    if (! rec && ! playing)
+        return;
+    float rms, pk;
+    double splOffset = 0.0;
+    bool spl = false;
+    if (rec)
+    {
+        rms = ctx.audio.inputRmsDb (0);
+        pk = ctx.audio.inputPeakDb (0);
+        const auto cal = ctx.currentInputCalibration();
+        if (cal.valid()) { spl = true; splOffset = cal::fullScaleDbSpl (cal.fullScalePa); }
+    }
+    else
+    {
+        rms = ctx.audio.playbackRmsDb();
+        pk = ctx.audio.playbackPeakDb();
+        const auto cal = ctx.document.calibration();
+        if (cal.isCalibratedFor (0) && cal.unit == ScaleCalibration::Unit::Pascal) { spl = true; splOffset = cal.levelOffsetDb (0); }
+    }
     const auto toX = [&r] (float db) { return r.getX() + r.getWidth() * juce::jlimit (0.0f, 1.0f, (db + 80.0f) / 80.0f); };
-    const float rms = ctx.audio.inputRmsDb (0), pk = ctx.audio.inputPeakDb (0);
     const auto colour = pk > -1.0f ? style::record : pk > -12.0f ? style::warning : style::ok;
     g.setColour (colour.withAlpha (0.85f));
     g.fillRoundedRectangle (r.withRight (toX (rms)), 3.0f);
     g.setColour (juce::Colours::white);
     g.fillRect (toX (pk) - 1.0f, r.getY(), 2.0f, r.getHeight());
-    const auto cal = ctx.currentInputCalibration();
     juce::String text = rms > -150.0f ? juce::String (rms, 1) + " dBFS" : juce::String ("-- dBFS");
-    if (cal.valid() && rms > -150.0f)
-        text = juce::String (rms + cal::fullScaleDbSpl (cal.fullScalePa), 1) + " dB-SPL";
+    if (spl && rms > -150.0f)
+        text = juce::String (rms + splOffset, 1) + " dB-SPL";
     g.setFont (style::font (12.0f, true));
     g.setColour (style::text);
     g.drawText (text, r.reduced (4.0f, 0.0f), juce::Justification::centredRight);
@@ -52,13 +75,10 @@ MainScreen::MainScreen (AppContext& c)
     layoutW.onClick = [this] { setLayout (Layout::Waveform); };
     layoutS.onClick = [this] { setLayout (Layout::Spectrogram); };
     layoutWS.onClick = [this] { setLayout (Layout::Both); };
-    saveButton.onClick = [this]
-    {
-        juce::String err;
-        if (! ctx.document.save (err)) showMessage ("Save", err);
-        if (filesPane) filesPane->refresh();
-    };
+    saveButton.onClick = [this] { saveDocument(); };
     for (auto* b : { &layoutW, &layoutS, &layoutWS, &saveButton }) addAndMakeVisible (b);
+    menuButton.onClick = [this] { showMainMenu(); };
+    addChildComponent (menuButton);
 
     // tablet top bar (applyPanels shows them in the tablet form only)
     panelsButton.onClick = [this] { togglePanels(); };
@@ -124,7 +144,18 @@ MainScreen::MainScreen (AppContext& c)
     inputPane = std::make_unique<InputPane> (ctx);
     editPane = std::make_unique<EditPane> (ctx);
     soundMapPane = std::make_unique<SoundMapPane> (ctx);
-    soundMapPane->startTake = [this] (const juce::File& f) { return ! ctx.recorder.isRecording() && startRecording (f, false); };
+    soundMapPane->startTake = [this] (const juce::File& f)
+    {
+        if (ctx.recorder.isRecording()) return false;
+        // the map's takes run on their own: keep the edits of an open file
+        // (an unsaved take keeps its recovery copy)
+        if (ctx.document.hasUnsavedChanges() && ctx.document.file() != juce::File())
+        {
+            juce::String err;
+            ctx.document.save (err);
+        }
+        return startRecording (f, false);
+    };
     soundMapPane->stopTake = [this] { return stopRecording(); };
     soundMapPane->useCamera = [this] (bool on, std::function<void (juce::String)> done) { setMapCamera (on, std::move (done)); };
     soundMapPane->openTake = [this] (const juce::File& f)
@@ -199,6 +230,15 @@ MainScreen::MainScreen (AppContext& c)
     updateTransport();
     refreshVideo();
     startTimerHz (30);
+
+    // A take left unsaved when the app was closed comes back (issue #79).
+    juce::Component::SafePointer<MainScreen> safe (this);
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (safe == nullptr || safe->ctx.document.hasAudio() || ! safe->ctx.document.recoverTake()) return;
+        showMessage ("Recording", safe->ctx.document.displayName()
+                                    + " was not saved when the app closed: it is open again. Save it to keep it.");
+    });
 }
 
 MainScreen::~MainScreen()
@@ -242,6 +282,9 @@ void MainScreen::resumed()
 void MainScreen::suspended()
 {
     if (soundMapPane) soundMapPane->suspended();   // releases the Map's camera
+    // an unsaved take edited since it stopped: its recovery copy follows
+    if (ctx.document.isUnsavedTake() && ctx.document.canUndo() && ! ctx.recorder.isRecording())
+        ctx.document.writeRecovery();
     // Recording continues in the background (UIBackgroundModes audio); the
     // generator and playback stop.
     if (! ctx.recorder.isRecording())
@@ -328,17 +371,18 @@ void MainScreen::timerCallback()
 
 void MainScreen::toggleRecord()
 {
-    if (ctx.recorder.isRecording()) stopRecording();
-    else startRecording();
+    if (ctx.recorder.isRecording()) { stopRecording(); return; }
+    // Issue #79: nothing is saved without Save. A take or edits not saved
+    // yet: Save / Discard / Cancel before the new take replaces them.
+    juce::Component::SafePointer<MainScreen> safe (this);
+    filesPane->confirmDiscard ([safe]
+    {
+        if (safe != nullptr && ! safe->ctx.recorder.isRecording()) safe->startRecording();
+    });
 }
 
 bool MainScreen::startRecording (const juce::File& saveTo, bool withVideoIfOn)
 {
-    if (ctx.document.hasUnsavedChanges() && ctx.document.file() != juce::File())
-    {
-        juce::String err;
-        ctx.document.save (err);   // keep the edits of the open file before the new take
-    }
     stopPlayback();
     // a map take is always one unlimited take of the map's length (not the REC mode box's loop)
     const int mode = saveTo != juce::File() ? 1 : modeBox.getSelectedId();
@@ -351,6 +395,9 @@ bool MainScreen::startRecording (const juce::File& saveTo, bool withVideoIfOn)
         showMessage ("Recording", err);
         return false;
     }
+    // the input's compensation (issue #80) goes with its recordings, as its calibration does
+    if (const auto comp = miccomp::forInput (ctx.inputKey()); comp.valid())
+        ctx.document.setMicCompensation (comp);
     const bool withVideo = withVideoIfOn && videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera;
     if (withVideo)
         ctx.video.start (VideoCapture::movieFileFor (ctx.recorder.targetFile()));
@@ -438,7 +485,7 @@ void MainScreen::stopPlayback()
     {
         d->engine.stop();
         const auto sel = ctx.document.selection();
-        ctx.document.setPlayhead (sel.isEmpty() ? 0.0 : sel.getStart());
+        ctx.document.setPlayhead (sel.isEmpty() ? 0.0 : sel.getStart(), false);   // not a placement by hand
     }
     reviewMovie = false;
     refreshVideo();
@@ -593,6 +640,10 @@ void MainScreen::applyPanels()
         }
     }
     for (auto* b : { &panelsButton, &undoButton, &redoButton }) b->setVisible (isTablet);
+    // phone: the menu holds the views, the spectrogram's options and Save (issue #79)
+    for (auto* b : { &layoutW, &layoutS, &layoutWS, &saveButton }) b->setVisible (isTablet);
+    menuButton.setVisible (! isTablet);
+    editPane->showSpectrogramOptions (isTablet);
     panelsButton.setToggleState (tablet.panelsVisible, juce::dontSendNotification);
     panelsSplitter.setVisible (isTablet && tablet.panelsVisible && ! mapFullScreen());
     groupSplitter.setVisible (isTablet && tablet.panelsVisible && ! mapFullScreen());
@@ -626,6 +677,78 @@ void MainScreen::showTab (int t)
     screen::tapTab (tablet, t);
     applyPanels();
     resized();
+}
+
+void MainScreen::showMainMenu()
+{
+    juce::PopupMenu m, range;
+    m.addItem (1, "Waveform", true, layout == Layout::Waveform);
+    m.addItem (2, "Spectrogram", true, layout == Layout::Spectrogram);
+    m.addItem (3, "Waveform and Spectrogram", true, layout == Layout::Both);
+    m.addSeparator();
+    const bool log = editPane->logFrequency();
+    m.addItem (4, "Spectrogram Log", true, log);
+    m.addItem (5, "Spectrogram Linear", true, ! log);
+    m.addSeparator();
+    for (int db : { 60, 90, 120, 150 })
+        range.addItem (100 + db, juce::String (db) + " dB", true, editPane->displayRangeDb() == db);
+    m.addSubMenu ("Spectrogram Range", range);
+    m.addSeparator();
+    const bool canSave = ctx.document.hasAudio() && ! ctx.recorder.isRecording();
+    m.addItem (6, "Save", canSave);
+    m.addItem (7, "Save As...", canSave);
+    juce::Component::SafePointer<MainScreen> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton), [safe] (int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        if (r == 1) safe->setLayout (Layout::Waveform);
+        else if (r == 2) safe->setLayout (Layout::Spectrogram);
+        else if (r == 3) safe->setLayout (Layout::Both);
+        else if (r == 4 || r == 5) safe->editPane->setLogFrequency (r == 4);
+        else if (r == 6) safe->saveDocument();
+        else if (r == 7) safe->saveDocumentAs();
+        else if (r > 100) safe->editPane->setDisplayRangeDb (r - 100);
+    });
+}
+
+void MainScreen::saveDocument()
+{
+    juce::String err;
+    if (! ctx.document.save (err)) showMessage ("Save", err);
+    if (filesPane) filesPane->refresh();
+}
+
+void MainScreen::saveDocumentAs()
+{
+    auto* w = new juce::AlertWindow ("Save As", "Name of the recording (saved in the recordings folder):",
+                                     juce::MessageBoxIconType::NoIcon);
+    w->addTextEditor ("name", ctx.document.displayName());
+    w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<MainScreen> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int r)
+    {
+        if (safe == nullptr || r != 1) return;
+        auto name = juce::File::createLegalFileName (w->getTextEditorContents ("name").trim());
+        if (name.endsWithIgnoreCase (".wav")) name = name.dropLastCharacters (4);
+        if (name.isEmpty()) return;
+        const auto f = MobileDocument::recordingsFolder().getChildFile (name + ".wav");
+        const auto write = [safe, f]
+        {
+            if (safe == nullptr) return;
+            juce::String err;
+            if (! safe->ctx.document.saveAs (f, err)) showMessage ("Save As", err);
+            if (safe->filesPane) safe->filesPane->refresh();
+        };
+        if (f.existsAsFile() && f != safe->ctx.document.file())
+        {
+            auto options = juce::MessageBoxOptions::makeOptionsOkCancel (juce::MessageBoxIconType::QuestionIcon,
+                "Save As", f.getFileName() + " already exists. Replace it?", "Replace", "Cancel");
+            juce::AlertWindow::showAsync (options, [write] (int ok) { if (ok == 1) write(); });
+        }
+        else
+            write();
+    }), true);
 }
 
 void MainScreen::togglePanels()
@@ -798,15 +921,10 @@ void MainScreen::layoutPhone (juce::Rectangle<int> r)
 {
     const bool landscape = r.getWidth() > r.getHeight() * 1.2;
 
-    // top bar
+    // top bar: the file's name, the menu at the right
     auto top = r.removeFromTop (style::kTouch).reduced (style::kGap, 3);
-    saveButton.setBounds (top.removeFromRight (64));
+    menuButton.setBounds (top.removeFromRight (52));
     top.removeFromRight (style::kGap);
-    for (auto* b : { &layoutWS, &layoutS, &layoutW })
-    {
-        b->setBounds (top.removeFromRight (b == &layoutWS ? 52 : 40));
-        top.removeFromRight (2);
-    }
     title.setBounds (top);
 
     // the Map tab: everything below the top bar but the tabs

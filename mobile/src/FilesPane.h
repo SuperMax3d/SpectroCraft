@@ -20,6 +20,9 @@ public:
 
     /** Opens a file, asking first when the open one has unsaved changes. */
     void openFile (const juce::File& f, const char* source = "list");
+    /** When the open document has unsaved changes (an unsaved take, or edits):
+        Save / Discard / Cancel, then `then` unless cancelled. */
+    void confirmDiscard (std::function<void()> then);
 
 private:
     int getNumRows() override;
@@ -34,7 +37,6 @@ private:
     juce::File targetFile() const;
     void saveCurrent();
     void deleteSelected();
-    void confirmDiscard (std::function<void()> then);
 
     AppContext& ctx;
     juce::Label current;

@@ -3,6 +3,7 @@
 #include "LiveAudio.h"
 #include "MobileStyle.h"
 #include "Telemetry.h"
+#include "TouchControls.h"
 
 namespace scm
 {
@@ -11,7 +12,7 @@ InputPane::InputPane (AppContext& c) : ctx (c)
     for (auto* l : { &title, &status, &note, &channelsLabel, &rateLabel, &outputLabel, &outputName })
     {
         l->setFont (style::font (15.0f));
-        addAndMakeVisible (l);
+        content.addAndMakeVisible (l);
     }
     title.setFont (style::font (16.0f, true));
     note.setColour (juce::Label::textColourId, style::textDim);
@@ -29,20 +30,23 @@ InputPane::InputPane (AppContext& c) : ctx (c)
         refresh();
         if (onInputChanged) onInputChanged();
     };
-    addAndMakeVisible (channelsBox);
+    content.addAndMakeVisible (channelsBox);
 
     rateBox.onChange = [this]
     {
+        const double wanted = rateBox.getText().getDoubleValue();
+        ctx.props.setValue ("sampleRate", wanted);   // kept for the next launches
         auto setup = ctx.audio.devices().getAudioDeviceSetup();
-        setup.sampleRate = rateBox.getText().getDoubleValue();
-        ctx.audio.devices().setAudioDeviceSetup (setup, true);
+        setup.sampleRate = wanted;
+        const auto err = ctx.audio.devices().setAudioDeviceSetup (setup, true);
+        if (err.isNotEmpty()) showMessage ("Sample rate", err);
         refresh();
     };
-    addAndMakeVisible (rateBox);
+    content.addAndMakeVisible (rateBox);
 
     outputPicker = route::createOutputPicker();
     if (outputPicker != nullptr)
-        addAndMakeVisible (*outputPicker);
+        content.addAndMakeVisible (*outputPicker);
     else
     {
         outputBox.onChange = [this]
@@ -53,14 +57,19 @@ InputPane::InputPane (AppContext& c) : ctx (c)
             if (err.isNotEmpty()) showMessage ("Output", err);
             refresh();
         };
-        addAndMakeVisible (outputBox);
+        content.addAndMakeVisible (outputBox);
     }
+    // Scrolled (issue #79): Android can list many inputs, which left the
+    // channel and rate boxes no height at all.
+    viewport.setViewedComponent (&content, false);
+    setupScrolling (viewport);
+    addAndMakeVisible (viewport);
     refresh();
 }
 
 void InputPane::refresh()
 {
-    for (auto* b : choices) removeChildComponent (b);
+    for (auto* b : choices) content.removeChildComponent (b);
     choices.clear();
     ids.clear();
 
@@ -102,7 +111,7 @@ void InputPane::refresh()
         b->setClickingTogglesState (false);
         b->setToggleState (ids[i] == currentId, juce::dontSendNotification);
         b->onClick = [this, i] { choose (i); };
-        addAndMakeVisible (b);
+        content.addAndMakeVisible (b);
     }
 
     if (outputPicker != nullptr)
@@ -117,6 +126,18 @@ void InputPane::refresh()
     }
 
     rateBox.clear (juce::dontSendNotification);
+    if (auto* d = ctx.audio.devices().getCurrentAudioDevice(); d != nullptr && ! rateRestored)
+    {
+        // the rate chosen before, once the microphone is open
+        rateRestored = true;
+        const double saved = ctx.props.getDoubleValue ("sampleRate", 0.0);
+        if (saved > 0.0 && saved != d->getCurrentSampleRate() && d->getAvailableSampleRates().contains (saved))
+        {
+            auto setup = ctx.audio.devices().getAudioDeviceSetup();
+            setup.sampleRate = saved;
+            ctx.audio.devices().setAudioDeviceSetup (setup, true);
+        }
+    }
     if (auto* d = ctx.audio.devices().getCurrentAudioDevice())
     {
         int id = 1;
@@ -164,7 +185,10 @@ void InputPane::paint (juce::Graphics& g)
 
 void InputPane::resized()
 {
-    auto r = getLocalBounds().reduced (style::kGap);
+    viewport.setBounds (getLocalBounds());
+    const int w = getWidth() - kScrollBarW - style::kGap;
+    auto r = juce::Rectangle<int> (style::kGap, style::kGap, w, 100000);
+    const int top = r.getY();
     title.setBounds (r.removeFromTop (26));
     for (auto* b : choices)
     {
@@ -174,10 +198,10 @@ void InputPane::resized()
     r.removeFromTop (style::kGap);
     auto row = r.removeFromTop (style::kTouch);
     channelsLabel.setBounds (row.removeFromLeft (110));
-    channelsBox.setBounds (row.removeFromLeft (140).reduced (0, 4));
+    channelsBox.setBounds (row.removeFromLeft (std::min (160, row.getWidth())).reduced (0, 4));
     row = r.removeFromTop (style::kTouch);
     rateLabel.setBounds (row.removeFromLeft (110));
-    rateBox.setBounds (row.removeFromLeft (140).reduced (0, 4));
+    rateBox.setBounds (row.removeFromLeft (std::min (160, row.getWidth())).reduced (0, 4));
     row = r.removeFromTop (style::kTouch);
     outputLabel.setBounds (row.removeFromLeft (110));
     if (outputPicker != nullptr)
@@ -189,6 +213,7 @@ void InputPane::resized()
     else
         outputBox.setBounds (row.removeFromLeft (std::min (260, row.getWidth())).reduced (0, 4));
     status.setBounds (r.removeFromTop (24));
-    note.setBounds (r.removeFromTop (std::min (r.getHeight(), 90)));
+    note.setBounds (r.removeFromTop (90));
+    content.setSize (getWidth() - kScrollBarW, r.getY() - top + style::kGap * 2);
 }
 } // namespace scm

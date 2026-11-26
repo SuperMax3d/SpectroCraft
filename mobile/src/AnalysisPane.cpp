@@ -1,7 +1,10 @@
 #include "AnalysisPane.h"
+#include "AnalysisRange.h"
+#include "StoredPlots.h"
 #include "MobileStyle.h"
 #include "Measures.h"
 #include "Telemetry.h"
+#include <atomic>
 #include <cmath>
 
 namespace scm
@@ -18,6 +21,7 @@ public:
         int channel = 0;
         int fftSize = 8192;
         ScaleCalibration cal;
+        miccomp::Compensation comp;   // the recording's microphone compensation (issue #80)
         int serial = 0;
     };
 
@@ -36,12 +40,19 @@ public:
 
     void submit (const Job& j)
     {
+        bool otherKind = false;
         {
             const juce::ScopedLock sl (lock);
             job = j;
             has = true;
+            otherKind = running.load() && (j.mode != runningJob.mode || j.fftSize != runningJob.fftSize
+                                    || j.channel != runningJob.channel);
         }
-        cancel.store (true);
+        // Issue #79: a new range (recording, a selection being dragged) lets
+        // the running analysis finish, then the latest one runs: cancelling on
+        // every request left nothing finished while requests kept coming. A
+        // different analysis (mode, FFT size, channel) replaces it at once.
+        if (otherKind) cancel.store (true);
         wake.signal();
     }
 
@@ -69,7 +80,10 @@ public:
                 if (! has) continue;
                 j = job;
                 has = false;
+                running.store (true);
+                runningJob = j;
             }
+            struct Done { std::atomic<bool>& flag; ~Done() { flag.store (false); } } doneAfter { running };
             const juce::ScopedLock rl (runLock);
             if (paused) continue;
             cancel.store (false);
@@ -84,6 +98,7 @@ public:
             c.t1 = j.t1;
             c.channel = j.channel;
             c.serial = j.serial;
+            c.compensated = j.comp.valid();
             const bool calibrated = j.cal.isCalibratedFor (j.channel);
             const double offset = calibrated ? j.cal.levelOffsetDb (j.channel) : 0.0;
             c.unit = calibrated ? juce::String (j.cal.levelUnitLabel()) : juce::String ("dBFS");
@@ -98,6 +113,7 @@ public:
                 p.mode = pascal ? sc::measures::ThirdOctaveParams::Mode::Reference
                                 : sc::measures::ThirdOctaveParams::Mode::Iec;
                 p.fftSize = j.fftSize;
+                p.maxFrames = kMobileRefFrames;
                 const auto r = sc::measures::thirdOctave (eng, p, calPtr, progress);
                 if (r.cancelled || r.channels.empty()) continue;
                 const auto& ch = r.channels.front();
@@ -105,7 +121,7 @@ public:
                 {
                     if (b < ch.noData.size() && ch.noData[b]) continue;
                     c.f.push_back (r.centresHz[b]);
-                    c.db.push_back ((double) ch.relDb[b] + ch.cal.levelOffsetDb);
+                    c.db.push_back ((double) ch.relDb[b] + ch.cal.levelOffsetDb + j.comp.at (r.centresHz[b]));
                 }
                 c.fftSize = r.fftSize;
             }
@@ -123,7 +139,7 @@ public:
                 for (size_t k = 1; k < ch.relDb.size(); ++k)
                 {
                     c.f.push_back ((double) k * r.binHz);
-                    c.db.push_back (ch.relDb[k] + ch.cal.levelOffsetDb);
+                    c.db.push_back (ch.relDb[k] + ch.cal.levelOffsetDb + j.comp.at ((double) k * r.binHz));
                 }
                 c.fftSize = r.fftSize;
             }
@@ -155,8 +171,12 @@ private:
     MobileDocument& document;
     juce::WaitableEvent wake;
     juce::CriticalSection lock, runLock;
-    Job job;
+    Job job, runningJob;
     bool has = false, paused = false;
+    std::atomic<bool> running { false };   // a job is being computed
+    /** Reference 1/3 octave (dB-SPL): at most this many 65536-point frames,
+        spread over the range (the desktop averages up to 2048). */
+    static constexpr int kMobileRefFrames = 64;
     std::atomic<bool> cancel { false };
 };
 
@@ -165,6 +185,57 @@ private:
 AnalysisPane::AnalysisPane (MobileDocument& d, TimeViewport& v) : document (d), view (v)
 {
     worker = std::make_unique<Worker> (*this);
+
+    gestures.onTap = [this] (juce::Point<float> at)
+    {
+        if (! plotArea().contains (at)) return;
+        cursorOn = true;
+        cursorFreq = xToFreq (at.x);
+        repaint();
+    };
+    gestures.onDrag = [this] (juce::Point<float>, juce::Point<float> to)
+    {
+        cursorOn = true;
+        cursorFreq = xToFreq (juce::jlimit (plotArea().getX(), plotArea().getRight(), to.x));
+        repaint();
+    };
+    gestures.onDoubleTap = [this] (juce::Point<float>) { resetZoom(); };
+    gestures.onPinchStart = [this]
+    {
+        const bool linear = (AnalysisMode) (modeBox.getSelectedId() - 1) == AnalysisMode::FftLinear;
+        pinchLo = linear ? linLo : fLo;
+        pinchHi = linear ? linHi : fHi;
+        pinchTop = dbTop;
+        pinchRange = dbRange;
+    };
+    gestures.onPinch = [this] (const GestureTracker::Pinch& p)
+    {
+        const auto plot = plotArea();
+        const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
+        if (mode != AnalysisMode::ThirdOctave && p.startDx > 40.0f && p.dx > 1.0f)
+        {
+            const bool linear = mode == AnalysisMode::FftLinear;
+            const auto r = analysis::zoomAxis (pinchLo, pinchHi,
+                                               (p.startMid.x - plot.getX()) / plot.getWidth(),
+                                               (p.mid.x - plot.getX()) / plot.getWidth(),
+                                               (double) p.dx / p.startDx, ! linear,
+                                               linear ? 0.0 : 5.0, nyquistHz(), linear ? 50.0 : 1.5);
+            if (linear) { linLo = r.first; linHi = r.second; }
+            else { fLo = r.first; fHi = r.second; }
+        }
+        if (p.startDy > 40.0f && p.dy > 1.0f)
+        {
+            // the level axis rises upwards: positions measured from the bottom
+            const auto r = analysis::zoomAxis (pinchTop - pinchRange, pinchTop,
+                                               (plot.getBottom() - p.startMid.y) / plot.getHeight(),
+                                               (plot.getBottom() - p.mid.y) / plot.getHeight(),
+                                               (double) p.dy / p.startDy, false, -300.0, 300.0, 6.0);
+            dbTop = r.second;
+            dbRange = r.second - r.first;
+            zoomedY = true;
+        }
+        repaint();
+    };
 
     modeBox.addItem ("FFT Linear", 1);
     modeBox.addItem ("FFT Log", 2);
@@ -214,7 +285,9 @@ void AnalysisPane::resumeAnalysis()
 {
     worker->resume();
     current = {};
-    fHi = std::min (std::max (fHi, 1000.0), document.sampleRate() * 0.5);
+    fHi = std::min (std::max (fHi, 1000.0), nyquistHz());
+    linHi = std::min (std::max (linHi, 1000.0), nyquistHz());
+    linLo = std::min (linLo, linHi - 50.0);
     rebuildChips();
     request();
 }
@@ -251,23 +324,19 @@ void AnalysisPane::request()
     j.mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
     j.fftSize = 1024 << (fftBox.getSelectedId() - 1);
     j.cal = document.calibration();
+    j.comp = document.micCompensation();
     j.channel = 0;
-    const double dur = document.duration();
-    if (live)
-    {
-        j.t1 = dur;
-        j.t0 = std::max (0.0, dur - 1.0);
-    }
-    else if (! document.selection().isEmpty())
-    {
-        j.t0 = document.selection().getStart();
-        j.t1 = document.selection().getEnd();
-    }
-    else
-    {
-        j.t0 = std::max (0.0, view.start());
-        j.t1 = std::min (dur, view.end());
-    }
+    analysis::RangeInput in;
+    in.live = live;
+    in.duration = document.duration();
+    in.selection = document.selection();
+    in.playheadByHand = document.playheadPlacedByHand();
+    in.playhead = document.playhead();
+    in.windowSeconds = (double) j.fftSize / std::max (1.0, document.sampleRate());
+    in.visible = { view.start(), view.end() };
+    const auto range = analysis::rangeFor (in);
+    j.t0 = range.getStart();
+    j.t1 = range.getEnd();
     if (j.t1 - j.t0 < 1e-3) return;
     j.serial = ++serial;
     worker->submit (j);
@@ -277,17 +346,39 @@ void AnalysisPane::curveReady (Curve c)
 {
     if (c.serial < current.serial) return;
     current = std::move (c);
-    // vertical range: 10 dB above the highest point, 100 dB tall
+    if (! zoomedY) autoLevelRange();
+    const juce::String region = live ? juce::String ("last second")
+        : juce::String (current.t0, 3) + " - " + juce::String (current.t1, 3) + " s";
+    summary.setText ("RMS " + juce::String (current.rmsDb, 1) + " " + current.unit
+                     + "   Peak " + juce::String (current.peakDb, 1) + " " + current.unit
+                     + "   (" + region + ")" + (current.compensated ? "   mic compensated" : ""),
+                     juce::dontSendNotification);
+    repaint();
+}
+
+void AnalysisPane::autoLevelRange()
+{
+    // 10 dB above the highest point, 100 dB tall
     double mx = -1e9;
     for (double v : current.db) mx = std::max (mx, v);
     for (const auto& p : document.plots().plots())
         if (p.visible) for (double v : p.db) mx = std::max (mx, v);
     if (mx > -900.0) dbTop = std::ceil ((mx + 5.0) / 10.0) * 10.0;
-    const juce::String region = live ? juce::String ("last second")
-        : juce::String (current.t0, 3) + " - " + juce::String (current.t1, 3) + " s";
-    summary.setText ("RMS " + juce::String (current.rmsDb, 1) + " " + current.unit
-                     + "   Peak " + juce::String (current.peakDb, 1) + " " + current.unit
-                     + "   (" + region + ")", juce::dontSendNotification);
+    dbRange = 100.0;
+}
+
+double AnalysisPane::nyquistHz() const
+{
+    return std::max (1000.0, document.sampleRate() * 0.5);
+}
+
+void AnalysisPane::resetZoom()
+{
+    fLo = 20.0;
+    fHi = linHi = nyquistHz();
+    linLo = 0.0;
+    zoomedY = false;
+    autoLevelRange();
     repaint();
 }
 
@@ -423,7 +514,7 @@ double AnalysisPane::freqToX (double f) const
     const auto p = plotArea();
     const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
     if (mode == AnalysisMode::FftLinear)
-        return p.getX() + (f - 0.0) / std::max (1.0, fHi) * p.getWidth();
+        return p.getX() + (f - linLo) / std::max (1.0, linHi - linLo) * p.getWidth();
     const auto [lo, hi] = logRange();
     return p.getX() + (std::log (std::max (1e-3, f)) - std::log (lo)) / std::log (hi / lo) * p.getWidth();
 }
@@ -433,7 +524,7 @@ double AnalysisPane::xToFreq (double x) const
     const auto p = plotArea();
     const double t = (x - p.getX()) / std::max (1.0f, p.getWidth());
     const auto mode = (AnalysisMode) (modeBox.getSelectedId() - 1);
-    if (mode == AnalysisMode::FftLinear) return t * fHi;
+    if (mode == AnalysisMode::FftLinear) return linLo + t * (linHi - linLo);
     const auto [lo, hi] = logRange();
     return lo * std::pow (hi / lo, t);
 }
@@ -505,9 +596,10 @@ void AnalysisPane::paint (juce::Graphics& g)
     std::vector<double> ticks;
     if (mode == AnalysisMode::FftLinear)
     {
-        const double rough = fHi / 6.0, p10 = std::pow (10.0, std::floor (std::log10 (rough)));
+        const double rough = (linHi - linLo) / 6.0, p10 = std::pow (10.0, std::floor (std::log10 (rough)));
         const double step = rough / p10 < 2 ? 2 * p10 : rough / p10 < 5 ? 5 * p10 : 10 * p10;
-        for (double f = step; f < fHi; f += step) ticks.push_back (f);
+        for (double f = std::ceil (linLo / step) * step; f < linHi; f += step)
+            if (f > 0.0) ticks.push_back (f);
     }
     else
     {
@@ -537,8 +629,9 @@ void AnalysisPane::paint (juce::Graphics& g)
         if (! p.visible) continue;
         const bool bands = p.mode == AnalysisMode::ThirdOctave;
         if (bands != (mode == AnalysisMode::ThirdOctave)) continue;
+        // issue #79: wide and translucent, so overlapping curves stay visible
         drawCurve (g, p.freqs, p.db, bands ? AnalysisMode::ThirdOctave : mode,
-                   style::plotColour (p.colourIndex).withAlpha (0.85f), 1.5f);
+                   style::plotColour (p.colourIndex).withAlpha (0.5f), 3.5f);
     }
     if (! current.f.empty() && (current.mode == AnalysisMode::ThirdOctave) == (mode == AnalysisMode::ThirdOctave))
         drawCurve (g, current.f, current.db, mode, juce::Colours::white, 1.8f);
@@ -573,24 +666,40 @@ void AnalysisPane::paint (juce::Graphics& g)
         }
     }
 
-    // touch cursor: frequency and level of the current curve
-    if (cursorOn && ! current.f.empty())
+    // the readout: frequency and level of the current curve where the finger
+    // last was (it stays until the next tap), and the difference from the one
+    // stored curve shown, if there is exactly one
+    if (cursorOn && ! current.f.empty() && (current.mode == AnalysisMode::ThirdOctave) == (mode == AnalysisMode::ThirdOctave))
     {
-        const double f = xToFreq (cursor.x);
+        const bool bands = mode == AnalysisMode::ThirdOctave;
         size_t best = 0;
         double bestD = 1e300;
         for (size_t i = 0; i < current.f.size(); ++i)
-            if (const double dd = std::abs (std::log (std::max (1e-3, current.f[i])) - std::log (std::max (1e-3, f))); dd < bestD)
-            { bestD = dd; best = i; }
-        const float x = (float) freqToX (current.f[best]), y = (float) dbToY (current.db[best]);
+        {
+            const double dd = mode == AnalysisMode::FftLinear ? std::abs (current.f[i] - cursorFreq)
+                                                              : std::abs (std::log (std::max (1e-3, current.f[i]) / std::max (1e-3, cursorFreq)));
+            if (dd < bestD) { bestD = dd; best = i; }
+        }
+        const double f = current.f[best], v = current.db[best];
+        const float x = (float) freqToX (f), y = (float) dbToY (v);
         g.setColour (style::selectionEdge);
         g.drawVerticalLine (juce::roundToInt (x), plot.getY(), plot.getBottom());
         g.fillEllipse (x - 4.0f, y - 4.0f, 8.0f, 8.0f);
-        const auto text = juce::String (current.f[best], current.f[best] < 100.0 ? 1 : 0) + " Hz   "
-                        + juce::String (current.db[best], 1) + " " + current.unit;
+        juce::String text = juce::String (f, f < 100.0 ? 1 : 0) + " Hz   " + juce::String (v, 1) + " " + current.unit;
+        const StoredPlot* only = nullptr;
+        int shown = 0;
+        for (const auto& p : document.plots().plots())
+            if (p.visible && (p.mode == AnalysisMode::ThirdOctave) == bands) { ++shown; only = &p; }
+        if (shown == 1 && only != nullptr)
+            if (const auto stored = analysis::valueAt (only->freqs, only->db, f, bands))
+            {
+                const double diff = v - *stored;
+                text << "   " << (diff >= 0.0 ? "+" : "") << juce::String (diff, 1) << " dB vs " << only->name;
+            }
         g.setFont (style::font (14.0f, true));
-        auto box = juce::Rectangle<float> (0, 0, 170.0f, 22.0f).withPosition (
-            juce::jlimit (plot.getX(), plot.getRight() - 170.0f, x + 8.0f), plot.getY() + 4.0f);
+        const float w = std::min (plot.getWidth(), juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text) + 16.0f);
+        auto box = juce::Rectangle<float> (0, 0, w, 22.0f).withPosition (
+            juce::jlimit (plot.getX(), plot.getRight() - w, x + 8.0f), plot.getY() + 4.0f);
         g.setColour (style::barBackground.withAlpha (0.9f));
         g.fillRoundedRectangle (box, 4.0f);
         g.setColour (style::text);
@@ -598,27 +707,7 @@ void AnalysisPane::paint (juce::Graphics& g)
     }
 }
 
-void AnalysisPane::mouseDown (const juce::MouseEvent& e)
-{
-    if (plotArea().contains (e.position))
-    {
-        cursorOn = true;
-        cursor = e.position;
-        repaint();
-    }
-}
-
-void AnalysisPane::mouseDrag (const juce::MouseEvent& e)
-{
-    if (! cursorOn) return;
-    cursor = e.position;
-    repaint();
-}
-
-void AnalysisPane::mouseUp (const juce::MouseEvent& e)
-{
-    if (e.getNumberOfClicks() >= 2) { fLo = 20.0; fHi = document.sampleRate() * 0.5; }
-    cursorOn = false;
-    repaint();
-}
+void AnalysisPane::mouseDown (const juce::MouseEvent& e) { gestures.mouseDown (e); }
+void AnalysisPane::mouseDrag (const juce::MouseEvent& e) { gestures.mouseDrag (e); }
+void AnalysisPane::mouseUp (const juce::MouseEvent& e) { gestures.mouseUp (e); }
 } // namespace scm
