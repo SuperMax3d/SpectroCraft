@@ -1,7 +1,8 @@
 // SpectroCraft Mobile - the Map tab: sound maps (docs/sound-map.md).
 //
-//   View     the map (top or side), a band, absolute or relative levels; tap a
-//            point for its values, its take, or to delete it
+//   View     the map (top or side), a band (a slider: hold the finger still
+//            for single steps), absolute or relative levels; tap a point for
+//            its values, its take, or to delete it
 //   Survey   pictures of the tags (two or more in each), then Build map
 //   Measure  countdown, picture, take, picture: a point at a known position
 //            (also Background takes, source off, and Reference takes at a
@@ -16,6 +17,7 @@
 #include <JuceHeader.h>
 #include "AppContext.h"
 #include "SoundMapView.h"
+#include "StepSlider.h"
 #include "soundmap/SmProject.h"
 
 namespace scm
@@ -44,6 +46,10 @@ public:
     /** Development hooks (MobileMain): open a map folder, choose the mode (0 View, 1 Survey, 2 Measure). */
     void openMap (const juce::File& folder);
     void setModeForTest (int m) { setMode ((Mode) juce::jlimit (0, 2, m)); }
+    /** Development hook: a finger left on the band slider's step `i` (View mode). */
+    void touchBandForTest (int i) { bandSlider.touchForTest (i); }
+    /** Development hook: the side view. */
+    void showSideForTest() { if (projButton.getButtonText() == "Top" && projButton.onClick) projButton.onClick(); }
 
 private:
     enum class Mode { View, Survey, Measure };
@@ -63,8 +69,16 @@ private:
     void showMenu();
     void showSettings();
     void shareFile (const juce::File& f);
+    /** Menu > Export map (ZIP): the options with their sizes, then the ZIP (on
+        the worker) and the share sheet. */
+    void exportZip();
+    void writeZip (std::shared_ptr<const smap::SoundMapProject::ExportPlan>, bool withPointPictures, bool withSurveyPictures);
+    bool exporting = false;   // a ZIP is being written: no measuring, no menu meanwhile
+    juce::File zipToShare;    // finished while the tab was not on screen: shared when it is back
+    void shareReadyZip();
     void updateControls();
     void updateBands();
+    void layoutBandRow (juce::Rectangle<int>);
     void showPoint (int number);
     juce::String mapSummary() const;
 
@@ -124,9 +138,9 @@ private:
     juce::Label info;                     // survey / measure / point details
     SoundMapView view;
     juce::TextButton prevBand { "<" }, nextBand { ">" }, relButton { "Abs" }, projButton { "Top" };
-    juce::ComboBox bandBox;
+    StepSlider bandSlider;                // the bands, low to high, then LAeq and LZeq apart
     juce::TextButton openTakeButton { "Open take" }, deletePointButton { "Delete point" };
-    std::vector<double> bands;            // the band box's values (0 LZ, -1 LA, nominal Hz)
+    std::vector<double> bands;            // the slider's steps (nominal Hz, then -1 LA, 0 LZ)
 
     juce::ThreadPool worker { 1 };
     juce::ScopedMessageBox confirmBox, shareBox;

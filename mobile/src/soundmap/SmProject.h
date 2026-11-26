@@ -172,9 +172,51 @@ public:
     /** One row per take: number, kind, x, y, z (m), checks, LZeq, LAeq, then every band. */
     juce::String toCsv() const;
 
+    // ---- the map as one ZIP (Menu > Export map)
+
+    /** A part of the ZIP: its files (path in the ZIP, the file) and their bytes. */
+    struct ExportPart
+    {
+        std::vector<std::pair<juce::String, juce::File>> files;
+        juce::int64 bytes = 0;
+        int count() const noexcept { return (int) files.size(); }
+    };
+
+    /** What the ZIP holds, under one folder named after the map: the takes and
+        the data always (README.txt and export.csv written from memory,
+        project.json, every take's WAV and its .meta.json sidecar), the points'
+        pictures (before and after each take) and the survey pictures as
+        options. Files that are gone are left out; a take saved outside the map's
+        folder goes into points/. */
+    struct ExportPlan
+    {
+        juce::String root;                          // the folder inside the ZIP
+        juce::String readme, csv;
+        ExportPart takes, pointPictures, surveyPictures;
+        int wavCount = 0;
+        juce::int64 bytes (bool withPointPictures, bool withSurveyPictures) const noexcept
+        {
+            return takes.bytes + (withPointPictures ? pointPictures.bytes : 0) + (withSurveyPictures ? surveyPictures.bytes : 0);
+        }
+    };
+    ExportPlan exportPlan() const;
+
+    /** The largest ZIP written: JUCE's ZIP has 32-bit sizes and offsets (no ZIP64). */
+    static constexpr juce::int64 kZipMaxBytes = (juce::int64) 0xF0000000;
+
+    /** Writes the plan's ZIP (WAVs and pictures stored as they are, the text
+        deflated). False with `error`, and no file, when it would pass maxBytes
+        or a file cannot be read or written. Reads only the plan and the files:
+        safe on a background thread. */
+    static bool writeExportZip (const ExportPlan&, bool withPointPictures, bool withSurveyPictures,
+                                const juce::File& zip, juce::String& error, juce::int64 maxBytes = kZipMaxBytes);
+
     juce::var toVar() const;
     static std::optional<SoundMapProject> fromVar (const juce::var& v, const juce::File& folder, juce::String& error);
 };
+
+/** A size for people: "340 KB", "4.2 MB", "92 MB", "1.3 GB" (decimal units, as the Files app). */
+juce::String sizeText (juce::int64 bytes);
 
 /** Hold from juce::Desktop's orientation (the picture is upright for it). */
 Hold holdFromDisplay (juce::Desktop::DisplayOrientation o) noexcept;

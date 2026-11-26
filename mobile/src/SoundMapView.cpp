@@ -1,5 +1,7 @@
 #include "SoundMapView.h"
 #include "MobileStyle.h"
+#include <algorithm>
+#include <limits>
 
 namespace scm
 {
@@ -95,9 +97,11 @@ void SoundMapView::rebuild()
     std::vector<std::array<double, 2>> xy;
     std::vector<double> values;
     sideMaxR = far + 0.3;
-    sideMinZ = -1.0;
-    sideMaxZ = 0.5;
-    for (const auto& [id, t] : project->map.tags) { sideMinZ = std::min (sideMinZ, t.t.z - 0.3); sideMaxZ = std::max (sideMaxZ, t.t.z + 0.3); }
+    // the side view's heights: the tags and the points, down to the floor when it
+    // is known (z = 0 there once the tag centres' height is set), else to just
+    // under the lowest of them; nothing further below
+    double lowest = std::numeric_limits<double>::max(), highest = std::numeric_limits<double>::lowest();
+    for (const auto& [id, t] : project->map.tags) { lowest = std::min (lowest, t.t.z); highest = std::max (highest, t.t.z); }
 
     for (const auto& p : project->points)
     {
@@ -117,8 +121,8 @@ void SoundMapView::rebuild()
         {
             far = std::max (far, std::hypot (p.position.x, p.position.y));
             sideMaxR = std::max (sideMaxR, std::hypot (p.position.x, p.position.y) + 0.3);
-            sideMinZ = std::min (sideMinZ, p.position.z - 0.3);
-            sideMaxZ = std::max (sideMaxZ, p.position.z + 0.3);
+            lowest = std::min (lowest, p.position.z);
+            highest = std::max (highest, p.position.z);
         }
         if (s.trusted)
         {
@@ -128,6 +132,10 @@ void SoundMapView::rebuild()
         shown.push_back (s);
     }
     extent = far + 0.4;
+    const bool floorKnown = project->settings.tagCentreHeightCm > 0.0;
+    if (lowest > highest) { lowest = floorKnown ? 0.0 : -1.0; highest = floorKnown ? 2.0 : 0.0; }   // nothing yet
+    sideMinZ = floorKnown ? std::min (0.0, lowest - 0.1) : lowest - 0.3;   // a point under the floor still shows
+    sideMaxZ = std::max (highest + 0.3, sideMinZ + 1.0);
 
     // the reference of relative levels: the energy mean (of the surface when there is one)
     if (! values.empty())

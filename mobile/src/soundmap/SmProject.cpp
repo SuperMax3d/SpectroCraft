@@ -545,6 +545,117 @@ juce::String SoundMapProject::toCsv() const
     return s;
 }
 
+juce::String sizeText (juce::int64 bytes)
+{
+    const double b = (double) std::max ((juce::int64) 0, bytes);
+    if (b < 1.0e6) return juce::String (std::max (1, juce::roundToInt (b / 1.0e3))) + " KB";
+    if (b < 1.0e7) return juce::String (b / 1.0e6, 1) + " MB";
+    if (b < 1.0e9) return juce::String (juce::roundToInt (b / 1.0e6)) + " MB";
+    return juce::String (b / 1.0e9, 1) + " GB";
+}
+
+SoundMapProject::ExportPlan SoundMapProject::exportPlan() const
+{
+    ExportPlan plan;
+    plan.root = juce::File::createLegalFileName (name.isNotEmpty() ? name : folder.getFileName());
+    plan.csv = toCsv();
+    plan.readme
+        << "SpectroCraft sound map \"" << name << "\", exported " << juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H:%M") << "\n"
+        << "\n"
+        << "export.csv     one row per take: point, kind (point, background, reference), x_m, y_m, z_m,\n"
+        << "               the checks, LZeq, LAeq and every 1/3-octave band (dB, unit in the \"unit\"\n"
+        << "               column), and the take's WAV (the \"wav\" column)\n"
+        << "project.json   everything the app knows: settings, lens, tags, the pictures' detected tags, points\n"
+        << "points/        the takes (P001.wav ...); P001a.jpg and P001b.jpg, the pictures before and\n"
+        << "               after the take, when they were exported\n"
+        << "survey/        the survey pictures, when they were exported\n"
+        << "\n"
+        << "Positions are in metres in the map's frame: the origin at the centre of the circle through\n"
+        << "the tag centres, z up (z = 0 the set height of the tag centres below them), x toward tag 0,\n"
+        << "y counter-clockwise seen from above. Every WAV also carries its position: the metadata key\n"
+        << "\"soundMapPoint\" and the first line of its INFO comment.\n";
+
+    std::set<juce::String> taken { "README.txt", "export.csv" };   // paths in the ZIP
+    const auto add = [&] (ExportPart& part, const juce::File& f)
+    {
+        if (! f.existsAsFile()) return false;
+        const auto path = f.isAChildOf (folder) ? relative (f) : "points/" + f.getFileName();
+        if (! taken.insert (path).second) return false;
+        part.files.emplace_back (path, f);
+        part.bytes += f.getSize();
+        return true;
+    };
+    const auto fileOf = [this] (const juce::String& stored)
+    {
+        return stored.isEmpty() ? juce::File() : juce::File::isAbsolutePath (stored) ? juce::File (stored) : file (stored);
+    };
+
+    plan.takes.bytes = (juce::int64) (plan.readme.getNumBytesAsUTF8() + plan.csv.getNumBytesAsUTF8());
+    add (plan.takes, file ("project.json"));
+    for (const auto& p : points)
+    {
+        const auto wav = fileOf (p.wav);
+        if (wav != juce::File() && add (plan.takes, wav))
+        {
+            ++plan.wavCount;
+            add (plan.takes, sc::fileMetaSidecarPath (wav));
+        }
+        add (plan.pointPictures, fileOf (p.pictureBefore));
+        add (plan.pointPictures, fileOf (p.pictureAfter));
+    }
+    for (const auto& s : survey)
+        add (plan.surveyPictures, fileOf (s.image));
+    return plan;
+}
+
+bool SoundMapProject::writeExportZip (const ExportPlan& plan, bool withPointPictures, bool withSurveyPictures,
+                                      const juce::File& zip, juce::String& error, juce::int64 maxBytes)
+{
+    const auto total = plan.bytes (withPointPictures, withSurveyPictures);
+    if (total > maxBytes)
+    {
+        error = "Too large for one ZIP (" + sizeText (total) + ", at most " + sizeText (maxBytes) + "): leave out pictures.";
+        return false;
+    }
+    juce::ZipFile::Builder builder;
+    const auto inRoot = [&plan] (const juce::String& path) { return plan.root + "/" + path; };
+    const auto now = juce::Time::getCurrentTime();
+    for (const auto* text : { &plan.readme, &plan.csv })
+        builder.addEntry (std::make_unique<juce::MemoryInputStream> (text->toRawUTF8(), text->getNumBytesAsUTF8(), true), 9,
+                          inRoot (text == &plan.readme ? "README.txt" : "export.csv"), now);
+    const auto addPart = [&] (const ExportPart& part)
+    {
+        for (const auto& [path, f] : part.files)
+            builder.addFile (f, path.endsWithIgnoreCase (".json") ? 9 : 0, inRoot (path));   // WAV, JPEG: stored
+    };
+    addPart (plan.takes);
+    if (withPointPictures) addPart (plan.pointPictures);
+    if (withSurveyPictures) addPart (plan.surveyPictures);
+
+    zip.deleteFile();
+    zip.getParentDirectory().createDirectory();
+    juce::String err;
+    {
+        juce::FileOutputStream out (zip);
+        if (! out.openedOk())
+            err = "Cannot write " + zip.getFileName() + ": " + out.getStatus().getErrorMessage();
+        else if (! builder.writeToStream (out, nullptr))
+            err = "A file of the map could not be read.";
+        else
+        {
+            out.flush();
+            if (out.getStatus().failed()) err = "Cannot write " + zip.getFileName() + ": " + out.getStatus().getErrorMessage();
+        }
+    }
+    if (err.isNotEmpty())
+    {
+        zip.deleteFile();
+        error = err;
+        return false;
+    }
+    return true;
+}
+
 juce::var SoundMapProject::toVar() const
 {
     auto* root = new juce::DynamicObject();

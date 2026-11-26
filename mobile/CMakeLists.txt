@@ -194,6 +194,7 @@ set (SC_MOBILE_SOURCES
     src/VideoPane.cpp
     src/Telemetry.cpp
     src/ScreenLayout.cpp
+    src/StepSlider.cpp
     src/SoundMapView.cpp
     src/SoundMapPane.cpp
     src/MainScreen.cpp

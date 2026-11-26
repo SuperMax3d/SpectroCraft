@@ -3,11 +3,13 @@
 #include "MobileStyle.h"
 #include "MobileDocument.h"
 #include "Recorder.h"
+#include "ShareSheet.h"
 #include "Telemetry.h"
 #include "VideoCapture.h"
 #include "soundmap/SmMarkersPdf.h"
 #include "soundmap/SmTagDetector.h"
 #include <set>
+#include <utility>
 
 namespace scm
 {
@@ -46,6 +48,14 @@ juce::String bandText (double band)
     if (band < 0.0) return "LAeq";
     return bandLabel (band) + " Hz";
 }
+
+/** The octave bands' nominal centres (31.5 Hz ... 16 kHz): the slider labels these. */
+bool isOctaveBand (double nominalHz)
+{
+    for (double o : { 31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0 })
+        if (std::abs (nominalHz - o) < 1e-6) return true;
+    return false;
+}
 } // namespace
 
 SoundMapPane::SoundMapPane (AppContext& c) : ctx (c)
@@ -83,14 +93,15 @@ SoundMapPane::SoundMapPane (AppContext& c) : ctx (c)
     kindBox.setSelectedId (1, juce::dontSendNotification);
 
     view.onPointTapped = [this] (int n) { showPoint (n); };
-    bandBox.onChange = [this]
+    bandSlider.setTitle ("Band");
+    bandSlider.onValueChange = [this]
     {
-        const int i = bandBox.getSelectedId() - 1;
+        const int i = bandSlider.getStep();
         if (juce::isPositiveAndBelow (i, (int) bands.size())) view.setBand (bands[(size_t) i]);
         showPoint (view.selected());
     };
-    prevBand.onClick = [this] { if (bandBox.getSelectedId() > 1) bandBox.setSelectedId (bandBox.getSelectedId() - 1); };
-    nextBand.onClick = [this] { if (bandBox.getSelectedId() < bandBox.getNumItems()) bandBox.setSelectedId (bandBox.getSelectedId() + 1); };
+    prevBand.onClick = [this] { bandSlider.setStep (bandSlider.getStep() - 1, juce::sendNotificationSync); };
+    nextBand.onClick = [this] { bandSlider.setStep (bandSlider.getStep() + 1, juce::sendNotificationSync); };
     relButton.onClick = [this]
     {
         const bool rel = relButton.getButtonText() == "Abs";
@@ -137,7 +148,7 @@ SoundMapPane::SoundMapPane (AppContext& c) : ctx (c)
 
     for (auto* comp : std::initializer_list<juce::Component*> { &mapBox, &viewButton, &surveyButton, &measureButton, &menuButton,
                                                                 &status, &photoButton, &buildButton, &goButton, &cancelButton,
-                                                                &kindBox, &info, &view, &prevBand, &nextBand, &bandBox,
+                                                                &kindBox, &info, &view, &prevBand, &nextBand, &bandSlider,
                                                                 &relButton, &projButton, &openTakeButton, &deletePointButton })
         addChildComponent (comp);
     for (auto* comp : std::initializer_list<juce::Component*> { &mapBox, &viewButton, &surveyButton, &measureButton, &menuButton, &view })
@@ -241,23 +252,31 @@ juce::String SoundMapPane::mapSummary() const
 
 void SoundMapPane::updateBands()
 {
-    bands = { 0.0, -1.0 };
+    // the slider's steps: the 1/3 octaves low to high, then LAeq and LZeq a little
+    // apart (as a sound level meter's spectrum), every octave labelled
     std::set<double> have;
     if (project)
         for (const auto& p : project->points)
             for (double c : p.levels.centresHz)
                 if (const double n = nominalFor (c); n > 0.0) have.insert (n);
-    bands.insert (bands.end(), have.begin(), have.end());
-    const double current = view.band();
-    bandBox.clear (juce::dontSendNotification);
-    int sel = 1;
-    for (size_t i = 0; i < bands.size(); ++i)
+    bands.assign (have.begin(), have.end());
+    const int groupFrom = (int) bands.size();
+    bands.push_back (-1.0);
+    bands.push_back (0.0);
+
+    juce::StringArray names, ticks;
+    for (double b : bands)
     {
-        bandBox.addItem (bandText (bands[i]), (int) i + 1);
-        if (std::abs (bands[i] - current) < 1e-9) sel = (int) i + 1;
+        names.add (bandText (b));
+        ticks.add (b == 0.0 ? "Z" : b < 0.0 ? "A" : isOctaveBand (b) ? bandLabel (b) : juce::String());
     }
-    bandBox.setSelectedId (sel, juce::dontSendNotification);
-    view.setBand (bands[(size_t) sel - 1]);
+    const double current = view.band();
+    int sel = (int) bands.size() - 1;   // LZeq
+    for (size_t i = 0; i < bands.size(); ++i)
+        if (std::abs (bands[i] - current) < 1e-9) sel = (int) i;
+    bandSlider.setSteps (names, ticks, groupFrom > 0 ? groupFrom : -1);
+    bandSlider.setStep (sel, juce::dontSendNotification);
+    view.setBand (bands[(size_t) sel]);
 }
 
 void SoundMapPane::showPoint (int n)
@@ -373,13 +392,13 @@ void SoundMapPane::releaseCamera()
 void SoundMapPane::visibilityChanged()
 {
     if (! isShowing()) leaving();
-    else updateCamera();
+    else { updateCamera(); shareReadyZip(); }
 }
 
 void SoundMapPane::parentHierarchyChanged()
 {
     if (! isShowing()) leaving();
-    else updateCamera();
+    else { updateCamera(); shareReadyZip(); }
 }
 
 void SoundMapPane::leaving()
@@ -436,21 +455,21 @@ void SoundMapPane::updateControls()
     kindBox.setVisible (mode == Mode::Measure);
     goButton.setVisible (mode == Mode::Measure);
     cancelButton.setVisible (mode == Mode::Measure);
-    for (auto* c : std::initializer_list<juce::Component*> { &prevBand, &nextBand, &bandBox, &relButton, &projButton })
+    for (auto* c : std::initializer_list<juce::Component*> { &prevBand, &nextBand, &bandSlider, &relButton, &projButton })
         c->setVisible (mode == Mode::View);
     info.setVisible (true);
 
-    photoButton.setEnabled (project.has_value() && settled && idle);
-    buildButton.setEnabled (project.has_value() && ! project->survey.empty() && idle);
-    goButton.setEnabled (project.has_value() && settled && idle && project->map.built);
+    photoButton.setEnabled (project.has_value() && settled && idle && ! exporting);
+    buildButton.setEnabled (project.has_value() && ! project->survey.empty() && idle && ! exporting);
+    goButton.setEnabled (project.has_value() && settled && idle && project->map.built && ! exporting);
     cancelButton.setEnabled (step == Step::Countdown || step == Step::Recording);
     kindBox.setEnabled (idle);
-    mapBox.setEnabled (idle);
-    menuButton.setEnabled (idle);
-    deletePointButton.setEnabled (idle && restampPending == 0);
+    mapBox.setEnabled (idle && ! exporting);
+    menuButton.setEnabled (idle && ! exporting);
+    deletePointButton.setEnabled (idle && restampPending == 0 && ! exporting);
     viewButton.setEnabled (idle);
-    surveyButton.setEnabled (idle && project.has_value());
-    measureButton.setEnabled (idle && project.has_value());
+    surveyButton.setEnabled (idle && project.has_value() && ! exporting);
+    measureButton.setEnabled (idle && project.has_value() && ! exporting);
 }
 
 // ---------------------------------------------------------------- layout
@@ -466,6 +485,15 @@ void SoundMapPane::paint (juce::Graphics& g)
         g.setColour (style::plotBackground);
         g.fillRect (r.reduced (style::kGap));
     }
+}
+
+void SoundMapPane::layoutBandRow (juce::Rectangle<int> row)
+{
+    // < and > (one band) at the ends, level with the slider's track
+    const int u = juce::jmin (52, row.getWidth() / 7);
+    prevBand.setBounds (row.removeFromLeft (u).withSizeKeepingCentre (u - 4, style::kTouch - 4));
+    nextBand.setBounds (row.removeFromRight (u).withSizeKeepingCentre (u - 4, style::kTouch - 4));
+    bandSlider.setBounds (row);
 }
 
 void SoundMapPane::resized()
@@ -490,11 +518,7 @@ void SoundMapPane::resized()
             auto col = r.removeFromRight (juce::jmax (300, r.getWidth() * 2 / 5));
             r.removeFromRight (style::kGap);
             view.setBounds (r);
-            auto controls = col.removeFromBottom (style::kTouch);
-            const int u = controls.getWidth() / 6;
-            prevBand.setBounds (controls.removeFromLeft (u).reduced (2, 2));
-            nextBand.setBounds (controls.removeFromRight (u).reduced (2, 2));
-            bandBox.setBounds (controls.reduced (2, 4));
+            layoutBandRow (col.removeFromBottom (StepSlider::kHeight));
             col.removeFromBottom (4);
             auto toggles = col.removeFromBottom (style::kTouch - 6);
             relButton.setBounds (toggles.removeFromLeft (toggles.getWidth() / 2).reduced (2, 0));
@@ -510,21 +534,21 @@ void SoundMapPane::resized()
             info.setBounds (col);
             return;
         }
-        auto controls = r.removeFromBottom (style::kTouch);
-        const int u = controls.getWidth() / 8;
-        prevBand.setBounds (controls.removeFromLeft (u).reduced (2, 2));
-        nextBand.setBounds (controls.removeFromRight (u).reduced (2, 2));
-        projButton.setBounds (controls.removeFromRight (u + u / 2).reduced (2, 2));
-        relButton.setBounds (controls.removeFromRight (u + u / 2).reduced (2, 2));
-        bandBox.setBounds (controls.reduced (2, 4));
-        r.removeFromBottom (style::kGap);
+        // portrait: the band slider across the width (the most room for its
+        // steps), the toggles and the point's buttons in one row above it
+        layoutBandRow (r.removeFromBottom (StepSlider::kHeight));
+        r.removeFromBottom (4);
+        auto row = r.removeFromBottom (style::kTouch - 6);
+        const int t = juce::jmin (72, row.getWidth() / 5);
+        relButton.setBounds (row.removeFromLeft (t).reduced (2, 0));
+        projButton.setBounds (row.removeFromLeft (t).reduced (2, 0));
         if (openTakeButton.isVisible())
         {
-            auto row = r.removeFromBottom (style::kTouch - 6);
+            row.removeFromLeft (style::kGap);
             openTakeButton.setBounds (row.removeFromLeft (row.getWidth() / 2).reduced (2, 0));
             deletePointButton.setBounds (row.reduced (2, 0));
-            r.removeFromBottom (4);
         }
+        r.removeFromBottom (style::kGap);
         info.setBounds (r.removeFromBottom (54));
         r.removeFromBottom (4);
         view.setBounds (r);
@@ -1004,10 +1028,92 @@ void SoundMapPane::restampAll()
 void SoundMapPane::shareFile (const juce::File& f)
 {
     if (! f.existsAsFile()) return;
-    shareBox = juce::ContentSharer::shareFilesScoped ({ juce::URL (f) }, [] (bool ok, const juce::String& err)
+    sharesheet::shareFiles (shareBox, { juce::URL (f) }, menuButton, [] (bool ok, const juce::String& err)
     {
         if (! ok && err.isNotEmpty()) showMessage ("Share", err);
-    }, &menuButton);
+    });
+}
+
+void SoundMapPane::exportZip()
+{
+    if (! project || exporting) return;
+    auto plan = std::make_shared<const SoundMapProject::ExportPlan> (project->exportPlan());
+    const int pointPics = plan->pointPictures.count(), surveyPics = plan->surveyPictures.count();
+    juce::PopupMenu m;
+    m.addSectionHeader ("ZIP of " + project->name);
+    m.addItem (1, "Takes and data (" + juce::String (plan->wavCount) + " takes): " + sizeText (plan->bytes (false, false)));
+    if (pointPics > 0)
+        m.addItem (2, "+ the points' pictures (" + juce::String (pointPics) + "): " + sizeText (plan->bytes (true, false)));
+    if (surveyPics > 0)
+        m.addItem (3, "+ the survey pictures (" + juce::String (surveyPics) + "): " + sizeText (plan->bytes (false, true)));
+    if (pointPics > 0 && surveyPics > 0)
+        m.addItem (4, "+ all the pictures (" + juce::String (pointPics + surveyPics) + "): " + sizeText (plan->bytes (true, true)));
+    juce::WeakReference<SoundMapPane> weak (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton), [weak, plan] (int r)
+    {
+        if (auto* self = weak.get(); self != nullptr && r > 0)
+            self->writeZip (plan, r == 2 || r == 4, r == 3 || r == 4);
+    });
+}
+
+void SoundMapPane::writeZip (std::shared_ptr<const SoundMapProject::ExportPlan> plan, bool withPointPictures, bool withSurveyPictures)
+{
+    if (! project || exporting || step != Step::Idle) return;
+    const auto bytes = plan->bytes (withPointPictures, withSurveyPictures);
+    if (bytes > SoundMapProject::kZipMaxBytes)
+    {
+        showMessage ("Export map", "Too large for one ZIP (" + sizeText (bytes) + "): leave out some pictures.");
+        return;
+    }
+    // one export at a time, in the app's temporary folder (the system empties it):
+    // the last one goes, so ZIPs do not pile up on the phone
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SoundMapExports");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto free = dir.getBytesFreeOnVolume();
+    if (free > 0 && free < bytes + 50 * 1000 * 1000)
+    {
+        showMessage ("Export map", "Not enough free space for the ZIP: it needs " + sizeText (bytes) + ", "
+                                       + sizeText (free) + " is free.");
+        return;
+    }
+    const auto zip = dir.getChildFile (plan->root + ".zip");
+    exporting = true;
+    info.setText ("Preparing " + zip.getFileName() + " (" + sizeText (bytes) + ")...", juce::dontSendNotification);
+    updateControls();
+    telemetry::capture ("soundmap_exported", { { "point_pictures", withPointPictures }, { "survey_pictures", withSurveyPictures } });
+
+    juce::WeakReference<SoundMapPane> weak (this);
+    worker.addJob ([weak, plan, withPointPictures, withSurveyPictures, zip]
+    {
+        juce::String err;
+        const bool ok = SoundMapProject::writeExportZip (*plan, withPointPictures, withSurveyPictures, zip, err);
+        juce::MessageManager::callAsync ([weak, ok, err, zip]
+        {
+            auto* self = weak.get();
+            if (self == nullptr) return;
+            self->exporting = false;
+            self->updateControls();
+            if (! ok)
+            {
+                telemetry::reportError ("sound map: the ZIP could not be written");
+                self->info.setText (self->mapSummary(), juce::dontSendNotification);
+                showMessage ("Export map", err);
+                return;
+            }
+            self->info.setText (zip.getFileName() + " is ready (" + sizeText (zip.getSize()) + ").", juce::dontSendNotification);
+            self->zipToShare = zip;
+            self->shareReadyZip();
+        });
+    });
+}
+
+void SoundMapPane::shareReadyZip()
+{
+    // the share sheet points at the menu button (iPad): only with the tab on screen
+    if (zipToShare == juce::File() || ! isShowing()) return;
+    const auto zip = std::exchange (zipToShare, juce::File());
+    shareFile (zip);
 }
 
 void SoundMapPane::showMenu()
@@ -1019,6 +1125,7 @@ void SoundMapPane::showMenu()
     m.addItem (3, "Tag sheets (PDF)...");
     m.addItem (4, "Source signal (periodic pink noise WAV)...");
     m.addItem (5, "Export CSV...", project.has_value() && ! project->points.empty());
+    m.addItem (8, "Export map (ZIP)...", project.has_value() && ! project->points.empty() && restampPending == 0);
     m.addItem (6, "Locate the points again", project.has_value() && project->map.built);
     m.addSeparator();
     m.addItem (7, "Delete this map...", project.has_value() && restampPending == 0);
@@ -1070,6 +1177,7 @@ void SoundMapPane::showMenu()
                 if (f.replaceWithText (pr->toCsv())) self->shareFile (f);
                 break;
             }
+            case 8: self->exportZip(); break;
             case 6:
                 pr->relocatePoints();
                 self->saveProject();

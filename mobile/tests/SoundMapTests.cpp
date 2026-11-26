@@ -1006,6 +1006,113 @@ public:
             }
         }
 
+        beginTest ("export: one ZIP of the map, the pictures as options, with the size of each");
+        {
+            SoundMapProject p;
+            p.folder = dir.getChildFile ("zip-map");
+            p.name = "zip-map";
+            const auto write = [this, &p] (const juce::String& rel, int bytes, char c)
+            {
+                auto f = p.file (rel);
+                f.getParentDirectory().createDirectory();
+                juce::MemoryBlock mb ((size_t) bytes);
+                mb.fillWith ((juce::uint8) c);
+                expect (f.replaceWithData (mb.getData(), mb.getSize()), rel);
+                return f;
+            };
+            write ("points/P001.wav", 1000, 'a');
+            write ("points/P001a.jpg", 300, 'b');
+            write ("points/P001b.jpg", 200, 'c');
+            write ("points/P002.wav", 500, 'd');
+            write ("points/P002.wav.meta.json", 50, 'e');   // the desktop's sidecar
+            write ("survey/S001.jpg", 700, 'f');
+            write ("export.csv", 10, 'g');                   // an old Export CSV: the ZIP gets a fresh one
+            const auto elsewhere = dir.getChildFile ("fallback").getChildFile ("take-0004.wav");   // the map folder was not writable
+            elsewhere.getParentDirectory().createDirectory();
+            expect (elsewhere.replaceWithText ("RIFF-ish"));
+
+            MapPoint a; a.number = 1; a.pending = false; a.wav = "points/P001.wav";
+            a.pictureBefore = "points/P001a.jpg"; a.pictureAfter = "points/P001b.jpg";
+            MapPoint b; b.number = 2; b.pending = false; b.wav = "points/P002.wav"; b.kind = PointKind::Background;
+            MapPoint c; c.number = 3; c.wav = "points/P003.wav"; c.pictureBefore = "points/P003a.jpg";   // lost take: no files
+            MapPoint d; d.number = 4; d.pending = false; d.wav = elsewhere.getFullPathName();
+            p.points = { a, b, c, d };
+            SurveyPicture s1; s1.image = "survey/S001.jpg";
+            SurveyPicture s2; s2.image = "survey/S002.jpg";   // gone
+            p.survey = { s1, s2 };
+            juce::String err;
+            expect (p.save (err), err);
+
+            const auto plan = p.exportPlan();
+            expectEquals (plan.root, juce::String ("zip-map"));
+            expectEquals (plan.wavCount, 3);
+            expectEquals (plan.takes.count(), 5, "project.json, three WAVs, one sidecar");
+            expectEquals (plan.pointPictures.count(), 2);
+            expectEquals (plan.pointPictures.bytes, (juce::int64) 500);
+            expectEquals (plan.surveyPictures.count(), 1, "the missing picture is left out");
+            expectEquals (plan.surveyPictures.bytes, (juce::int64) 700);
+            const auto json = p.file ("project.json").getSize();
+            const auto text = (juce::int64) (plan.readme.getNumBytesAsUTF8() + plan.csv.getNumBytesAsUTF8());
+            expectEquals (plan.takes.bytes, json + 1000 + 500 + 50 + elsewhere.getSize() + text);
+            expectEquals (plan.bytes (false, false), plan.takes.bytes);
+            expectEquals (plan.bytes (true, true), plan.takes.bytes + 1200);
+            expect (plan.readme.contains ("x toward tag 0"), plan.readme);
+
+            const auto entries = [] (const juce::File& zip)
+            {
+                juce::StringArray names;
+                juce::ZipFile z (zip);
+                for (int i = 0; i < z.getNumEntries(); ++i) names.add (z.getEntry (i)->filename);
+                names.sort (false);
+                return names;
+            };
+            const auto zipFile = dir.getChildFile ("out").getChildFile ("zip-map.zip");
+            expect (SoundMapProject::writeExportZip (plan, false, false, zipFile, err), err);
+            expectEquals (entries (zipFile).joinIntoString (" "),
+                          juce::String ("zip-map/README.txt zip-map/export.csv zip-map/points/P001.wav zip-map/points/P002.wav "
+                                        "zip-map/points/P002.wav.meta.json zip-map/points/take-0004.wav zip-map/project.json"));
+            {
+                juce::ZipFile z (zipFile);
+                const auto read = [&z] (const juce::String& name)
+                {
+                    std::unique_ptr<juce::InputStream> in (z.createStreamForEntry (z.getIndexOfFileName (name)));
+                    juce::MemoryBlock mb;
+                    if (in != nullptr) in->readIntoMemoryBlock (mb);
+                    return mb;
+                };
+                const auto wav = read ("zip-map/points/P001.wav");
+                expect (wav.getSize() == 1000 && wav[0] == 'a' && wav[999] == 'a', "the take as it is");
+                expectEquals (read ("zip-map/export.csv").toString(), p.toCsv(), "a fresh CSV, not the old file");
+                expectEquals (read ("zip-map/project.json").getSize(), (size_t) json);
+            }
+
+            expect (SoundMapProject::writeExportZip (plan, true, true, zipFile, err), err);
+            const auto all = entries (zipFile);
+            expectEquals (all.size(), 10);
+            expect (all.contains ("zip-map/points/P001a.jpg") && all.contains ("zip-map/points/P001b.jpg")
+                    && all.contains ("zip-map/survey/S001.jpg"), all.joinIntoString (" "));
+            // WAVs and pictures stored as they are (the text is deflated): the ZIP is about the size shown
+            const juce::int64 stored = 1000 + 500 + elsewhere.getSize() + 1200;
+            expect (zipFile.getSize() > stored && zipFile.getSize() < plan.bytes (true, true) + 150 * all.size(),
+                    juce::String (zipFile.getSize()) + " bytes, " + juce::String (plan.bytes (true, true)) + " shown");
+
+            expect (SoundMapProject::writeExportZip (plan, true, false, zipFile, err), err);
+            const auto some = entries (zipFile);
+            expect (some.contains ("zip-map/points/P001a.jpg") && ! some.contains ("zip-map/survey/S001.jpg"), "only the points' pictures");
+
+            const auto tooBig = dir.getChildFile ("out").getChildFile ("too-big.zip");
+            err = {};
+            expect (! SoundMapProject::writeExportZip (plan, true, true, tooBig, err, plan.bytes (true, true) - 1));
+            expect (err.contains ("leave out pictures"), err);
+            expect (! tooBig.exists(), "no half ZIP");
+
+            expectEquals (sizeText (340'000), juce::String ("340 KB"));
+            expectEquals (sizeText (4'240'000), juce::String ("4.2 MB"));
+            expectEquals (sizeText (91'600'000), juce::String ("92 MB"));
+            expectEquals (sizeText (1'340'000'000), juce::String ("1.3 GB"));
+            expectEquals (sizeText (12), juce::String ("1 KB"));
+        }
+
         beginTest ("marker sheets: a valid PDF, one page per tag, at the exact size");
         {
             juce::MemoryBlock mb;

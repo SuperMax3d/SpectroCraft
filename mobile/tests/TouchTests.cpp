@@ -1,11 +1,13 @@
 // SpectroCraft Mobile - unit tests for the touch controls' logic: the
 // spectrogram's precision touch (mobile/src/PreciseTouch.h: the reticle,
-// carrying on after a lift, the magnifier's place on the screen) and the number
-// pad's entry (mobile/src/NumberEntry.h).
+// carrying on after a lift, the magnifier's place on the screen), the band
+// slider's finger (mobile/src/StepDrag.h) and the number pad's entry
+// (mobile/src/NumberEntry.h).
 #include <JuceHeader.h>
 #include "AnalysisRange.h"
 #include "NumberEntry.h"
 #include "PreciseTouch.h"
+#include "StepDrag.h"
 
 namespace
 {
@@ -315,7 +317,118 @@ public:
     }
 };
 
+//==============================================================================
+/** The sound map's band slider (mobile/src/StepDrag.h): the step under the
+    finger, and the fine drag a held finger starts. */
+class StepDragTests : public juce::UnitTest
+{
+public:
+    StepDragTests() : juce::UnitTest ("step slider", "SpectroCraftMobile") {}
+
+    void runTest() override
+    {
+        using scm::steps::Drag;
+        // 31 steps 7 points apart (a phone's band slider), then two steps 22 apart (LAeq, LZeq)
+        const auto track = []
+        {
+            std::vector<float> xs;
+            for (int i = 0; i < 31; ++i) xs.push_back (14.0f + 7.0f * (float) i);
+            xs.push_back (xs.back() + 22.0f);
+            xs.push_back (xs.back() + 22.0f);
+            return xs;
+        };
+        const float p = 7.0f;
+
+        beginTest ("a tap chooses the nearest step, inside the track");
+        {
+            Drag d;
+            d.setPositions (track());
+            expectEquals (d.count(), 33);
+            expectEquals (d.press (14.0f + 10.0f * p, 0), 10);
+            expectEquals (d.press (14.0f + 10.4f * p, 0), 10);
+            expectEquals (d.press (14.0f + 10.6f * p, 0), 11);
+            expectEquals (d.press (-50.0f, 0), 0);
+            expectEquals (d.press (5000.0f, 0), 32);
+            expectEquals (d.stepAt (d.xOf (30) + 10.0f), 30);   // nearer 20 kHz than LAeq (22 further)
+            expectEquals (d.stepAt (d.xOf (30) + 12.0f), 31);
+            expectEquals (d.stepAt (d.xOf (31) + 12.0f), 32);
+        }
+
+        beginTest ("a drag follows the finger, step by step");
+        {
+            Drag d;
+            d.setPositions (track());
+            d.press (d.xOf (5), 0);
+            expectEquals (d.move (d.xOf (9), 50), 9);
+            expectEquals (d.move (d.xOf (2) + 1.0f, 100), 2);
+            expect (! d.fine());
+        }
+
+        beginTest ("a finger held still makes the drag four times finer, from the step it is on");
+        {
+            Drag d;
+            d.setPositions (track());
+            const float x = d.xOf (12) + 3.0f;   // off the step's centre
+            d.press (x, 1000);
+            expect (! d.hold (x, 1000 + (juce::uint32) scm::precise::kHoldMs - 10), "not yet");
+            d.move (x - 2.0f, 1200);                              // a tremble is still still
+            expect (d.hold (x - 2.0f, 1000 + (juce::uint32) scm::precise::kHoldMs));
+            expect (d.fine());
+            expectEquals (d.step(), 12, "nothing moves when it turns fine");
+            // the virtual finger starts on step 12's centre and moves at a quarter of the finger's speed:
+            // half a step (3.5 points) takes 14 points of finger travel, a whole step 28
+            const float f = x - 2.0f;
+            expectEquals (d.move (f + 13.0f, 1600), 12);
+            expectEquals (d.move (f + 15.0f, 1650), 13);
+            expectEquals (d.move (f + 41.0f, 1700), 13);
+            expectEquals (d.move (f + 43.0f, 1750), 14);
+            expectEquals (d.move (f - 15.0f, 1800), 11);
+            expect (! d.hold (f, 5000), "already fine");
+        }
+
+        beginTest ("a fine drag past an end moves back at once");
+        {
+            Drag d;
+            d.setPositions (track());
+            d.press (d.xOf (30), 0);
+            d.hold (d.xOf (30), (juce::uint32) scm::precise::kHoldMs);
+            const float f = d.xOf (30);
+            expectEquals (d.move (f + 400.0f, 600), 32);          // 100 points of virtual travel: LZeq, the end
+            expectEquals (d.move (f + 400.0f - 45.0f, 700), 31);  // 11 points back: LAeq, not 89 more to undo
+        }
+
+        beginTest ("a finger that keeps moving never turns fine; a lifted one ends the drag");
+        {
+            Drag d;
+            d.setPositions (track());
+            float x = d.xOf (3);
+            d.press (x, 0);
+            for (juce::uint32 t = 100; t <= 2000; t += 100)
+            {
+                x += 8.0f;
+                d.move (x, t);
+                expect (! d.hold (x, t));
+            }
+            d.release();
+            expect (! d.fingerDown());
+            expect (! d.hold (x, 10000));
+            const int before = d.step();
+            expectEquals (d.move (d.xOf (0), 10100), before, "no finger, no change");
+        }
+
+        beginTest ("one step, or none");
+        {
+            Drag d;
+            expectEquals (d.press (100.0f, 0), 0);
+            d.setPositions ({ 50.0f });
+            expectEquals (d.press (0.0f, 0), 0);
+            expectEquals (d.move (500.0f, 10), 0);
+        }
+    }
+};
+
 static PreciseTouchTests preciseTouchTests;
+static StepDragTests stepDragTests;
 static AnalysisRangeTests analysisRangeTests;
 static NumberEntryTests numberEntryTests;
 } // namespace

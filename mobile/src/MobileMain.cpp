@@ -94,10 +94,13 @@ public:
         //   SC_MOBILE_NO_AUDIO=1          do not open the microphone
         //   SC_MOBILE_OPEN=<wav>          open a file at start
         //   SC_MOBILE_TAB=<0..6>          show a panel (Files, Analyse, Generate, Calibrate, Input, Edit, Map)
-        //   SC_MOBILE_SOUNDMAP=<folder>   open a sound map in the Map tab (SC_MOBILE_SOUNDMAP_MODE=0 View, 1 Survey, 2 Measure)
+        //   SC_MOBILE_SOUNDMAP=<folder>   open a sound map in the Map tab (SC_MOBILE_SOUNDMAP_MODE=0 View, 1 Survey, 2 Measure;
+        //                                 SC_MOBILE_SOUNDMAP_SIDE=1 the side view)
         //   SC_MOBILE_SNAPSHOT=<png>      after 2.5 s, write the window to a PNG and quit
         //   SC_MOBILE_KEYS=<k>[;<k>...]   after 1 s, press these keys (juce::KeyPress descriptions)
         //   SC_MOBILE_SIZE=<w>x<h>        window size (e.g. 844x390: a phone in landscape, 1180x820: an iPad)
+        //   SC_MOBILE_BAND=<step>[,<ms>]  a finger left on the Map tab's band slider after <ms> (1500: fine
+        //                                 by the snapshot; 2300: not yet)
         const auto env = [] (const char* n) { return juce::SystemStats::getEnvironmentVariable (n, {}); };
         if (env ("SC_MOBILE_SIZE").containsChar ('x'))
         {
@@ -118,7 +121,10 @@ public:
         if (env ("SC_MOBILE_TAB").isNotEmpty())
             screen->showTab (env ("SC_MOBILE_TAB").getIntValue());
         if (env ("SC_MOBILE_SOUNDMAP").isNotEmpty())
+        {
             screen->showSoundMap (juce::File (env ("SC_MOBILE_SOUNDMAP")), env ("SC_MOBILE_SOUNDMAP_MODE").getIntValue());
+            if (env ("SC_MOBILE_SOUNDMAP_SIDE") == "1") screen->showSoundMapSide();
+        }
         if (env ("SC_MOBILE_ANALYSIS").isNotEmpty())   // 0 FFT Linear, 1 FFT Log, 2 1/3 octave
             screen->setAnalysisMode (env ("SC_MOBILE_ANALYSIS").getIntValue());
         if (env ("SC_MOBILE_PRECISE").containsChar (','))   // "fx,fy": the precision reticle, after 1.5 s
@@ -126,6 +132,13 @@ public:
             const float fx = env ("SC_MOBILE_PRECISE").upToFirstOccurrenceOf (",", false, false).getFloatValue();
             const float fy = env ("SC_MOBILE_PRECISE").fromFirstOccurrenceOf (",", false, false).getFloatValue();
             juce::Timer::callAfterDelay (1500, [screen, fx, fy] { screen->showPreciseAt (fx, fy); });
+        }
+        if (env ("SC_MOBILE_BAND").isNotEmpty())
+        {
+            const int step = env ("SC_MOBILE_BAND").upToFirstOccurrenceOf (",", false, false).getIntValue();
+            const int ms = env ("SC_MOBILE_BAND").containsChar (',')
+                               ? env ("SC_MOBILE_BAND").fromFirstOccurrenceOf (",", false, false).getIntValue() : 1500;
+            juce::Timer::callAfterDelay (ms, [screen, step] { screen->touchSoundMapBand (step); });
         }
         if (env ("SC_MOBILE_KEYS").isNotEmpty())   // "command + shift + return;spacebar": keys, after 1 s
         {

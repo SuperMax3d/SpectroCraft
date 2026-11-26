@@ -74,6 +74,9 @@ public:
         soundMapPane->openMap (folder);
         soundMapPane->setModeForTest (mode);
     }
+    /** Development hook: a finger left on the Map tab's band slider, on step `i`. */
+    void touchSoundMapBand (int i) { soundMapPane->touchBandForTest (i); }
+    void showSoundMapSide() { soundMapPane->showSideForTest(); }
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };

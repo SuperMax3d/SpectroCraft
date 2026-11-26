@@ -158,6 +158,9 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   and the hardware keyboard's shortcuts: `mobile/src/ScreenLayout.{h,cpp}` (no components, tested),
   applied by `MainScreen::layoutPhone` / `layoutTablet`. Numbers are typed on the app's number pad
   (`mobile/src/TouchControls.h`: `TouchSlider`, `NumberField`), never in a `TextEditor` (the system keyboard).
+  Share files through `sharesheet::shareFiles` (`mobile/src/ShareSheet.h`), never `juce::ContentSharer` directly: on iOS
+  JUCE leaves an invisible component over the button after the sheet closes (the button stops working, the sheet comes
+  back when the tab is shown again) until the ScopedMessageBox is let go.
   Files written by the app: `videoTracks[].relFile` (resolved next to the WAV, `sc::resolveVideoTracks`),
   `storedPlots`, `soundMapPoint` (a take's position in its sound map) and `micCompensation` (the recording microphone's
   correction against a reference, issue #80: `mobile/src/MicCompensation.{h,cpp}`, CSV files in the recordings folder's
@@ -166,7 +169,8 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   file names, paths or device names in events or error texts. Details: `mobile/README.md`.
 - Sound map (mobile Map tab: positions of takes from printed AprilTag markers, a level map per band): the headless
   geometry / survey / levels / files in `mobile/src/soundmap/` (`Sm*`, namespace `scm::smap`; the detector is the
-  vendored `extern/apriltag`, library `sc_apriltag`), the tab in `mobile/src/SoundMapPane.*` and `SoundMapView.*`;
+  vendored `extern/apriltag`, library `sc_apriltag`), the tab in `mobile/src/SoundMapPane.*` and `SoundMapView.*` (the band is chosen on `StepSlider`, a slider over named steps
+  whose finger logic - a held finger makes it 4x finer - is the headless `StepDrag.h`);
   MainScreen owns the camera and the takes (`setMapCamera`, `startRecording (saveTo, withVideo)`). The vendored
   JUCE iOS camera carries SPECTROCRAFT PATCHes for stills (UI-orientation rotation, largest still size, JPEG
   quality 1). Behaviour, field procedure and precision: `docs/sound-map.md`; tests `mobile/tests/SoundMapTests.cpp`
