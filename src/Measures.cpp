@@ -386,7 +386,7 @@ SpectrumResult spectrum (const AudioEngine& eng, const SpectrumParams& p,
 
 std::vector<float> thirdOctaveRefBands (const AudioEngine& eng, int ch,
                                         double t0, double t1, int order,
-                                        const ProgressFn& progress, int* framesUsed)
+                                        const ProgressFn& progress, int* framesUsed, int maxFramesWanted)
 {
     // Reference-analyzer 1/3-octave pipeline: fixed 65536-point Hanning frames
     // at 50% overlap, frame-averaged power spectrum (no coherent-gain
@@ -418,7 +418,7 @@ std::vector<float> thirdOctaveRefBands (const AudioEngine& eng, int ch,
     {
         const int64_t hop = N / 2;
         const int64_t full = (s1 - s0) / hop;   // reference frame count for the slice
-        const int maxFrames = kRefThirdOctMaxFrames;   // cap for interactive use
+        const int maxFrames = std::max (2, maxFramesWanted);   // cap for interactive use
         if (full <= maxFrames)
             for (int64_t i = 0; i < full; ++i)
                 starts.push_back (s0 + i * hop);
@@ -528,7 +528,7 @@ ThirdOctaveResult thirdOctave (const AudioEngine& eng, const ThirdOctaveParams& 
             if (progress)
                 sub = [&progress, base, span] (double f) { return progress (base + f * span); };
             int used = 0;
-            auto bands = thirdOctaveRefBands (eng, chans[i], p.t0, p.t1, p.order, sub, &used);
+            auto bands = thirdOctaveRefBands (eng, chans[i], p.t0, p.t1, p.order, sub, &used, p.maxFrames);
             if (bands.empty()) { r.cancelled = true; r.channels.clear(); return r; }
             r.framesUsed = used;
             ThirdOctaveChannel c;

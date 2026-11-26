@@ -127,6 +127,63 @@ public:
             expect (inBand - below > 40.0, "band-limited noise: < -40 dB two octaves below the band");
         }
 
+        beginTest ("#79: custom noise follows a drawn response, at its RMS level");
+        {
+            scm::GeneratorSettings s;
+            s.kind = scm::GeneratorSettings::Kind::Noise;
+            s.noise = scm::GeneratorSettings::Noise::Custom;
+            s.lowHz = 20.0;
+            s.highHz = 20000.0;
+            s.levelDb = -20.0;
+            // flat at 0 dB below 500 Hz, 12 dB lower from 2 kHz up
+            for (int i = 0; i < scm::GeneratorSettings::kCustomBands; ++i)
+            {
+                const double f = scm::GeneratorSettings::customBandHz (i);
+                s.customDb.push_back (f <= 500.0 ? 0.0f : f >= 2000.0 ? -12.0f : (float) (-12.0 * std::log2 (f / 500.0) / 2.0));
+            }
+            expectWithinAbsoluteError (s.customGainDb (250.0), 0.0, 1e-6);
+            expectWithinAbsoluteError (s.customGainDb (8000.0), -12.0, 1e-6);
+            expectWithinAbsoluteError (s.customGainDb (5.0), 0.0, 1e-6, "flat below the first band");
+            const auto x = generate (s, rate, 20.0);
+            expectWithinAbsoluteError (rmsDb (x, (size_t) rate), -20.0, 0.25);
+            // white-like below 500 Hz (+3 dB per octave of power), 12 dB less from 2 kHz
+            const double a = octavePowerDb (x, rate, 125.0), b = octavePowerDb (x, rate, 4000.0);
+            expectWithinAbsoluteError (b - a, 5.0 * 3.0 - 12.0, 1.0);
+            // a slope's curve is the slope
+            const auto c = scm::GeneratorSettings::curveForSlope (-3.0);
+            expectWithinAbsoluteError ((double) c[17], 0.0, 1e-6);   // band 17 = 1 kHz
+            expectWithinAbsoluteError ((double) c[20], -3.0, 1e-5);
+            // the drawn response survives the settings' round trip
+            const auto back = scm::GeneratorSettings::fromVar (s.toVar());
+            expect (back.customDb == s.customDb);
+        }
+
+        beginTest ("#79: a level or frequency change is smoothed (no jump)");
+        {
+            scm::SignalSource src;
+            scm::GeneratorSettings s;
+            s.kind = scm::GeneratorSettings::Kind::Tone;
+            s.toneHz = 1000.0;
+            s.levelDb = -40.0;
+            src.setSettings (s);
+            src.prepare (rate);
+            std::vector<float> a ((size_t) 4800), b ((size_t) 48000);
+            src.render (a.data(), (int) a.size());
+            s.levelDb = -6.0;
+            s.toneHz = 2000.0;
+            src.setSettings (s);
+            src.render (b.data(), (int) b.size());
+            float firstPeak = 0.0f;
+            for (int i = 0; i < 48; ++i) firstPeak = std::max (firstPeak, std::abs (b[(size_t) i]));
+            expect (firstPeak < 0.2f, "the first millisecond is still near the old level: " + juce::String (firstPeak));
+            const std::vector<float> tail (b.begin() + 24000, b.end());
+            expectWithinAbsoluteError (rmsDb (tail), -6.0, 0.05);
+            int crossings = 0;
+            for (size_t i = 1; i < tail.size(); ++i)
+                if (tail[i - 1] < 0.0f && tail[i] >= 0.0f) ++crossings;
+            expectWithinAbsoluteError ((double) crossings / 0.5, 2000.0, 4.0);
+        }
+
         beginTest ("sweep: one-shot ends, log sweep reaches the end frequency");
         {
             scm::GeneratorSettings s;

@@ -28,6 +28,14 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
     kindBox.setSelectedId ((int) settings.kind + 1, juce::dontSendNotification);
     kindBox.onChange = [this] { refreshVisibility(); push(); };
     addRow ("Signal", kindBox);
+    logSliders.setToggleState (ctx.props.getBoolValue ("generatorLogSliders", false), juce::dontSendNotification);
+    logSliders.onClick = [this]
+    {
+        ctx.props.setValue ("generatorLogSliders", logSliders.getToggleState());
+        scaleNyquist = 0.0;   // set the sliders up again
+        applyFrequencyScale();
+    };
+    addRow ("", logSliders);
 
     setupSlider (level, "Level (RMS)", -80.0, 0.0, -20.0, " dBFS", 1);
     level.setValue (settings.levelDb, juce::dontSendNotification);
@@ -56,10 +64,12 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
     noiseBox.setSelectedId ((int) settings.noise + 1, juce::dontSendNotification);
     noiseBox.onChange = [this] { refreshVisibility(); push(); };
     addRow ("Noise", noiseBox);
-    slope.setup ("Slope", -12.0, 6.0, 0.5, " dB/oct", 1, 96);
-    slope.setValue (settings.slopeDbPerOctave, juce::dontSendNotification);
-    slope.onValueChange = [this] { push(); };
-    addRow ("Slope", slope);
+    // Custom noise: a response drawn by hand (first from the old slope)
+    if ((int) settings.customDb.size() != GeneratorSettings::kCustomBands)
+        settings.customDb = GeneratorSettings::curveForSlope (settings.slopeDbPerOctave);
+    curveEditor.setCurve (settings.customDb);
+    curveEditor.onChange = [this] { push(); };
+    addRow ("Response", curveEditor);
     setupSlider (lowCut, "Low edge", 10.0, 24000.0, 1000.0, " Hz", 0);
     lowCut.setValue (settings.lowHz, juce::dontSendNotification);
     addRow ("Low edge", lowCut);
@@ -76,6 +86,7 @@ GeneratorPane::GeneratorPane (AppContext& c) : ctx (c)
     addAndMakeVisible (viewport);
 
     refreshVisibility();
+    applyFrequencyScale();
     push();
     startTimerHz (10);
 }
@@ -112,7 +123,7 @@ void GeneratorPane::refreshVisibility()
     show (sweepStart, kind == 1); show (sweepEnd, kind == 1); show (sweepTime, kind == 1);
     show (sweepLog, kind == 1); show (sweepRepeat, kind == 1);
     show (noiseBox, kind == 2); show (lowCut, kind == 2); show (highCut, kind == 2);
-    show (slope, kind == 2 && custom);
+    show (curveEditor, kind == 2 && custom);
     for (auto& [label, comp] : rows) label->setVisible (comp->isVisible());
     resized();
 }
@@ -128,7 +139,7 @@ void GeneratorPane::push()
     settings.sweepLog = sweepLog.getToggleState();
     settings.sweepRepeat = sweepRepeat.getToggleState();
     settings.noise = (GeneratorSettings::Noise) (noiseBox.getSelectedId() - 1);
-    settings.slopeDbPerOctave = slope.getValue();
+    settings.customDb = curveEditor.curve();
     settings.lowHz = lowCut.getValue();
     settings.highHz = highCut.getValue();
     ctx.audio.generator().setSettings (settings);
@@ -145,13 +156,29 @@ void GeneratorPane::timerCallback()
                           : "  - " + juce::String (juce::roundToInt (100.0 * g.sweepProgress())) + " %");
         info.setText (text, juce::dontSendNotification);
     }
+    applyFrequencyScale();
+}
+
+void GeneratorPane::applyFrequencyScale()
+{
     const double nyq = ctx.audio.sampleRate() * 0.5;
+    if (nyq <= 100.0 || nyq == scaleNyquist) return;
+    scaleNyquist = nyq;
+    const bool log = logSliders.getToggleState();
     for (auto* s : { &tone, &sweepStart, &sweepEnd, &lowCut, &highCut })
-        if (s->getMaximum() != nyq && nyq > 100.0)
+    {
+        const double v = s->getValue();
+        if (log)
+            s->setNormalisableRange (juce::NormalisableRange<double> (10.0, nyq,
+                [] (double lo, double hi, double t) { return lo * std::pow (hi / lo, t); },
+                [] (double lo, double hi, double x) { return std::log (x / lo) / std::log (hi / lo); }));
+        else
         {
             s->setRange (10.0, nyq, 0.0);
             s->setSkewFactorFromMidPoint (1000.0);
         }
+        s->setValue (juce::jlimit (10.0, nyq, v), juce::dontSendNotification);
+    }
 }
 
 void GeneratorPane::paint (juce::Graphics& g)
@@ -170,12 +197,16 @@ void GeneratorPane::resized()
     for (auto& [label, comp] : rows)
     {
         if (! comp->isVisible()) continue;
+        const int rowH = comp == &curveEditor ? 170 : style::kTouch;
         label->setBounds (style::kGap, y, labelW, style::kTouch);
-        auto area = juce::Rectangle<int> (style::kGap + labelW, y, w - labelW - style::kGap, style::kTouch);
+        auto area = juce::Rectangle<int> (style::kGap + labelW, y, w - labelW - style::kGap, rowH);
+        if (comp == &curveEditor || comp == &logSliders)   // the whole width
+            area.setLeft (style::kGap + (comp == &curveEditor ? 0 : labelW));
+        if (comp == &curveEditor) label->setBounds (0, 0, 0, 0);
         if (comp == &sweepLog)
             sweepRepeat.setBounds (area.removeFromRight (area.getWidth() / 2));
         comp->setBounds (area);
-        y += style::kTouch + 2;
+        y += rowH + 2;
     }
     info.setBounds (style::kGap, y, w, 24);
     y += 30;

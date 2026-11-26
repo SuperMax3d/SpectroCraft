@@ -12,11 +12,16 @@
 // gets a random phase and the magnitude |H(f)| = (f / 1 kHz)^(slope / 6.02)
 // inside [lowHz, highHz] (0 outside), and blocks are overlap-added at 50 %
 // with a sqrt-Hann window, whose squares sum to one, so the variance is
-// constant over time. White = 0 dB/octave, pink = -3, brown = -6; Custom takes
-// any slope and band.
+// constant over time. White = 0 dB/octave, pink = -3, brown = -6; Custom
+// follows a response drawn by hand (customDb, issue #79), or a slope.
+//
+// Level and tone frequency changes are smoothed (issue #79): the level follows
+// its target within ~30 ms, the tone's frequency glides within ~50 ms (in log
+// frequency), so moving a slider makes no click.
 #pragma once
 #include <JuceHeader.h>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -39,12 +44,24 @@ struct GeneratorSettings
     bool sweepRepeat = true;         // restart at the start frequency, else stop
 
     Noise noise = Noise::Pink;
-    double slopeDbPerOctave = -3.0;  // Custom only
+    double slopeDbPerOctave = -3.0;  // Custom without a drawn response
+    /** Custom: the drawn response, dB at the kCustomBands third-octave
+        centres (customBandHz); empty: the slope instead. */
+    std::vector<float> customDb;
     double lowHz = 20.0;             // band edges (all noise types)
     double highHz = 20000.0;
 
     /** Slope used for the noise type (White 0, Pink -3, Brown -6, Custom). */
     double effectiveSlope() const noexcept;
+
+    static constexpr int kCustomBands = 31;
+    /** Centre of custom band i: third octaves from 20 Hz (i = 0) to 20 kHz (i = 30). */
+    static double customBandHz (int i) noexcept { return 1000.0 * std::pow (2.0, (double) (i - 17) / 3.0); }
+    /** Custom noise: the gain (dB) at f, linear in log frequency between the
+        drawn bands and flat beyond them; the slope when nothing is drawn. */
+    double customGainDb (double f) const noexcept;
+    /** The drawn response a slope stands for (to start drawing from it). */
+    static std::vector<float> curveForSlope (double slopeDbPerOctave);
 
     juce::var toVar() const;
     static GeneratorSettings fromVar (const juce::var&);
@@ -102,6 +119,18 @@ private:
     std::atomic<double> sweepPos { 0.0 };
     std::atomic<bool> sweepDone { false };
     double gainLin = 0.0;
+    // smoothing (issue #79): what is played now, moving to gainLin / the tone's frequency
+    double gainNow = -1.0, logFreqNow = 0.0;
+    bool freqStarted = false;
+    static constexpr double kGainTau = 0.03, kFreqTau = 0.05;
+    double smoothCoef (double tau) const noexcept { return 1.0 - std::exp (-1.0 / (tau * rate)); }
+    /** One sample of the level, moved toward gainLin. */
+    double nextGain (double coef) noexcept
+    {
+        if (gainNow < 0.0) gainNow = gainLin;
+        gainNow += (gainLin - gainNow) * coef;
+        return gainNow;
+    }
 
     // noise
     juce::dsp::FFT fft { kFftOrder };
