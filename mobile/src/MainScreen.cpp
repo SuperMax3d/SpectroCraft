@@ -399,8 +399,9 @@ juce::File MainScreen::stopRecording()
         telemetry::reportError ("recording: the take could not be saved");
         showMessage ("Recording", err);
     }
-    if (! videoButton.getToggleState() && ctx.video.isOpen())
+    if (! videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera)
         ctx.video.close();   // Video was turned off during the take: the filming ends with it
+                             // (not the Map tab's camera: it takes the picture after the take)
     if (filesPane) filesPane->refresh();
     updateTransport();
     refreshVideo();
