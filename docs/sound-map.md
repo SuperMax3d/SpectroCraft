@@ -151,6 +151,7 @@ Kinds of take:
 | Point | A map point. |
 | Background | The source off: the background per band (at a known position, like every take). Bands of the points less than 10 dB above it are drawn hollow; less than 3 dB, left off the surface. |
 | Reference | The same fixed spot again and again (a marked tripod spot): the source's drift. The View summary gives it for the 250 Hz-2 kHz bands. |
+| Reverberation | While the sweep file (Menu > Sweep signal for reverberation) plays in a loop: T20, EDT and C50 per octave at this point, shown in View with the Level / T20 / EDT / C50 button. Not a level of the map. See `docs/reverberation.md`. |
 
 The microphone is not at the camera. Settings > Microphone offset (from the
 back camera to the microphone in use, cm, phone seen from the screen: x right,

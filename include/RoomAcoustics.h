@@ -128,4 +128,11 @@ std::vector<double> bandCentres (const ImpulseResponse&, const Options&);
 
 /** One result per band (the whole response first when asked). Empty when the response is not usable. */
 std::vector<BandResult> analyse (const ImpulseResponse&, const Options& = {});
+
+/** "1 kHz", "31.5 Hz", or "All" for the whole response. */
+juce::String bandName (const BandResult&);
+
+/** One row per band: band_hz, EDT_s, T20_s, T30_s, C50_dB, C80_dB, D50, Ts_ms, INR_dB,
+    EDT_ok, T20_ok, T30_ok, curvature_pct, filter_limited (empty where not measured). */
+juce::String toCsv (const std::vector<BandResult>&);
 } // namespace sc::room

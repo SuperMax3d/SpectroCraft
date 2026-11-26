@@ -281,8 +281,12 @@ void SoundMapPane::updateBands()
     std::set<double> have;
     if (project)
         for (const auto& p : project->points)
+        {
             for (double c : p.levels.centresHz)
                 if (const double n = nominalFor (c); n > 0.0) have.insert (n);
+            for (const auto& r : p.reverb)   // a map of reverberation takes only still has its octaves to choose
+                if (r.hz > 0.0) have.insert (r.hz);
+        }
     bands.assign (have.begin(), have.end());
     const int groupFrom = (int) bands.size();
     bands.push_back (-1.0);

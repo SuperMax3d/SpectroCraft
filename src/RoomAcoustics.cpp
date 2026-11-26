@@ -442,6 +442,26 @@ ImpulseResponse fromImpulse (const float* recording, juce::int64 numSamples, dou
     return ir;
 }
 
+juce::String bandName (const BandResult& b)
+{
+    if (b.nominalHz <= 0.0) return "All";
+    if (b.nominalHz >= 1000.0) return juce::String (b.nominalHz / 1000.0, 2).trimCharactersAtEnd ("0").trimCharactersAtEnd (".") + " kHz";
+    return juce::String (b.nominalHz, 1).trimCharactersAtEnd ("0").trimCharactersAtEnd (".") + " Hz";
+}
+
+juce::String toCsv (const std::vector<BandResult>& bands)
+{
+    juce::String s = "band_hz,EDT_s,T20_s,T30_s,C50_dB,C80_dB,D50,Ts_ms,INR_dB,EDT_ok,T20_ok,T30_ok,curvature_pct,filter_limited\n";
+    const auto num = [] (double v, int decimals) { return std::isnan (v) ? juce::String() : juce::String (v, decimals); };
+    for (const auto& b : bands)
+        s << (b.nominalHz > 0.0 ? juce::String (b.nominalHz, 1).trimCharactersAtEnd ("0").trimCharactersAtEnd (".") : juce::String ("all"))
+          << "," << num (b.edt.seconds, 3) << "," << num (b.t20.seconds, 3) << "," << num (b.t30.seconds, 3)
+          << "," << num (b.c50, 2) << "," << num (b.c80, 2) << "," << num (b.d50, 3) << "," << num (b.centreTimeMs, 1)
+          << "," << juce::String (b.inrDb, 1) << "," << (b.edt.reliable ? 1 : 0) << "," << (b.t20.reliable ? 1 : 0)
+          << "," << (b.t30.reliable ? 1 : 0) << "," << num (b.curvaturePct, 1) << "," << (b.filterLimited ? 1 : 0) << "\n";
+    return s;
+}
+
 std::vector<double> bandCentres (const ImpulseResponse& ir, const Options& o)
 {
     std::vector<double> out;

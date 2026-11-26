@@ -175,6 +175,12 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   JUCE iOS camera carries SPECTROCRAFT PATCHes for stills (UI-orientation rotation, largest still size, JPEG
   quality 1). Behaviour, field procedure and precision: `docs/sound-map.md`; tests `mobile/tests/SoundMapTests.cpp`
   (`SC_SOUNDMAP_STUDY=1` prints the precision table, `SC_SOUNDMAP_DEMO=<folder>` writes a demo map).
+- Reverberation (EDT, T20, T30, clarity per band from a recorded sweep or impulse): the maths is the headless
+  `include/RoomAcoustics.h` + `src/RoomAcoustics.cpp` (`sc::room`: `makeSweep`, `fromSweep`, `fromImpulse`, `analyse`),
+  compiled by the desktop and the mobile app; the desktop window is `include/ReverbWindow.h` (Effects > Reverberation
+  Analysis, `MainWindow::showReverbWindow`), the mobile side the sound map's Reverberation takes
+  (`SoundMapProject::measureReverb`). Method, formulas and limits: `docs/reverberation.md`; tests
+  `mobile/tests/RoomAcousticsTests.cpp` (the maths) and `tests/regression/reverb.inc` (the window).
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as
   a garbage glyph. Use `...` in menus, or `juce::String::fromUTF8 (u8"…")` when a real

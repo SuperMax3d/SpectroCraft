@@ -1163,6 +1163,27 @@ Code: `include/BlindSeparation.h` + `src/BlindSeparation.cpp` (headless,
 gain over the mixture). Timings: `SC_BENCH=1 SC_TEST_FILTER=bench`
 (`SC_BENCH_BSS_SECONDS`, default 60), meaningful in a Release build.
 
+---
+
+## Reverberation analysis
+
+**Effects > Reverberation Analysis...** measures the reverberation of the place a
+recording was made in, per octave or 1/3 octave: EDT, T20 and T30 (the time for
+60 dB, from the first 10 dB, from -5 to -25 dB and from -5 to -35 dB of the
+decay), the clarity C50 and C80, the definition D50, the centre time and the
+response's level above the noise. The recording (the selection, or the whole
+file; one channel) holds either a sine sweep played by a loudspeaker and the
+silence after it - give its start and end frequencies and its length; a sound
+map's reverberation take from the mobile app fills them by itself - or an
+impulse (balloon, clapper). A time that cannot be trusted is followed by a `?`
+with the reason in Notes (noise too close, a band too narrow for so short a
+decay, a decay that is not one slope). The plot shows the chosen band's decay
+with the T20 line; **Export CSV...** writes the table. The window reads the file
+and changes nothing. Method, formulas and limits:
+[reverberation.md](reverberation.md).
+
+---
+
 ## Video files
 
 SpectroCraft opens video files as their audio: the first audio stream is
