@@ -17,6 +17,11 @@
 # The bundle / application id comes from the repository variable
 # SC_MOBILE_BUNDLE_ID (default com.spectrocraft.mobile).
 #
+# Build tags: an iOS build TestFlight took gets the annotated tag ios/build-N,
+# an Android build signed with the upload key android/build-N (N = the run
+# number, which is the iOS build number and the Android versionCode). A
+# repository without the store secrets gets no tag.
+#
 # Crash reports and statistics (mobile/src/Telemetry.h) are compiled in only
 # when the repository variables SC_SENTRY_DSN / SC_POSTHOG_KEY (and optionally
 # SC_POSTHOG_HOST) are set - so pull-request builds from forks send nothing.
@@ -84,6 +89,8 @@ jobs:
 
   android:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # the build's tag
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -163,6 +170,7 @@ jobs:
       # instead of failing the build. A new (draft) app may also need
       # SC_PLAY_RELEASE_STATUS=draft until its store listing is set up.
       - uses: r0adkll/upload-google-play@v1
+        id: play
         continue-on-error: true
         if: env.UPLOAD == 'true' && env.SIGNED == '1' && env.PLAY_JSON_FILE != ''
         with:
@@ -171,11 +179,30 @@ jobs:
           releaseFiles: out/*.aab
           track: internal
           status: ${{ vars.SC_PLAY_RELEASE_STATUS || 'completed' }}
+      # The build's tag: store-signed builds only (an APK signed with a
+      # runner's debug key is not a build anyone keeps). A tag already there (a
+      # re-run) does not fail the build.
+      - name: Tag the build (android/build-N)
+        if: env.SIGNED == '1'
+        continue-on-error: true
+        env:
+          PLAY: ${{ steps.play.outcome }}
+        run: |
+          n="${{ github.run_number }}"
+          ver="$(sed -n 's/^project (SpectroCraftMobile VERSION \([0-9.]*\).*/\1/p' mobile/CMakeLists.txt)"
+          if [ "$PLAY" = "success" ]; then where="on Google Play (internal testing)"
+          else where="not on Google Play: APK / AAB in the CI artifact SpectroCraftMobile-android"; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            tag -a "android/build-$n" -m "Android build $n - SpectroCraft Mobile $ver, versionCode $n, $where." \
+            -m "Branch ${{ github.ref_name }}, CI run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push origin "refs/tags/android/build-$n"
 
   ios:
     # App Store Connect takes only builds made with the iOS 26 SDK or later
     # (Xcode 26: macos-26's default).
     runs-on: macos-26
+    permissions:
+      contents: write   # the build's tag
     steps:
       - uses: actions/checkout@v4
       - name: Configure (Xcode, iOS)
@@ -259,6 +286,17 @@ jobs:
           EOF
           xcodebuild -exportArchive -archivePath build-ios/SpectroCraftMobile.xcarchive \
             -exportOptionsPlist build-ios/ExportOptions.plist -exportPath build-ios/export "${auth[@]}"
+          echo "UPLOADED=1" >> "$GITHUB_ENV"   # TestFlight has it: tag it below
+      - name: Tag the build (ios/build-N)
+        if: env.UPLOADED == '1'
+        continue-on-error: true   # a tag already there (a re-run) does not fail the build
+        run: |
+          n="${{ github.run_number }}"
+          ver="$(sed -n 's/^project (SpectroCraftMobile VERSION \([0-9.]*\).*/\1/p' mobile/CMakeLists.txt)"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            tag -a "ios/build-$n" -m "iOS build $n - SpectroCraft Mobile $ver ($n), uploaded to TestFlight." \
+            -m "Branch ${{ github.ref_name }}, CI run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push origin "refs/tags/ios/build-$n"
       - name: Sentry debug symbols (iOS)
         if: env.UPLOAD == 'true'
         env:
