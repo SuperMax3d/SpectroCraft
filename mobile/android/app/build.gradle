@@ -23,13 +23,13 @@ def prop = { String name, String fallback -> project.hasProperty(name) ? project
 
 android {
     namespace "com.spectrocraft.mobile"
-    compileSdk 35
+    compileSdk 36
     ndkVersion prop("ndkVersion", "27.2.12479018")
 
     defaultConfig {
         applicationId prop("appId", "com.spectrocraft.mobile")
         minSdk 29   // JUCE 9's Android font code (AFontMatcher) needs API 29
-        targetSdk 35
+        targetSdk 36   // Google Play requires 36 for new releases
         versionCode prop("versionCode", "1").toInteger()
         versionName "0.1.0"
 
