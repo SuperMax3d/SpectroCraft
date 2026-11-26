@@ -169,6 +169,9 @@ public:
         (metadata key "soundMapPoint": map, point, x, y, z, ...), carried
         through saves. */
     juce::var soundMapPoint;
+    /** The microphone compensation the mobile app attached to its recording
+        (issue #80; metadata key "micCompensation"), carried through saves. */
+    juce::var micCompensation;
 
     /** Replaces the table list (and optionally the display mode) and marks
         the document metadata-dirty. */

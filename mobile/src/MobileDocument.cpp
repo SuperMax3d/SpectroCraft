@@ -309,6 +309,19 @@ ScaleCalibration MobileDocument::calibration() const
     return current->scale;
 }
 
+miccomp::Compensation MobileDocument::micCompensation() const
+{
+    return current != nullptr ? miccomp::Compensation::fromVar (current->micCompensation) : miccomp::Compensation {};
+}
+
+void MobileDocument::setMicCompensation (const miccomp::Compensation& c)
+{
+    if (current == nullptr) return;
+    current->micCompensation = c.valid() ? c.toVar() : juce::var();
+    current->metaDirty = true;
+    changed();
+}
+
 void MobileDocument::setCalibration (const ScaleCalibration& c)
 {
     if (current == nullptr) return;

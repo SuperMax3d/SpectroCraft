@@ -6,6 +6,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "FileDoc.h"
+#include "MicCompensation.h"
 #include "Settings.h"
 #include "SpectralEngine.h"
 #include "StoredPlots.h"
@@ -102,6 +103,10 @@ public:
     //      entry when the file has Scale-form axes, which take precedence)
     ScaleCalibration calibration() const;
     void setCalibration (const ScaleCalibration& c);
+    /** The microphone compensation the recording carries (issue #80;
+        metadata "micCompensation"): the analysis adds it to its levels. */
+    miccomp::Compensation micCompensation() const;
+    void setMicCompensation (const miccomp::Compensation& c);
 
     // ---- video linked to the recording
     void linkVideo (const juce::File& movie, double offsetSecs);

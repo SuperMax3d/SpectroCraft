@@ -46,6 +46,7 @@ public:
         int fftSize = 0;
         int channel = 0;
         double rmsDb = -300, peakDb = -300;   // in `unit` (peak in dBFS when uncalibrated)
+        bool compensated = false;             // the microphone's compensation was added (issue #80)
         int serial = 0;
     };
 
