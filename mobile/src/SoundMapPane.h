@@ -5,8 +5,9 @@
 //            its values, its take, or to delete it
 //   Survey   pictures of the tags (two or more in each), then Build map
 //   Measure  countdown, picture, take, picture: a point at a known position
-//            (also Background takes, source off, and Reference takes at a
-//            fixed spot for the source's drift)
+//            (also Background takes, source off, Reference takes at a fixed
+//            spot for the source's drift, and Reverberation takes while the
+//            sweep file plays in a loop: T20, EDT, C50 per octave)
 //
 // Survey and Measure use the camera (the preview fills the pane), keep the
 // screen on and hold the UI in landscape (more tags per picture, the same
@@ -48,6 +49,9 @@ public:
     void setModeForTest (int m) { setMode ((Mode) juce::jlimit (0, 2, m)); }
     /** Development hook: a finger left on the band slider's step `i` (View mode). */
     void touchBandForTest (int i) { bandSlider.touchForTest (i); }
+    /** Development hooks: the next quantity (Level, T20, EDT, C50) `times` times; a point selected. */
+    void nextQuantityForTest (int times) { for (int i = 0; i < times && quantityButton.onClick; ++i) quantityButton.onClick(); }
+    void selectPointForTest (int number) { view.setSelected (number); showPoint (number); }
     /** Development hook: the side view. */
     void showSideForTest() { if (projButton.getButtonText() == "Top" && projButton.onClick) projButton.onClick(); }
 
@@ -139,7 +143,8 @@ private:
     SoundMapView view;
     juce::TextButton prevBand { "<" }, nextBand { ">" }, relButton { "Abs" }, projButton { "Top" };
     StepSlider bandSlider;                // the bands, low to high, then LAeq and LZeq apart
-    juce::TextButton openTakeButton { "Open take" }, deletePointButton { "Delete point" };
+    juce::TextButton quantityButton { "Level" };   // Level / T20 / EDT / C50, once there is a reverberation take
+    juce::TextButton openTakeButton { "Open take" }, deletePointButton { "Delete" };
     std::vector<double> bands;            // the slider's steps (nominal Hz, then -1 LA, 0 LZ)
 
     juce::ThreadPool worker { 1 };

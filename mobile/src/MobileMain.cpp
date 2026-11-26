@@ -95,7 +95,8 @@ public:
         //   SC_MOBILE_OPEN=<wav>          open a file at start
         //   SC_MOBILE_TAB=<0..6>          show a panel (Files, Analyse, Generate, Calibrate, Input, Edit, Map)
         //   SC_MOBILE_SOUNDMAP=<folder>   open a sound map in the Map tab (SC_MOBILE_SOUNDMAP_MODE=0 View, 1 Survey, 2 Measure;
-        //                                 SC_MOBILE_SOUNDMAP_SIDE=1 the side view)
+        //                                 SC_MOBILE_SOUNDMAP_SIDE=1 the side view; SC_MOBILE_SOUNDMAP_QUANTITY=<1..3>
+        //                                 T20, EDT or C50 of the reverberation takes; SC_MOBILE_SOUNDMAP_POINT=<n> selected)
         //   SC_MOBILE_SNAPSHOT=<png>      after 2.5 s, write the window to a PNG and quit
         //   SC_MOBILE_KEYS=<k>[;<k>...]   after 1 s, press these keys (juce::KeyPress descriptions)
         //   SC_MOBILE_SIZE=<w>x<h>        window size (e.g. 844x390: a phone in landscape, 1180x820: an iPad)
@@ -124,6 +125,8 @@ public:
         {
             screen->showSoundMap (juce::File (env ("SC_MOBILE_SOUNDMAP")), env ("SC_MOBILE_SOUNDMAP_MODE").getIntValue());
             if (env ("SC_MOBILE_SOUNDMAP_SIDE") == "1") screen->showSoundMapSide();
+            if (env ("SC_MOBILE_SOUNDMAP_QUANTITY").isNotEmpty()) screen->showSoundMapQuantity (env ("SC_MOBILE_SOUNDMAP_QUANTITY").getIntValue());
+            if (env ("SC_MOBILE_SOUNDMAP_POINT").isNotEmpty()) screen->selectSoundMapPoint (env ("SC_MOBILE_SOUNDMAP_POINT").getIntValue());
         }
         if (env ("SC_MOBILE_ANALYSIS").isNotEmpty())   // 0 FFT Linear, 1 FFT Log, 2 1/3 octave
             screen->setAnalysisMode (env ("SC_MOBILE_ANALYSIS").getIntValue());

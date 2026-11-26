@@ -17,6 +17,11 @@ juce::String bandName (double band)
     if (band < 0.0) return "LAeq";
     return bandLabel (band) + " Hz";
 }
+
+ReverbValue reverbValueOf (SoundMapView::Quantity q)
+{
+    return q == SoundMapView::Quantity::Edt ? ReverbValue::Edt : q == SoundMapView::Quantity::C50 ? ReverbValue::C50 : ReverbValue::T20;
+}
 } // namespace
 
 SoundMapView::SoundMapView()
@@ -40,6 +45,12 @@ void SoundMapView::setBand (double b)
 void SoundMapView::setRelative (bool r)
 {
     relative = r;
+    refresh();
+}
+
+void SoundMapView::setQuantity (Quantity q)
+{
+    shownQuantity = q;
     refresh();
 }
 
@@ -75,9 +86,14 @@ juce::Colour SoundMapView::colourFor (double t)
 
 std::optional<double> SoundMapView::displayedValue (const MapPoint& p) const
 {
+    if (shownQuantity != Quantity::Level)
+    {
+        const auto r = SoundMapProject::reverbValue (p, reverbValueOf (shownQuantity), currentBand);
+        return r ? std::optional<double> (r->first) : std::nullopt;
+    }
     const double v = SoundMapProject::levelOf (p, currentBand);
     if (v < -250.0) return std::nullopt;
-    return relative ? v - reference : v;
+    return v - offset();
 }
 
 void SoundMapView::rebuild()
@@ -111,12 +127,25 @@ void SoundMapView::rebuild()
         s.kind = p.kind;
         s.located = p.located;
         s.position = p.position;
-        const double v = SoundMapProject::levelOf (p, currentBand);
-        s.hasValue = v > -250.0 && p.levels.unit == unit;
-        s.value = v;
+        const bool levels = shownQuantity == Quantity::Level;
+        const auto reverb = levels ? std::nullopt : SoundMapProject::reverbValue (p, reverbValueOf (shownQuantity), currentBand);
+        const double v = levels ? SoundMapProject::levelOf (p, currentBand) : reverb ? reverb->first : 0.0;
         const double snr = project->snrDb (p, currentBand);
-        s.weak = snr < 10.0;
-        s.trusted = p.kind == PointKind::Point && p.good() && s.hasValue && snr >= 3.0;
+        if (levels)
+        {
+            s.hasValue = v > -250.0 && p.levels.unit == unit;
+            s.weak = snr < 10.0;
+            s.trusted = p.kind == PointKind::Point && p.good() && s.hasValue && snr >= 3.0;
+        }
+        else
+        {
+            // the reverberation takes only, drawn as the map's points: full when the value is reliable
+            if (p.kind != PointKind::Reverb) s.located = false;
+            s.kind = PointKind::Point;
+            s.hasValue = s.trusted = reverb.has_value();
+            s.weak = reverb.has_value() && ! reverb->second;
+        }
+        s.value = v;
         if (p.located)
         {
             far = std::max (far, std::hypot (p.position.x, p.position.y));
@@ -126,8 +155,8 @@ void SoundMapView::rebuild()
         }
         if (s.trusted)
         {
-            xy.push_back ({ p.position.x, p.position.y });
-            values.push_back (v);
+            if (levels) xy.push_back ({ p.position.x, p.position.y });   // no surface for a time: it is not an energy to average
+            if (levels || s.located) values.push_back (v);
         }
         shown.push_back (s);
     }
@@ -158,12 +187,13 @@ void SoundMapView::rebuild()
 
     // colour range over the points and the surface
     lo = 1e300; hi = -1e300;
-    const double off = relative ? reference : 0.0;
+    const double off = offset();
     for (double v : values) { lo = std::min (lo, v - off); hi = std::max (hi, v - off); }
     for (size_t i = 0; i < grid.values.size(); ++i)
         if (grid.valid[i]) { lo = std::min (lo, (double) grid.values[i] - off); hi = std::max (hi, (double) grid.values[i] - off); }
     if (lo > hi) { lo = 0.0; hi = 1.0; }
-    if (hi - lo < 1.0) { const double m = 0.5 * (hi + lo); lo = m - 0.5; hi = m + 0.5; }
+    const double least = shownQuantity == Quantity::T20 || shownQuantity == Quantity::Edt ? 0.1 : 1.0;   // seconds or dB
+    if (hi - lo < least) { const double m = 0.5 * (hi + lo); lo = m - 0.5 * least; hi = m + 0.5 * least; }
 
     if (grid.nx > 0 && projection == Projection::Top)
     {
@@ -331,14 +361,14 @@ void SoundMapView::drawPoint (juce::Graphics& g, const Shown& s, juce::Point<flo
     const bool sel = s.number == selectedPoint;
     const float r = sel ? 7.0f : 5.0f;
     const auto box = juce::Rectangle<float> (2.0f * r, 2.0f * r).withCentre (at);
-    const double off = relative ? reference : 0.0;
+    const double off = offset();
     const auto colour = colourFor ((s.value - off - lo) / (hi - lo));
-    if (s.kind == PointKind::Background)
+    if (s.kind == PointKind::Background || s.kind == PointKind::Reverb)   // not levels of the map
     {
         g.setColour (style::textDim);
         g.drawRect (box, 1.5f);
         g.setFont (style::font (9.0f, true));
-        g.drawText ("B", box, juce::Justification::centred);
+        g.drawText (s.kind == PointKind::Reverb ? "R" : "B", box, juce::Justification::centred);
     }
     else if (s.kind == PointKind::Reference)
     {
@@ -376,7 +406,12 @@ void SoundMapView::drawLegend (juce::Graphics& g, juce::Rectangle<float> area)
 {
     g.setFont (style::font (11.0f, true));
     g.setColour (style::text);
-    g.drawText (bandName (currentBand), area.removeFromTop (16.0f), juce::Justification::centred);
+    const bool levels = shownQuantity == Quantity::Level;
+    const bool seconds = shownQuantity == Quantity::T20 || shownQuantity == Quantity::Edt;
+    const juce::String name = levels ? bandName (currentBand)
+                                     : juce::String (shownQuantity == Quantity::T20 ? "T20 " : shownQuantity == Quantity::Edt ? "EDT " : "C50 ")
+                                           + (currentBand > 0.0 ? bandLabel (currentBand) : juce::String ("all"));
+    g.drawText (name, area.removeFromTop (16.0f), juce::Justification::centred);
     if (shown.empty()) return;
     auto foot = area.removeFromBottom (44.0f);
     auto bar = area.reduced (4.0f, 14.0f).withWidth (14.0f);
@@ -387,12 +422,16 @@ void SoundMapView::drawLegend (juce::Graphics& g, juce::Rectangle<float> area)
     }
     g.setFont (style::font (11.0f));
     g.setColour (style::axisLabel);
-    const auto fmt = [this] (double v) { return (relative && v > 0.0 ? "+" : "") + juce::String (v, 1); };
+    const auto fmt = [this, levels, seconds] (double v)
+    {
+        return (levels && relative && v > 0.0 ? "+" : "") + juce::String (v, seconds ? 2 : 1);
+    };
     g.drawText (fmt (hi), juce::Rectangle<float> (area.getX(), bar.getY() - 14.0f, area.getWidth(), 13.0f), juce::Justification::centredLeft);
     g.drawText (fmt (lo), juce::Rectangle<float> (area.getX(), bar.getBottom() + 1.0f, area.getWidth(), 13.0f), juce::Justification::centredLeft);
     g.setColour (style::textDim);
-    g.drawFittedText (relative ? juce::String ("dB re mean") : unit, foot.removeFromTop (16.0f).toNearestInt(), juce::Justification::centred, 1);
-    if (resolvedHz > 0.0 && currentBand > resolvedHz)
+    g.drawFittedText (seconds ? juce::String ("s") : ! levels ? juce::String ("dB") : relative ? juce::String ("dB re mean") : unit,
+                      foot.removeFromTop (16.0f).toNearestInt(), juce::Justification::centred, 1);
+    if (levels && resolvedHz > 0.0 && currentBand > resolvedHz)
     {
         g.setColour (style::warning);
         g.drawFittedText ("trend only", foot.toNearestInt(), juce::Justification::centredTop, 2);

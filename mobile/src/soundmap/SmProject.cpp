@@ -422,12 +422,113 @@ Fix SoundMapProject::locate (const std::vector<TagObservation>& tags, int width,
     return f;
 }
 
+juce::String kindText (PointKind k) noexcept
+{
+    switch (k)
+    {
+        case PointKind::Background: return "background";
+        case PointKind::Reference:  return "reference";
+        case PointKind::Reverb:     return "reverb";
+        case PointKind::Point:      break;
+    }
+    return "point";
+}
+
+// ------------------------------------------------------------ reverberation
+
+std::vector<ReverbBand> SoundMapProject::measureReverb (const juce::File& wav, const sc::room::SweepSpec& spec, juce::String& error)
+{
+    std::vector<ReverbBand> out;
+    FileDoc doc;
+    if (! doc.load (wav) || ! doc.engine.isFileLoaded() || doc.engine.numSamples() <= 0)
+    {
+        error = "The take could not be read.";
+        return out;
+    }
+    const auto& eng = doc.engine;
+    std::vector<float> samples ((size_t) eng.numSamples());
+    eng.readSamples (0, 0, eng.numSamples(), samples.data());
+    const auto ir = sc::room::fromSweep (samples.data(), (juce::int64) samples.size(), eng.sampleRate(), spec);
+    if (! ir.ok())
+    {
+        error = ir.problem;
+        return out;
+    }
+    const auto seconds = [] (const sc::room::Fit& f) { return f.measured() ? f.seconds : 0.0; };
+    for (const auto& b : sc::room::analyse (ir))
+    {
+        ReverbBand r;
+        r.hz = b.nominalHz;
+        r.edt = seconds (b.edt);
+        r.t20 = seconds (b.t20);
+        r.t30 = seconds (b.t30);
+        r.c50 = std::isnan (b.c50) ? 0.0 : b.c50;
+        r.inrDb = b.inrDb;
+        r.edtOk = b.edt.reliable;
+        r.t20Ok = b.t20.reliable;
+        r.t30Ok = b.t30.reliable;
+        out.push_back (r);
+    }
+    if (out.empty()) error = "No band could be analysed.";
+    return out;
+}
+
+const ReverbBand* SoundMapProject::reverbBandFor (const MapPoint& p, double band) noexcept
+{
+    const ReverbBand* best = nullptr;
+    double bestRatio = 1.0e9;
+    for (const auto& r : p.reverb)
+    {
+        if (band <= 0.0) { if (r.hz == 0.0) return &r; continue; }
+        if (r.hz <= 0.0) continue;
+        const double ratio = std::abs (std::log2 (r.hz / band));
+        if (ratio < bestRatio) { bestRatio = ratio; best = &r; }
+    }
+    return bestRatio <= 0.51 ? best : nullptr;   // inside that octave
+}
+
+std::optional<std::pair<double, bool>> SoundMapProject::reverbValue (const MapPoint& p, ReverbValue what, double band) noexcept
+{
+    const auto* r = reverbBandFor (p, band);
+    if (r == nullptr) return std::nullopt;
+    switch (what)
+    {
+        case ReverbValue::T20: if (r->t20 > 0.0) return std::make_pair (r->t20, r->t20Ok); break;
+        case ReverbValue::Edt: if (r->edt > 0.0) return std::make_pair (r->edt, r->edtOk); break;
+        case ReverbValue::C50: if (r->t20 > 0.0 || r->edt > 0.0) return std::make_pair (r->c50, r->edtOk); break;
+    }
+    return std::nullopt;
+}
+
+bool SoundMapProject::hasReverb() const noexcept
+{
+    for (const auto& p : points)
+        if (p.kind == PointKind::Reverb && ! p.reverb.empty()) return true;
+    return false;
+}
+
+juce::String SoundMapProject::toReverbCsv() const
+{
+    if (! hasReverb()) return {};
+    juce::String s = "point,x_m,y_m,z_m,located,band_hz,EDT_s,T20_s,T30_s,C50_dB,INR_dB,EDT_ok,T20_ok,T30_ok,wav\n";
+    const auto time = [] (double v) { return v > 0.0 ? juce::String (v, 3) : juce::String(); };
+    for (const auto& p : points)
+        for (const auto& r : p.reverb)
+            s << p.number << "," << juce::String (p.position.x, 3) << "," << juce::String (p.position.y, 3) << ","
+              << juce::String (p.position.z, 3) << "," << (p.located ? 1 : 0) << ","
+              << (r.hz > 0.0 ? bandLabel (r.hz) : juce::String ("all")) << "," << time (r.edt) << "," << time (r.t20) << ","
+              << time (r.t30) << "," << juce::String (r.c50, 1) << "," << juce::String (juce::roundToInt (r.inrDb)) << ","
+              << (r.edtOk ? 1 : 0) << "," << (r.t20Ok ? 1 : 0) << "," << (r.t30Ok ? 1 : 0) << "," << p.wav << "\n";
+    return s;
+}
+
 juce::var SoundMapProject::positionVar (const MapPoint& p) const
 {
     auto* o = new juce::DynamicObject();
     o->setProperty ("map", name);
     o->setProperty ("point", p.number);
-    o->setProperty ("kind", p.kind == PointKind::Background ? "background" : p.kind == PointKind::Reference ? "reference" : "point");
+    o->setProperty ("kind", kindText (p.kind));
+    if (p.kind == PointKind::Reverb) o->setProperty ("sweep", settings.sweep().toVar());   // what the analysis needs
     o->setProperty ("located", p.located);
     if (p.located)   // no position: no numbers that could pass for one
     {
@@ -450,7 +551,7 @@ juce::var SoundMapProject::positionVar (const MapPoint& p) const
 juce::String SoundMapProject::positionText (const MapPoint& p) const
 {
     juce::String s = "Sound map " + name + ", P" + juce::String (p.number).paddedLeft ('0', 3) + " ("
-                     + (p.kind == PointKind::Background ? "background" : p.kind == PointKind::Reference ? "reference" : "point") + "): ";
+                     + kindText (p.kind) + "): ";
     if (! p.located) return s + "no position";
     s << "x " << juce::String (p.position.x, 3) << " m, y " << juce::String (p.position.y, 3) << " m, z "
       << juce::String (p.position.z, 3) << " m, +/- " << juce::roundToInt (p.sigmaM * 1000.0) << " mm";
@@ -529,7 +630,7 @@ juce::String SoundMapProject::toCsv() const
     auto fmt = [] (double v, int d) { return juce::String (v, d); };
     for (const auto& p : points)
     {
-        s << p.number << "," << (p.kind == PointKind::Background ? "background" : p.kind == PointKind::Reference ? "reference" : "point")
+        s << p.number << "," << kindText (p.kind)
           << "," << fmt (p.position.x, 3) << "," << fmt (p.position.y, 3) << "," << fmt (p.position.z, 3) << ","
           << (p.located ? 1 : 0) << "," << fmt (p.movedM * 100.0, 1) << "," << p.before.tags << "," << fmt (p.before.rmsPx, 2) << ","
           << fmt (p.sigmaM * 100.0, 1) << "," << p.levels.unit << ","
@@ -559,12 +660,15 @@ SoundMapProject::ExportPlan SoundMapProject::exportPlan() const
     ExportPlan plan;
     plan.root = juce::File::createLegalFileName (name.isNotEmpty() ? name : folder.getFileName());
     plan.csv = toCsv();
+    plan.reverbCsv = toReverbCsv();
     plan.readme
         << "SpectroCraft sound map \"" << name << "\", exported " << juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H:%M") << "\n"
         << "\n"
         << "export.csv     one row per take: point, kind (point, background, reference), x_m, y_m, z_m,\n"
         << "               the checks, LZeq, LAeq and every 1/3-octave band (dB, unit in the \"unit\"\n"
         << "               column), and the take's WAV (the \"wav\" column)\n"
+        << "reverb.csv     (with reverberation takes) one row per take and octave: EDT, T20, T30 (s), C50 (dB),\n"
+        << "               the response above the noise (INR, dB) and whether each time is reliable\n"
         << "project.json   everything the app knows: settings, lens, tags, the pictures' detected tags, points\n"
         << "points/        the takes (P001.wav ...); P001a.jpg and P001b.jpg, the pictures before and\n"
         << "               after the take, when they were exported\n"
@@ -575,7 +679,7 @@ SoundMapProject::ExportPlan SoundMapProject::exportPlan() const
         << "y counter-clockwise seen from above. Every WAV also carries its position: the metadata key\n"
         << "\"soundMapPoint\" and the first line of its INFO comment.\n";
 
-    std::set<juce::String> taken { "README.txt", "export.csv" };   // paths in the ZIP
+    std::set<juce::String> taken { "README.txt", "export.csv", "reverb.csv" };   // paths in the ZIP
     const auto add = [&] (ExportPart& part, const juce::File& f)
     {
         if (! f.existsAsFile()) return false;
@@ -590,7 +694,8 @@ SoundMapProject::ExportPlan SoundMapProject::exportPlan() const
         return stored.isEmpty() ? juce::File() : juce::File::isAbsolutePath (stored) ? juce::File (stored) : file (stored);
     };
 
-    plan.takes.bytes = (juce::int64) (plan.readme.getNumBytesAsUTF8() + plan.csv.getNumBytesAsUTF8());
+    plan.takes.bytes = (juce::int64) (plan.readme.getNumBytesAsUTF8() + plan.csv.getNumBytesAsUTF8()
+                                      + plan.reverbCsv.getNumBytesAsUTF8());
     add (plan.takes, file ("project.json"));
     for (const auto& p : points)
     {
@@ -620,9 +725,10 @@ bool SoundMapProject::writeExportZip (const ExportPlan& plan, bool withPointPict
     juce::ZipFile::Builder builder;
     const auto inRoot = [&plan] (const juce::String& path) { return plan.root + "/" + path; };
     const auto now = juce::Time::getCurrentTime();
-    for (const auto* text : { &plan.readme, &plan.csv })
-        builder.addEntry (std::make_unique<juce::MemoryInputStream> (text->toRawUTF8(), text->getNumBytesAsUTF8(), true), 9,
-                          inRoot (text == &plan.readme ? "README.txt" : "export.csv"), now);
+    for (const auto* text : { &plan.readme, &plan.csv, &plan.reverbCsv })
+        if (text->isNotEmpty())
+            builder.addEntry (std::make_unique<juce::MemoryInputStream> (text->toRawUTF8(), text->getNumBytesAsUTF8(), true), 9,
+                              inRoot (text == &plan.readme ? "README.txt" : text == &plan.csv ? "export.csv" : "reverb.csv"), now);
     const auto addPart = [&] (const ExportPart& part)
     {
         for (const auto& [path, f] : part.files)
@@ -672,6 +778,8 @@ juce::var SoundMapProject::toVar() const
     st->setProperty ("micOffsetCm", vecVar (settings.micOffsetCm));
     st->setProperty ("tagCentreHeightCm", settings.tagCentreHeightCm);
     st->setProperty ("lensFRel", settings.lensFRel);
+    st->setProperty ("sweepSeconds", settings.sweepSeconds);
+    st->setProperty ("sweepSilenceSeconds", settings.sweepSilenceSeconds);
     root->setProperty ("settings", st);
 
     juce::Array<juce::var> sv;
@@ -736,6 +844,25 @@ juce::var SoundMapProject::toVar() const
         o->setProperty ("movedM", p.movedM);
         if (p.input.isNotEmpty()) o->setProperty ("input", p.input);
         o->setProperty ("levels", levelsVar (p.levels));
+        if (! p.reverb.empty())
+        {
+            juce::Array<juce::var> bands;
+            for (const auto& r : p.reverb)
+            {
+                auto* rb = new juce::DynamicObject();
+                rb->setProperty ("hz", r.hz);
+                rb->setProperty ("edt", r.edt);
+                rb->setProperty ("t20", r.t20);
+                rb->setProperty ("t30", r.t30);
+                rb->setProperty ("c50", r.c50);
+                rb->setProperty ("inr", r.inrDb);
+                rb->setProperty ("edtOk", r.edtOk);
+                rb->setProperty ("t20Ok", r.t20Ok);
+                rb->setProperty ("t30Ok", r.t30Ok);
+                bands.add (rb);
+            }
+            o->setProperty ("reverb", bands);
+        }
         if (p.note.isNotEmpty()) o->setProperty ("note", p.note);
         pts.add (o);
     }
@@ -763,6 +890,8 @@ std::optional<SoundMapProject> SoundMapProject::fromVar (const juce::var& v, con
     p.settings.micOffsetCm = varVec (st["micOffsetCm"]);
     p.settings.tagCentreHeightCm = num (st, "tagCentreHeightCm", 0.0);
     p.settings.lensFRel = num (st, "lensFRel", 0.75);
+    p.settings.sweepSeconds = juce::jlimit (1.0, 60.0, num (st, "sweepSeconds", 8.0));
+    p.settings.sweepSilenceSeconds = juce::jlimit (1.0, 60.0, num (st, "sweepSilenceSeconds", 6.0));
 
     if (auto* a = v["survey"].getArray())
         for (const auto& e : *a)
@@ -798,7 +927,7 @@ std::optional<SoundMapProject> SoundMapProject::fromVar (const juce::var& v, con
         {
             MapPoint q;
             q.number = (int) e["number"];
-            q.kind = (PointKind) juce::jlimit (0, 2, (int) e["kind"]);
+            q.kind = (PointKind) juce::jlimit (0, 3, (int) e["kind"]);
             q.pending = (bool) e["pending"];
             q.wav = e["wav"].toString();
             q.pictureBefore = e["pictureBefore"].toString();
@@ -817,6 +946,21 @@ std::optional<SoundMapProject> SoundMapProject::fromVar (const juce::var& v, con
             q.movedM = (double) e["movedM"];
             q.input = e["input"].toString();
             q.levels = varLevels (e["levels"]);
+            if (auto* bands = e["reverb"].getArray())
+                for (const auto& rb : *bands)
+                {
+                    ReverbBand r;
+                    r.hz = (double) rb["hz"];
+                    r.edt = (double) rb["edt"];
+                    r.t20 = (double) rb["t20"];
+                    r.t30 = (double) rb["t30"];
+                    r.c50 = (double) rb["c50"];
+                    r.inrDb = (double) rb["inr"];
+                    r.edtOk = (bool) rb["edtOk"];
+                    r.t20Ok = (bool) rb["t20Ok"];
+                    r.t30Ok = (bool) rb["t30Ok"];
+                    q.reverb.push_back (r);
+                }
             q.note = e["note"].toString();
             p.points.push_back (std::move (q));
         }
