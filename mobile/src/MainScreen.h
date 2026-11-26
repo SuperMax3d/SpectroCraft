@@ -26,6 +26,7 @@
 #include "IconButton.h"
 #include "InputPane.h"
 #include "ScreenLayout.h"
+#include "SoundMapPane.h"
 #include "SpectrogramPane.h"
 #include "Splitter.h"
 #include "VideoPane.h"
@@ -58,13 +59,21 @@ public:
 
     /** The audio device came up (or changed): refresh the input-dependent panes. */
     void audioReady (const juce::String& error);
-    /** App going to the background (iOS / Android). */
+    /** App going to the background (iOS / Android), and back. */
     void suspended();
-    /** Opens a panel (0 Files, 1 Analyse, 2 Generate, 3 Calibrate, 4 Input, 5 Edit). */
+    void resumed();
+    /** Opens a panel (0 Files, 1 Analyse, 2 Generate, 3 Calibrate, 4 Input, 5 Edit, 6 Map). */
     void showTab (int t);
     /** Development hook: the analysis mode (0 FFT Linear, 1 FFT Log, 2 1/3 octave). */
     void setAnalysisMode (int m) { analysisPane->setMode (m); }
     void showPreciseAt (float fx, float fy) { spectrogram.showPreciseAt (fx, fy); }
+    /** Development hook: a sound map folder in the Map tab, in a mode (0 View, 1 Survey, 2 Measure). */
+    void showSoundMap (const juce::File& folder, int mode)
+    {
+        showTab (screen::Map);
+        soundMapPane->openMap (folder);
+        soundMapPane->setModeForTest (mode);
+    }
 
 private:
     enum class Layout { Both, Waveform, Spectrogram };
@@ -72,8 +81,9 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
     void toggleRecord();
-    void startRecording();
-    void stopRecording();
+    /** saveTo: the take's file (empty: a new recording); withVideo: film too when the Video button is on. */
+    bool startRecording (const juce::File& saveTo = {}, bool withVideo = true);
+    juce::File stopRecording();
     void togglePlay();
     void stopPlayback();
     void toggleVideo();
@@ -84,6 +94,16 @@ private:
     void updateTransport();
     void documentReplaced();
     void zoomToSelection();
+    /** The Map tab's camera (MainScreen keeps the one camera for both users). */
+    void setMapCamera (bool on, std::function<void (juce::String)> done);
+    /** The Map tab takes the whole screen below the top bar (phone and tablet). */
+    bool mapFullScreen() const noexcept
+    {
+        return screen::isTablet (form) ? tablet.panelsVisible && tablet.tab[0] == screen::Map
+                                       : panelOpen && currentTab == screen::Map;
+    }
+    /** Shows or hides what the full-screen Map tab covers. */
+    void showMapFullScreen (bool full);
     juce::Component* tabContent (int t);
     /** Shows the panels the form and the state ask for, and their tabs. */
     void applyPanels();
@@ -126,6 +146,8 @@ private:
     std::unique_ptr<CalibrationPane> calibrationPane;
     std::unique_ptr<InputPane> inputPane;
     std::unique_ptr<EditPane> editPane;
+    std::unique_ptr<SoundMapPane> soundMapPane;
+    bool mapCamera = false;   // the Map tab uses the camera (its preview is the pane's)
     juce::OwnedArray<juce::TextButton> tabButtons;
     int currentTab = screen::Analysis;   // phone: the panel shown
     bool panelOpen = true;               // phone: tap the shown tab again to hide it

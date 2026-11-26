@@ -156,11 +156,19 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   files free of `Application` / view includes: the UI halves live in `AxisScaleApp.cpp` and the views.
   Phone or tablet layout (smaller side >= 600 points: two panel groups as in the desktop's left column)
   and the hardware keyboard's shortcuts: `mobile/src/ScreenLayout.{h,cpp}` (no components, tested),
-  applied by `MainScreen::layoutPhone` / `layoutTablet`.
-  Files written by the app: `videoTracks[].relFile` (resolved next to the WAV, `sc::resolveVideoTracks`)
-  and `storedPlots` (carried by the desktop). Crash reports (Sentry) and statistics (PostHog) live in
+  applied by `MainScreen::layoutPhone` / `layoutTablet`. Numbers are typed on the app's number pad
+  (`mobile/src/TouchControls.h`: `TouchSlider`, `NumberField`), never in a `TextEditor` (the system keyboard).
+  Files written by the app: `videoTracks[].relFile` (resolved next to the WAV, `sc::resolveVideoTracks`),
+  `storedPlots` and `soundMapPoint` (a take's position in its sound map; both carried by the desktop). Crash reports (Sentry) and statistics (PostHog) live in
   `mobile/src/Telemetry*`, compiled in only with keys (`SC_SENTRY_DSN`, `SC_POSTHOG_KEY`); never send
   file names, paths or device names in events or error texts. Details: `mobile/README.md`.
+- Sound map (mobile Map tab: positions of takes from printed AprilTag markers, a level map per band): the headless
+  geometry / survey / levels / files in `mobile/src/soundmap/` (`Sm*`, namespace `scm::smap`; the detector is the
+  vendored `extern/apriltag`, library `sc_apriltag`), the tab in `mobile/src/SoundMapPane.*` and `SoundMapView.*`;
+  MainScreen owns the camera and the takes (`setMapCamera`, `startRecording (saveTo, withVideo)`). The vendored
+  JUCE iOS camera carries SPECTROCRAFT PATCHes for stills (UI-orientation rotation, largest still size, JPEG
+  quality 1). Behaviour, field procedure and precision: `docs/sound-map.md`; tests `mobile/tests/SoundMapTests.cpp`
+  (`SC_SOUNDMAP_STUDY=1` prints the precision table, `SC_SOUNDMAP_DEMO=<folder>` writes a demo map).
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as
   a garbage glyph. Use `...` in menus, or `juce::String::fromUTF8 (u8"…")` when a real

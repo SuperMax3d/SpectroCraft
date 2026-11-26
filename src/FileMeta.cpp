@@ -411,6 +411,8 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
         root->setProperty ("soundModel", b.soundModel);
     if (b.storedPlots.isArray() && b.storedPlots.size() > 0)
         root->setProperty ("storedPlots", b.storedPlots);
+    if (b.soundMapPoint.isObject())
+        root->setProperty ("soundMapPoint", b.soundMapPoint);
 
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
@@ -636,6 +638,10 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
     if (out.haveStoredPlots)
         out.storedPlots = p.getWithDefault ("storedPlots", juce::var());
 
+    out.haveSoundMapPoint = p.contains ("soundMapPoint");
+    if (out.haveSoundMapPoint)
+        out.soundMapPoint = p.getWithDefault ("soundMapPoint", juce::var());
+
     out.haveScale = p.contains ("scale");
     if (const auto* scaleObj = p.getWithDefault ("scale", juce::var()).getDynamicObject())
     {
@@ -823,6 +829,7 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     b.tablesMode   = unifiedB.haveTables       ? unifiedB.tablesMode   : scmdB.tablesMode;
     b.soundModel   = unifiedB.haveSoundModel   ? unifiedB.soundModel   : scmdB.soundModel;
     b.storedPlots  = unifiedB.haveStoredPlots  ? unifiedB.storedPlots  : scmdB.storedPlots;
+    b.soundMapPoint = unifiedB.haveSoundMapPoint ? unifiedB.soundMapPoint : scmdB.soundMapPoint;
 
     // The cue/adtl payloads are sample-based: the file's rate is needed both to
     // READ them and to REBUILD them below.

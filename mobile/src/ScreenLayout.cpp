@@ -12,12 +12,12 @@ Form formFor (juce::Rectangle<int> safeArea)
 
 int groupOf (int tab)
 {
-    return tab == Files || tab == Analysis ? 0 : 1;
+    return tab == Files || tab == Analysis || tab == Map ? 0 : 1;
 }
 
 const std::vector<int>& tabsOfGroup (int group)
 {
-    static const std::vector<int> upper { Files, Analysis };
+    static const std::vector<int> upper { Files, Analysis, Map };
     static const std::vector<int> lower { Edit, Generator, Calibrate, Input };
     return group == 0 ? upper : lower;
 }

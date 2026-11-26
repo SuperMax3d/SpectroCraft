@@ -29,9 +29,9 @@
 namespace scm::screen
 {
 /** The panels. The numbers are saved in the settings: keep them. */
-enum Tab { Files = 0, Analysis, Generator, Calibrate, Input, Edit, NumTabs };
+enum Tab { Files = 0, Analysis, Generator, Calibrate, Input, Edit, Map, NumTabs };
 /** Phone: the tab bar, left to right. */
-inline constexpr int kPhoneTabOrder[NumTabs] = { Files, Edit, Analysis, Generator, Calibrate, Input };
+inline constexpr int kPhoneTabOrder[NumTabs] = { Files, Edit, Analysis, Generator, Calibrate, Input, Map };
 
 enum class Form { Phone, TabletLandscape, TabletPortrait };
 
@@ -42,8 +42,9 @@ constexpr int kTabletMinSide = 600;
 Form formFor (juce::Rectangle<int> safeArea);
 inline bool isTablet (Form f) noexcept { return f != Form::Phone; }
 
-/** Tablet: the group a panel belongs to (0: Files | Analyse, 1: Edit |
-    Generate | Calibrate | Input) and the tabs of a group, in strip order. */
+/** Tablet: the group a panel belongs to (0: Files | Analyse | Map, 1: Edit |
+    Generate | Calibrate | Input) and the tabs of a group, in strip order. The
+    Map tab, when shown, takes the screen below the top bar (MainScreen). */
 int groupOf (int tab);
 const std::vector<int>& tabsOfGroup (int group);
 

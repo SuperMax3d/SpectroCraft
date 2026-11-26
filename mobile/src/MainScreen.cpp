@@ -123,6 +123,19 @@ MainScreen::MainScreen (AppContext& c)
     calibrationPane = std::make_unique<CalibrationPane> (ctx);
     inputPane = std::make_unique<InputPane> (ctx);
     editPane = std::make_unique<EditPane> (ctx);
+    soundMapPane = std::make_unique<SoundMapPane> (ctx);
+    soundMapPane->startTake = [this] (const juce::File& f) { return ! ctx.recorder.isRecording() && startRecording (f, false); };
+    soundMapPane->stopTake = [this] { return stopRecording(); };
+    soundMapPane->useCamera = [this] (bool on, std::function<void (juce::String)> done) { setMapCamera (on, std::move (done)); };
+    soundMapPane->openTake = [this] (const juce::File& f)
+    {
+        if (ctx.recorder.isRecording()) { showMessage ("Sound map", "Stop the recording first."); return; }
+        juce::String err;
+        if (ctx.document.hasUnsavedChanges() && ctx.document.file() != juce::File()) ctx.document.save (err);
+        if (! ctx.document.open (f, err)) { showMessage ("Sound map", err); return; }
+        if (filesPane) filesPane->refresh();
+        selectTab (screen::Analysis);
+    };
     inputPane->onInputChanged = [this] { calibrationPane->refresh(); };
     editPane->onChannelChanged = [this] (int ch) { waveform.setChannel (ch); spectrogram.setChannel (ch); };
     editPane->onLogFrequencyChanged = [this] (bool log) { spectrogram.setLogFrequency (log); };
@@ -144,7 +157,7 @@ MainScreen::MainScreen (AppContext& c)
         showMessage ("Crop", "The selection is now a new recording: " + f.getFileNameWithoutExtension() + ".");
     };
 
-    const char* names[] = { "Files", "Analyse", "Generate", "Calibrate", "Input", "Edit" };
+    const char* names[] = { "Files", "Analyse", "Generate", "Calibrate", "Input", "Edit", "Map" };
     for (int t = 0; t < screen::NumTabs; ++t)
     {
         auto* b = tabButtons.add (new juce::TextButton (names[t]));
@@ -190,6 +203,18 @@ MainScreen::MainScreen (AppContext& c)
 
 MainScreen::~MainScreen()
 {
+    // the pane first, while the rest of the screen is whole (it releases its camera through us)
+    if (soundMapPane != nullptr)
+    {
+        soundMapPane->useCamera = nullptr;
+        soundMapPane->startTake = nullptr;
+        soundMapPane->stopTake = nullptr;
+        soundMapPane->openTake = nullptr;
+        removeChildComponent (soundMapPane.get());
+        soundMapPane.reset();
+    }
+    if (mapCamera && ! ctx.video.isRecording()) ctx.video.close();
+    mapCamera = false;
     stopTimer();
     ctx.document.removeChangeListener (this);
     ctx.document.onAboutToReplace = nullptr;
@@ -209,8 +234,14 @@ void MainScreen::audioReady (const juce::String& error)
     updateTransport();
 }
 
+void MainScreen::resumed()
+{
+    if (soundMapPane) soundMapPane->resumed();
+}
+
 void MainScreen::suspended()
 {
+    if (soundMapPane) soundMapPane->suspended();   // releases the Map's camera
     // Recording continues in the background (UIBackgroundModes audio); the
     // generator and playback stop.
     if (! ctx.recorder.isRecording())
@@ -301,7 +332,7 @@ void MainScreen::toggleRecord()
     else startRecording();
 }
 
-void MainScreen::startRecording()
+bool MainScreen::startRecording (const juce::File& saveTo, bool withVideoIfOn)
 {
     if (ctx.document.hasUnsavedChanges() && ctx.document.file() != juce::File())
     {
@@ -309,17 +340,18 @@ void MainScreen::startRecording()
         ctx.document.save (err);   // keep the edits of the open file before the new take
     }
     stopPlayback();
-    const int mode = modeBox.getSelectedId();
+    // a map take is always one unlimited take of the map's length (not the REC mode box's loop)
+    const int mode = saveTo != juce::File() ? 1 : modeBox.getSelectedId();
     ctx.recorder.setMode (mode == 1 ? Recorder::Mode::Unlimited : Recorder::Mode::Loop, (double) mode);
     juce::String err;
     const auto cal = ctx.currentInputCalibration();
-    if (! ctx.recorder.start (cal.toScale(), err))
+    if (! ctx.recorder.start (cal.toScale(), err, saveTo))
     {
         telemetry::reportError ("recording: could not start");
         showMessage ("Recording", err);
-        return;
+        return false;
     }
-    const bool withVideo = videoButton.getToggleState() && ctx.video.isOpen();
+    const bool withVideo = withVideoIfOn && videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera;
     if (withVideo)
         ctx.video.start (VideoCapture::movieFileFor (ctx.recorder.targetFile()));
     reviewMovie = false;
@@ -334,9 +366,10 @@ void MainScreen::startRecording()
     ctx.view.setRange (0.0, mode == 1 ? 10.0 : (double) mode);
     analysisPane->setLive (true);
     updateTransport();
+    return true;
 }
 
-void MainScreen::stopRecording()
+juce::File MainScreen::stopRecording()
 {
     juce::File movie;
     if (ctx.video.isRecording()) movie = ctx.video.stop();
@@ -366,11 +399,15 @@ void MainScreen::stopRecording()
         telemetry::reportError ("recording: the take could not be saved");
         showMessage ("Recording", err);
     }
-    if (! videoButton.getToggleState() && ctx.video.isOpen())
+    if (! videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera)
         ctx.video.close();   // Video was turned off during the take: the filming ends with it
+                             // (not the Map tab's camera: it takes the picture after the take)
     if (filesPane) filesPane->refresh();
     updateTransport();
     refreshVideo();
+    if (saved != juce::File() && err.isNotEmpty())
+        showMessage ("Recording", err);   // saved elsewhere than planned
+    return saved;
 }
 
 void MainScreen::togglePlay()
@@ -422,14 +459,14 @@ void MainScreen::toggleVideo()
                 videoButton.setToggleState (false, juce::dontSendNotification);
                 showMessage ("Video", err);
             }
-            refreshVideo();
+            refreshVideo();   // the preview, unless the Map tab shows it
         });
     }
     else if (! ctx.video.isRecording())
     {
         // The preview goes now; the camera stops a moment later (VideoCapture::close).
         videoPane.setLive (nullptr);
-        ctx.video.close();
+        if (! mapCamera) ctx.video.close();   // the Map tab keeps the camera it uses
     }
     refreshVideo();
 }
@@ -439,15 +476,44 @@ void MainScreen::refreshVideo()
     const bool rec = ctx.recorder.isRecording();
     const auto movie = ctx.document.linkedVideo();
     videoPane.setMovie (! rec && movie.existsAsFile() ? movie : juce::File(), ctx.document.linkedVideoOffset());
-    videoPane.setLive (videoButton.getToggleState() && ctx.video.isOpen() ? ctx.video.preview() : nullptr);
+    // the camera's preview is the Map tab's while it uses the camera
+    videoPane.setLive (videoButton.getToggleState() && ctx.video.isOpen() && ! mapCamera ? ctx.video.preview() : nullptr);
     videoPane.setPreferMovie (reviewMovie);
     videoPane.setFilming (ctx.video.isRecording());
-    const bool show = videoPane.hasContent();
+    const bool show = videoPane.hasContent() && ! mapFullScreen();
     if (show != videoPane.isVisible())
     {
         videoPane.setVisible (show);
         resized();
     }
+}
+
+void MainScreen::setMapCamera (bool on, std::function<void (juce::String)> done)
+{
+    if (on)
+    {
+        mapCamera = true;
+        refreshVideo();   // the Map tab shows the preview now
+        juce::Component::SafePointer<MainScreen> safe (this);
+        ctx.video.open ([safe, done] (juce::String err)
+        {
+            if (safe == nullptr) return;
+            if (err.isEmpty() && ! safe->mapCamera)   // released while it opened (the Video button kept it)
+            {
+                if (! safe->videoButton.getToggleState() && ! safe->ctx.video.isRecording()) safe->ctx.video.close();
+                err = "Cancelled.";
+            }
+            if (done) done (err);
+        });
+        return;
+    }
+    mapCamera = false;
+    // The Video button keeps the camera (an open still under way answers it);
+    // otherwise it goes.
+    if (! videoButton.getToggleState() && ! ctx.video.isRecording())
+        ctx.video.close();
+    refreshVideo();   // the Video button's preview comes back
+    if (done) done ({});
 }
 
 void MainScreen::updateTransport()
@@ -497,6 +563,7 @@ juce::Component* MainScreen::tabContent (int t)
         case screen::Calibrate: return calibrationPane.get();
         case screen::Input:     return inputPane.get();
         case screen::Edit:      return editPane.get();
+        case screen::Map:       return soundMapPane.get();
         default:                return nullptr;
     }
 }
@@ -504,7 +571,10 @@ juce::Component* MainScreen::tabContent (int t)
 bool MainScreen::panelShown (int t) const
 {
     if (screen::isTablet (form))
+    {
+        if (mapFullScreen()) return t == screen::Map;   // the other group is under the map
         return tablet.panelsVisible && tablet.tab[screen::groupOf (t)] == t;
+    }
     return panelOpen && t == currentTab;
 }
 
@@ -524,8 +594,8 @@ void MainScreen::applyPanels()
     }
     for (auto* b : { &panelsButton, &undoButton, &redoButton }) b->setVisible (isTablet);
     panelsButton.setToggleState (tablet.panelsVisible, juce::dontSendNotification);
-    panelsSplitter.setVisible (isTablet && tablet.panelsVisible);
-    groupSplitter.setVisible (isTablet && tablet.panelsVisible);
+    panelsSplitter.setVisible (isTablet && tablet.panelsVisible && ! mapFullScreen());
+    groupSplitter.setVisible (isTablet && tablet.panelsVisible && ! mapFullScreen());
     if (panelShown (screen::Input)) inputPane->refresh();
 }
 
@@ -687,7 +757,7 @@ void MainScreen::setLayout (Layout l)
 void MainScreen::paint (juce::Graphics& g)
 {
     g.fillAll (style::appBackground);
-    if (! screen::isTablet (form) || ! tablet.panelsVisible) return;
+    if (! screen::isTablet (form) || ! tablet.panelsVisible || mapFullScreen()) return;
     // the panel groups, framed like the desktop's docked groups: a tab strip
     // on a darker bar above each panel
     for (int i = 0; i < 2; ++i)
@@ -739,6 +809,18 @@ void MainScreen::layoutPhone (juce::Rectangle<int> r)
     }
     title.setBounds (top);
 
+    // the Map tab: everything below the top bar but the tabs
+    const bool full = mapFullScreen() && soundMapPane != nullptr;
+    showMapFullScreen (full);
+    if (full)
+    {
+        auto tabsRow = r.removeFromBottom (style::kTouch).reduced (2, 2);
+        const int tw = tabsRow.getWidth() / screen::NumTabs;
+        for (int tab : screen::kPhoneTabOrder) tabButtons[tab]->setBounds (tabsRow.removeFromLeft (tw).reduced (1, 0));
+        soundMapPane->setBounds (r);
+        return;
+    }
+
     juce::Rectangle<int> panelArea, tabsArea;
     if (landscape)
     {
@@ -788,6 +870,19 @@ void MainScreen::layoutTablet (juce::Rectangle<int> r)
     top.removeFromRight (style::kGap);
     title.setBounds (top);
 
+    // the Map tab: everything below the top bar, every tab in one row under it
+    const bool full = mapFullScreen() && soundMapPane != nullptr;
+    showMapFullScreen (full);
+    if (full)
+    {
+        auto area = r.withTrimmedTop (frame.topBar.getBottom() - r.getY());
+        auto tabsRow = area.removeFromBottom (style::kTouch).reduced (3, 3);
+        const int tw = std::min (140, tabsRow.getWidth() / (int) screen::NumTabs);
+        for (int tab : screen::kPhoneTabOrder) tabButtons[tab]->setBounds (tabsRow.removeFromLeft (tw).reduced (1, 0));
+        soundMapPane->setBounds (area);
+        return;
+    }
+
     // the two panel groups, each with its tab strip (tabs from the left, as
     // on the desktop)
     for (int g = 0; g < 2; ++g)
@@ -807,6 +902,16 @@ void MainScreen::layoutTablet (juce::Rectangle<int> r)
 
     layoutTransport (frame.transport.reduced (style::kGap, 3), frame.transportSingleRow);
     layoutViews (frame.views);
+}
+
+void MainScreen::showMapFullScreen (bool full)
+{
+    for (auto* c : std::initializer_list<juce::Component*> { &recordButton, &playButton, &stopButton, &videoButton,
+                                                            &modeBox, &timeLabel, &meter })
+        c->setVisible (! full);
+    waveform.setVisible (! full && layout != Layout::Spectrogram);
+    spectrogram.setVisible (! full && layout != Layout::Waveform);
+    videoPane.setVisible (! full && videoPane.hasContent());
 }
 
 void MainScreen::layoutTransport (juce::Rectangle<int> tr, bool singleRow)
