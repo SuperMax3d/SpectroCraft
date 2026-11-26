@@ -279,6 +279,39 @@ public:
         expect (rangeFor (in) == juce::Range<double> (1.0, 3.0));
         in.live = true;
         expect (rangeFor (in) == juce::Range<double> (9.0, 10.0));
+        beginTest ("#79: a pinch zooms about the fingers and pans with them");
+        {
+            // zoom x2 about the middle of a linear axis
+            auto r = zoomAxis (0.0, 1000.0, 0.5, 0.5, 2.0, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.first, 250.0, 1e-9);
+            expectWithinAbsoluteError (r.second, 750.0, 1e-9);
+            // the value under the fingers follows them (pan without zoom)
+            r = zoomAxis (200.0, 600.0, 0.5, 0.75, 1.0, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.first + 0.75 * (r.second - r.first), 400.0, 1e-9);
+            // log axis: 100 Hz - 10 kHz (a ratio of 100) shrunk log2 (100) times
+            // is one octave, still centred on 1 kHz
+            r = zoomAxis (100.0, 10000.0, 0.5, 0.5, std::log2 (100.0), true, 5.0, 24000.0, 1.5);
+            expectWithinAbsoluteError (std::sqrt (r.first * r.second), 1000.0, 1e-6);
+            expectWithinAbsoluteError (r.second / r.first, 2.0, 1e-6);
+            // limits: never past the bounds, never narrower than the minimum
+            r = zoomAxis (0.0, 1000.0, 0.0, 0.0, 0.1, false, 0.0, 1000.0, 10.0);
+            expect (r.first >= 0.0 && r.second <= 1000.0);
+            r = zoomAxis (0.0, 1000.0, 0.5, 0.5, 1.0e6, false, 0.0, 1000.0, 10.0);
+            expectWithinAbsoluteError (r.second - r.first, 10.0, 1e-9);
+            r = zoomAxis (0.0, 1000.0, 0.5, 0.0, 1.0, false, 0.0, 1000.0, 10.0);   // dragged past the start
+            expectEquals (r.first, 0.0);
+        }
+
+        beginTest ("#79: the stored curve's level at a frequency (bands and spectrum)");
+        {
+            const std::vector<double> bf { 100.0, 125.0, 160.0 }, bdb { -10.0, -20.0, -30.0 };
+            expect (valueAt (bf, bdb, 126.0, true) == -20.0);
+            expect (! valueAt (bf, bdb, 1000.0, true).has_value(), "outside every band");
+            const std::vector<double> sf { 10.0, 20.0, 30.0 }, sdb { 0.0, -10.0, -20.0 };
+            expectWithinAbsoluteError (*valueAt (sf, sdb, 25.0, false), -15.0, 1e-9);
+            expect (! valueAt (sf, sdb, 40.0, false).has_value());
+            expect (! valueAt ({}, {}, 40.0, false).has_value());
+        }
     }
 };
 

@@ -30,6 +30,12 @@ juce::var GeneratorSettings::toVar() const
     o->setProperty ("sweepRepeat", sweepRepeat);
     o->setProperty ("noise", (int) noise);
     o->setProperty ("slope", slopeDbPerOctave);
+    if (! customDb.empty())
+    {
+        juce::Array<juce::var> pts;
+        for (float v : customDb) pts.add ((double) v);
+        o->setProperty ("customDb", pts);
+    }
     o->setProperty ("lowHz", lowHz);
     o->setProperty ("highHz", highHz);
     return juce::var (o);
@@ -49,9 +55,33 @@ GeneratorSettings GeneratorSettings::fromVar (const juce::var& v)
     s.sweepRepeat = (bool) v.getProperty ("sweepRepeat", s.sweepRepeat);
     s.noise = (Noise) juce::jlimit (0, 3, (int) v.getProperty ("noise", (int) s.noise));
     s.slopeDbPerOctave = juce::jlimit (-12.0, 12.0, (double) v.getProperty ("slope", s.slopeDbPerOctave));
+    if (const auto* pts = v.getProperty ("customDb", {}).getArray(); pts != nullptr && pts->size() == kCustomBands)
+        for (const auto& p : *pts)
+            s.customDb.push_back ((float) juce::jlimit (-60.0, 20.0, (double) p));
     s.lowHz = juce::jlimit (1.0, 96000.0, (double) v.getProperty ("lowHz", s.lowHz));
     s.highHz = juce::jlimit (1.0, 96000.0, (double) v.getProperty ("highHz", s.highHz));
     return s;
+}
+
+double GeneratorSettings::customGainDb (double f) const noexcept
+{
+    if ((int) customDb.size() != kCustomBands || f <= 0.0)
+        return f > 0.0 ? slopeDbPerOctave * std::log2 (f / 1000.0) : 0.0;
+    // band index as a continuous position (third octaves from band 0)
+    const double pos = 3.0 * std::log2 (f / customBandHz (0));
+    if (pos <= 0.0) return customDb.front();
+    if (pos >= kCustomBands - 1) return customDb.back();
+    const int i = (int) pos;
+    const double t = pos - i;
+    return customDb[(size_t) i] + t * (customDb[(size_t) i + 1] - customDb[(size_t) i]);
+}
+
+std::vector<float> GeneratorSettings::curveForSlope (double slope)
+{
+    std::vector<float> c;
+    for (int i = 0; i < kCustomBands; ++i)
+        c.push_back ((float) juce::jlimit (-60.0, 20.0, slope * std::log2 (customBandHz (i) / 1000.0)));
+    return c;
 }
 
 juce::String GeneratorSettings::describe() const
@@ -70,7 +100,8 @@ juce::String GeneratorSettings::describe() const
             static const char* names[] = { "White", "Pink", "Brown", "Custom" };
             juce::String s = juce::String (names[(int) noise]) + " noise";
             if (noise == Noise::Custom)
-                s << " " << juce::String (slopeDbPerOctave, 1) << " dB/oct";
+                s << ((int) customDb.size() == kCustomBands ? juce::String (" (drawn response)")
+                                                           : " " + juce::String (slopeDbPerOctave, 1) + " dB/oct");
             return s + ", " + juce::String (lowHz, 0) + "-" + juce::String (highHz, 0) + " Hz, " + lvl;
         }
     }
@@ -113,6 +144,8 @@ void SignalSource::prepare (double sampleRate)
     phase = 0.0;
     sweepT = 0.0;
     sweepDone.store (false);
+    gainNow = -1.0;
+    freqStarted = false;
     // Force a new noise shape for this rate.
     shape.clear();
     applyPending();
@@ -127,11 +160,12 @@ void SignalSource::applyPending() noexcept
     cur = pending;
     pendingDirty.store (false);
 
-    gainLin = std::pow (10.0, cur.levelDb / 20.0);   // RMS amplitude
+    gainLin = std::pow (10.0, cur.levelDb / 20.0);   // RMS amplitude (gainNow moves to it)
 
     const bool kindChanged = prev.kind != cur.kind;
     if (kindChanged)
     {
+        freqStarted = false;   // a new signal starts at its frequency
         phase = 0.0;
         sweepT = 0.0;
         sweepDone.store (false);
@@ -146,7 +180,7 @@ void SignalSource::applyPending() noexcept
     }
     if (cur.kind == GeneratorSettings::Kind::Noise
         && (kindChanged || shape.empty() || prev.noise != cur.noise
-            || prev.slopeDbPerOctave != cur.slopeDbPerOctave
+            || prev.slopeDbPerOctave != cur.slopeDbPerOctave || prev.customDb != cur.customDb
             || prev.lowHz != cur.lowHz || prev.highHz != cur.highHz))
         buildNoiseShape();
 }
@@ -186,12 +220,19 @@ void SignalSource::renderBlock (float* out, int n) noexcept
 
 void SignalSource::renderTone (float* out, int n) noexcept
 {
-    const double amp = gainLin * juce::MathConstants<double>::sqrt2;   // RMS -> peak
-    const double f = juce::jlimit (0.0, rate * 0.5, cur.toneHz);
-    const double inc = juce::MathConstants<double>::twoPi * f / rate;
+    const double target = std::log (juce::jlimit (1.0, rate * 0.5, cur.toneHz));
+    if (! freqStarted) { logFreqNow = target; freqStarted = true; }
+    const double ga = smoothCoef (kGainTau), fa = smoothCoef (kFreqTau);
+    const bool gliding = std::abs (logFreqNow - target) > 1e-7;
+    double inc = juce::MathConstants<double>::twoPi * std::exp (logFreqNow) / rate;
     for (int i = 0; i < n; ++i)
     {
-        out[i] = (float) (amp * std::sin (phase));
+        if (gliding)
+        {
+            logFreqNow += (target - logFreqNow) * fa;   // glide in log frequency
+            inc = juce::MathConstants<double>::twoPi * std::exp (logFreqNow) / rate;
+        }
+        out[i] = (float) (nextGain (ga) * juce::MathConstants<double>::sqrt2 * std::sin (phase));   // RMS -> peak
         phase += inc;
         if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
     }
@@ -199,7 +240,7 @@ void SignalSource::renderTone (float* out, int n) noexcept
 
 void SignalSource::renderSweep (float* out, int n) noexcept
 {
-    const double amp = gainLin * juce::MathConstants<double>::sqrt2;
+    const double ga = smoothCoef (kGainTau);
     const double f0 = juce::jlimit (1.0, rate * 0.5, cur.sweepStartHz);
     const double f1 = juce::jlimit (1.0, rate * 0.5, cur.sweepEndHz);
     const double T = std::max (0.01, cur.sweepSeconds);
@@ -213,7 +254,7 @@ void SignalSource::renderSweep (float* out, int n) noexcept
         }
         const double x = sweepT / T;
         const double f = cur.sweepLog ? f0 * std::pow (f1 / f0, x) : f0 + (f1 - f0) * x;
-        out[i] = (float) (amp * std::sin (phase));
+        out[i] = (float) (nextGain (ga) * juce::MathConstants<double>::sqrt2 * std::sin (phase));
         phase += juce::MathConstants<double>::twoPi * f * dt;
         if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
         sweepT += dt;
@@ -234,12 +275,14 @@ void SignalSource::buildNoiseShape()
     const double lo = std::max (binHz, std::min (cur.lowHz, cur.highHz));
     const double hi = std::min (rate * 0.5 - binHz, std::max (cur.lowHz, cur.highHz));
     const double expo = cur.effectiveSlope() / (20.0 * std::log10 (2.0));   // dB/oct -> power of f
+    const bool drawn = cur.noise == GeneratorSettings::Noise::Custom
+                       && (int) cur.customDb.size() == GeneratorSettings::kCustomBands;
     double sumSq = 0.0;
     for (int k = 1; k < half; ++k)
     {
         const double f = k * binHz;
         if (f < lo || f > hi) continue;
-        const double h = std::pow (f / 1000.0, expo);
+        const double h = drawn ? std::pow (10.0, cur.customGainDb (f) / 20.0) : std::pow (f / 1000.0, expo);
         shape[(size_t) k] = (float) h;
         sumSq += h * h;
     }
@@ -292,11 +335,11 @@ void SignalSource::renderNoise (float* out, int n) noexcept
         return;
     }
     const int half = kFftSize / 2;
-    const float g = (float) gainLin;
+    const double ga = smoothCoef (kGainTau);
     for (int i = 0; i < n; ++i)
     {
         if (readyPos >= half) synthesiseNoiseBlock();
-        out[i] = g * ready[(size_t) readyPos++];
+        out[i] = (float) nextGain (ga) * ready[(size_t) readyPos++];
     }
 }
 } // namespace scm

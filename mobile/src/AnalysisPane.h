@@ -79,13 +79,25 @@ private:
     int serial = 0;
     bool live = false;
     bool dirty = true;
-    double fLo = 20.0, fHi = 20000.0;
+    double fLo = 20.0, fHi = 20000.0;      // FFT Log's frequency range (a pinch zooms it)
+    double linLo = 0.0, linHi = 20000.0;   // FFT Linear's
     /** The log axis' range: fLo..fHi, or in 1/3 octave the span of the bands
         that hold data (the lowest bands are empty for short regions). */
     std::pair<double, double> logRange() const;
     double dbTop = 0.0, dbRange = 100.0;
+    bool zoomedY = false;      // a pinch set the level range: no automatic range
+    /** The level range that fits the curves (the default, and a double tap). */
+    void autoLevelRange();
+    void resetZoom();
+    double nyquistHz() const;
+
+    // touch (issue #79): one finger places the readout, which stays until the
+    // next tap; two fingers zoom and pan (frequency on the FFT plots, level
+    // on all); a double tap resets the zoom.
+    GestureTracker gestures;
     bool cursorOn = false;
-    juce::Point<float> cursor;
+    double cursorFreq = 1000.0;
+    double pinchLo = 0, pinchHi = 0, pinchTop = 0, pinchRange = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AnalysisPane)
 };

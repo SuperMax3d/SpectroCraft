@@ -199,7 +199,8 @@ namespace sc::measures
     std::vector<float> thirdOctaveRefBands (const AudioEngine& eng, int ch,
                                             double t0, double t1, int order,
                                             const ProgressFn& progress = {},
-                                            int* framesUsed = nullptr);
+                                            int* framesUsed = nullptr,
+                                            int maxFrames = kRefThirdOctMaxFrames);
 
     struct ThirdOctaveParams
     {
@@ -208,6 +209,8 @@ namespace sc::measures
         std::vector<int> channels;
         Mode mode = Mode::Reference;
         int order = 40;                // Reference: one of 1,2,3,4,5,10,20,30,40
+        int maxFrames = kRefThirdOctMaxFrames;   // Reference: frames averaged at most (spread
+                                                 // evenly over a longer region; the mobile app asks fewer)
         int fftSize = 2048;            // Iec only
         int windowType = Hann;         // Iec only
     };
