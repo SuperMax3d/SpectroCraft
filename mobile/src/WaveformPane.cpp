@@ -20,8 +20,9 @@ WaveformPane::WaveformPane (MobileDocument& d, TimeViewport& v) : document (d), 
         document.setSelection ({});
         document.setPlayhead (view.xToTime (at.x, plotArea()));
     };
-    gestures.onDoubleTap = [this] (juce::Point<float>) { view.showAll(); ampZoom = 1.0f; autoAmp = false; repaint(); };
-    gestures.onPinchStart = [this] { pinchT0 = view.start(); pinchT1 = view.end(); pinchAmp = ampZoom; };
+    gestures.onDoubleTap = [this] (juce::Point<float>) { view.showAll(); };
+    // the amplitude is always Auto (paint): a pinch zooms the time only
+    gestures.onPinchStart = [this] { pinchT0 = view.start(); pinchT1 = view.end(); };
     gestures.onPinch = [this] (const GestureTracker::Pinch& p)
     {
         const auto plot = plotArea();
@@ -31,12 +32,6 @@ WaveformPane::WaveformPane (MobileDocument& d, TimeViewport& v) : document (d), 
         const double anchorT = pinchT0 + (p.startMid.x - plot.getX()) / std::max (1.0f, plot.getWidth()) * span0;
         const double nowRel = (p.mid.x - plot.getX()) / std::max (1.0f, plot.getWidth());
         view.setRange (anchorT - nowRel * span, anchorT - nowRel * span + span);
-        if (p.startDy > 40.0f && p.dy > 1.0f)
-        {
-            ampZoom = juce::jlimit (1.0f, 1000.0f, pinchAmp * p.dy / p.startDy);
-            autoAmp = false;
-            repaint();
-        }
     };
 }
 
@@ -127,20 +122,19 @@ void WaveformPane::paint (juce::Graphics& g)
     const auto plot = plotArea();
     const float mid = plot.getCentreY(), half = plot.getHeight() * 0.5f - 2.0f;
 
-    // The visible columns first: Auto sets the zoom from their peak.
+    // The visible columns first: the amplitude scale is always Auto, set
+    // from their peak (no other choice).
     auto* doc = document.doc();
     const bool haveAudio = doc != nullptr && doc->engine.isFileLoaded();
+    ampZoom = 1.0f;
     if (haveAudio)
     {
         columnRanges (doc->engine, juce::jlimit (0, doc->engine.numChannels() - 1, chan),
                       view.start(), view.end(), (int) plot.getWidth(), lo, hi);
-        if (autoAmp)
-        {
-            float peak = 0.0f;
-            for (size_t i = 0; i < lo.size(); ++i)
-                peak = std::max ({ peak, std::abs (lo[i]), std::abs (hi[i]) });
-            ampZoom = peak > 1e-6f ? juce::jlimit (1.0f, 1000.0f, 0.92f / peak) : 1.0f;
-        }
+        float peak = 0.0f;
+        for (size_t i = 0; i < lo.size(); ++i)
+            peak = std::max ({ peak, std::abs (lo[i]), std::abs (hi[i]) });
+        ampZoom = peak > 1e-6f ? juce::jlimit (1.0f, 1000.0f, 0.92f / peak) : 1.0f;
     }
 
     // grid: 0, -6, -12 ... dB
@@ -225,12 +219,6 @@ void WaveformPane::drawAmplitudeAxis (juce::Graphics& g, juce::Rectangle<float> 
     g.setFont (style::font (10.0f));
     g.drawText (pa ? "Pa" : "dBFS", juce::Rectangle<float> (2.0f, plot.getBottom() - 14.0f, (float) kAxisW - 6.0f, 12.0f),
                 juce::Justification::centredRight);
-    if (autoAmp)
-    {
-        g.setColour (style::selectionEdge);
-        g.drawText ("AUTO", juce::Rectangle<float> (2.0f, plot.getBottom() - 26.0f, (float) kAxisW - 6.0f, 12.0f),
-                    juce::Justification::centredRight);
-    }
 }
 
 std::vector<float> WaveformPane::tickLevels (float halfHeight) const
@@ -248,25 +236,6 @@ std::vector<float> WaveformPane::tickLevels (float halfHeight) const
         if (levels.size() >= 6) break;
     }
     return levels;
-}
-
-void WaveformPane::showAxisMenu()
-{
-    juce::PopupMenu m;
-    m.addSectionHeader ("Amplitude scale");
-    m.addItem (1, "Auto", true, autoAmp);
-    m.addItem (2, "Full scale", true, ! autoAmp && ampZoom == 1.0f);
-    juce::Component::SafePointer<WaveformPane> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
-                         .withTargetScreenArea (localAreaToGlobal (plotArea().withX (0).withWidth ((float) kAxisW).toNearestInt())),
-                     [safe] (int r)
-    {
-        if (safe == nullptr || r == 0) return;
-        if (r == 1) safe->autoAmp = ! safe->autoAmp;
-        if (r == 2) { safe->autoAmp = false; safe->ampZoom = 1.0f; }
-        if (! safe->autoAmp && r == 1) safe->ampZoom = 1.0f;
-        safe->repaint();
-    });
 }
 
 void WaveformPane::drawRuler (juce::Graphics& g, juce::Rectangle<float> plot)
@@ -304,10 +273,9 @@ void WaveformPane::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformPane::mouseUp (const juce::MouseEvent& e)
 {
-    if (axisPress)
+    if (axisPress)   // the scale has no menu: the amplitude is always Auto
     {
         axisPress = false;
-        if (e.position.x < kAxisW && e.getDistanceFromDragStart() < 12) showAxisMenu();
         return;
     }
     gestures.mouseUp (e);
@@ -316,13 +284,6 @@ void WaveformPane::mouseUp (const juce::MouseEvent& e)
 void WaveformPane::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
     const double factor = std::pow (1.25, (double) w.deltaY * 4.0);
-    if (e.mods.isShiftDown())
-    {
-        ampZoom = juce::jlimit (1.0f, 1000.0f, ampZoom * (float) factor);
-        autoAmp = false;
-        repaint();
-    }
-    else
-        view.zoom (view.xToTime (e.position.x, plotArea()), factor);
+    view.zoom (view.xToTime (e.position.x, plotArea()), factor);
 }
 } // namespace scm
