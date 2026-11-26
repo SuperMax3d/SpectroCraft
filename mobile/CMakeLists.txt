@@ -70,6 +70,7 @@ set (SC_ENGINE_SOURCES
     ${SC_ROOT}/src/Measures.cpp
     ${SC_ROOT}/src/Resampler.cpp
     ${SC_ROOT}/src/RiffInfo.cpp
+    ${SC_ROOT}/src/RoomAcoustics.cpp
     ${SC_ROOT}/src/SavedSelections.cpp
     ${SC_ROOT}/src/ScttChunk.cpp
     ${SC_ROOT}/src/Session.cpp
@@ -309,6 +310,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "And
         tests/MicCompensationTests.cpp
         src/MicCompensation.cpp
         tests/SoundMapTests.cpp
+        tests/RoomAcousticsTests.cpp
         ${SC_SOUNDMAP_SOURCES}
         src/SignalSource.cpp
         src/StoredPlots.cpp

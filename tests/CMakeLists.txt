@@ -37,6 +37,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/MainToolbar.cpp   # the toolbar in the menu bar row (issue #43)
         ${CMAKE_SOURCE_DIR}/src/FileDialogs.cpp   # system file dialogs everywhere (issue #71)
         ${CMAKE_SOURCE_DIR}/src/SoundModel.cpp    # Model panel: sound model analysis / rendering (issue #40)
+        ${CMAKE_SOURCE_DIR}/src/RoomAcoustics.cpp # reverberation: impulse response from a sweep, decay per band (no UI)
         ${CMAKE_SOURCE_DIR}/src/ApplicationModel.cpp   # Model panel: actions on the active file (issue #40)
         ${CMAKE_SOURCE_DIR}/src/ModelPanel.cpp    # Model panel UI (issue #40)
         ${CMAKE_SOURCE_DIR}/src/RiffInfo.cpp   # WAV text metadata: LIST/INFO + DISP (issue #67)
