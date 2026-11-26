@@ -1,4 +1,5 @@
 #include "Recorder.h"
+#include <cmath>
 #include "LiveAudio.h"
 #include "MobileDocument.h"
 
@@ -30,12 +31,18 @@ double Recorder::elapsed() const
     return rate > 0.0 ? (double) plan.written / rate : 0.0;
 }
 
+juce::Time Recorder::fileStartTime() const noexcept
+{
+    const double dropped = rate > 0.0 ? (double) plan.droppedAtStop() / rate : 0.0;
+    return juce::Time (firstFrameWall.toMilliseconds() + (juce::int64) std::llround (dropped * 1000.0));
+}
+
 double Recorder::writeHeadSeconds() const
 {
     return rate > 0.0 ? (double) plan.writePos() / rate : 0.0;
 }
 
-bool Recorder::start (const ScaleCalibration& cal, juce::String& error)
+bool Recorder::start (const ScaleCalibration& cal, juce::String& error, const juce::File& saveTo)
 {
     if (recording) return true;
     if (! audio.isOpen()) { error = "The microphone is not available."; return false; }
@@ -52,7 +59,9 @@ bool Recorder::start (const ScaleCalibration& cal, juce::String& error)
     plan = {};
     plan.capacity = recMode == Mode::Loop ? std::min<int64_t> ((int64_t) (loopSecs * rate), capFrames) : 0;
     firstFrameWall = {};
-    target = MobileDocument::newRecordingFile();
+    customTarget = saveTo != juce::File();
+    target = customTarget ? saveTo : MobileDocument::newRecordingFile();
+    if (saveTo != juce::File()) saveTo.getParentDirectory().createDirectory();
     recording = true;
     audio.setCapturing (true);
     startTimerHz (30);
@@ -147,6 +156,17 @@ juce::File Recorder::stop (juce::String& error, std::function<void()> beforeSave
     {
         const auto file = target != juce::File() ? target : MobileDocument::newRecordingFile();
         if (document.saveAs (file, error)) saved = file;
+        else if (customTarget)
+        {
+            // the chosen folder is gone or full: keep the take anyway
+            const auto fallback = MobileDocument::newRecordingFile();
+            juce::String err2;
+            if (document.saveAs (fallback, err2))
+            {
+                saved = fallback;
+                error = "The take could not be written where planned; it was saved as " + fallback.getFileName() + ".";
+            }
+        }
     }
     document.changed();
     return saved;

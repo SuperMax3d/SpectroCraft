@@ -4,13 +4,16 @@
 #pragma once
 #include <JuceHeader.h>
 #include "MobileDocument.h"
+#include "PreciseTouch.h"
 #include "TimeViewport.h"
 #include <atomic>
+#include <set>
 
 namespace scm
 {
 class SpectrogramPane : public juce::Component,
-                        private juce::ChangeListener
+                        private juce::ChangeListener,
+                        private juce::Timer
 {
 public:
     SpectrogramPane (MobileDocument&, TimeViewport&);
@@ -30,7 +33,17 @@ public:
 
     /** Frequency range shown (Hz); log or linear axis. */
     void setFrequencyRange (double lo, double hi);
+    /** The scale was set on purpose (its menu, or a double tap on it), not by a
+        pinch: the range to keep for the next files, until it is set again. */
+    std::function<void (double lo, double hi)> onFrequencyScaleChosen;
     void setLogFrequency (bool log);
+    /** Development hook: the precision reticle at (fx, fy), fractions of the plot. */
+    void showPreciseAt (float fx, float fy)
+    {
+        const auto p = plotArea();
+        fingerNow = { p.getX() + fx * p.getWidth(), p.getY() + fy * p.getHeight() };
+        enterPrecise();
+    }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -38,6 +51,7 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void visibilityChanged() override;
 
     static constexpr int kAxisW = 44;
     static constexpr int kRulerH = 22;
@@ -54,6 +68,31 @@ private:
     };
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override;
+
+    // Precision touch (PreciseTouch.h): a finger held still (~0.45 s) shows a
+    // magnifier above it and a readout, and moves a reticle 4x slower than
+    // itself. Held at the start of a touch it places the playhead on release
+    // (Point); held while dragging a selection it moves the selection's edge
+    // (Edge). A finger put down again soon after a lift carries on (Edge from
+    // the playhead, or the same edge).
+    class Lens;
+    void enterPrecise();
+    void endPrecise();
+    /** The magnifier's place and readout, after the finger or the picture changed. */
+    void updateLens();
+    void paintLens (juce::Graphics&, juce::Point<int> lensOrigin);
+    void drawReticle (juce::Graphics&, juce::Rectangle<float> plot);
+    juce::String readoutText() const;
+    precise::Tracker fine;             // the precision touch's state
+    std::unique_ptr<Lens> lens;        // on the screen, above the other views
+    precise::Placement lensPlace;      // in the lens host's coordinates
+    juce::String lensText;
+    std::set<int> touches;             // fingers down on the plot
+    juce::Point<float> fingerNow, stillAt;
+    juce::uint32 stillSinceMs = 0;
+    bool dragging = false;             // a one-finger selection drag is under way
+    double dragFromTime = 0.0;         // its fixed end
     juce::Rectangle<float> plotArea() const;
     double nyquist() const;
     double yToFreq (double y) const;
@@ -63,6 +102,11 @@ private:
     void drawFrequencyAxis (juce::Graphics&, juce::Rectangle<float> plot);
     void drawRuler (juce::Graphics&, juce::Rectangle<float> plot);
     void zoomFrequency (double anchorHz, double factor);
+    /** Tap on the frequency scale: minimum / maximum frequency, full range. */
+    void showAxisMenu();
+    /** Asks for the minimum (or maximum) frequency in Hz, on the number pad. */
+    void askFrequency (bool minimum);
+    void chooseFrequencyRange (double lo, double hi);
 
     MobileDocument& document;
     TimeViewport& view;
@@ -77,6 +121,8 @@ private:
     double fLo = 20.0, fHi = 20000.0;
     bool logAxis = true;
     double writeHead = -1.0;
+    bool axisPress = false;   // the current touch started on the scale
+    int axisTapSerial = 0;    // a second tap cancels the first one's menu
 
     // pinch start state
     double pinchT0 = 0, pinchT1 = 0, pinchFLo = 0, pinchFHi = 0;

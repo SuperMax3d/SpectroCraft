@@ -28,6 +28,8 @@ public:
     /** Live mode while recording: analyse the newest second, a few times a second. */
     void setLive (bool live);
     void contentChanged();
+    /** 0 FFT Linear, 1 FFT Log, 2 1/3 octave. */
+    void setMode (int mode) { modeBox.setSelectedId (juce::jlimit (0, 2, mode) + 1, juce::sendNotificationSync); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -78,6 +80,9 @@ private:
     bool live = false;
     bool dirty = true;
     double fLo = 20.0, fHi = 20000.0;
+    /** The log axis' range: fLo..fHi, or in 1/3 octave the span of the bands
+        that hold data (the lowest bands are empty for short regions). */
+    std::pair<double, double> logRange() const;
     double dbTop = 0.0, dbRange = 100.0;
     bool cursorOn = false;
     juce::Point<float> cursor;

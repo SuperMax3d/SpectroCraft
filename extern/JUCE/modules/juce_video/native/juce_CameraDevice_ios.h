@@ -406,12 +406,22 @@ private:
 
             if (--numCaptureSessions == 0)
             {
+                // SPECTROCRAFT PATCH: do not hold the message thread while the
+                // session stops. stopRunning needs the main run loop (the
+                // preview layer), so waiting for it here blocked the app until
+                // AVFoundation's own timeout, about 10 s on iOS 26 / 27. Wait
+                // only for the blocks queued before this one (they use `this`),
+                // then stop a retained session on the queue.
+                AVCaptureSession* session = [captureSession.get() retain];
+
                 dispatch_async (captureSessionQueue, ^
                                 {
-                                    if (captureSession.get().running)
-                                        [captureSession.get() stopRunning];
+                                    sessionClosedEvent.signal();   // `this` is not used after this line
 
-                                    sessionClosedEvent.signal();
+                                    if (session.running)
+                                        [session stopRunning];
+
+                                    [session release];
                                 });
 
                 sessionClosedEvent.wait (-1);
@@ -662,9 +672,39 @@ private:
                     auto* photoOutput = (AVCapturePhotoOutput*) captureOutput;
                     auto outputConnection = [photoOutput connectionWithMediaType: AVMediaTypeVideo];
 
-                    ifelse_17_0<CaptureLayerAngleTrait> (captureSession.cameraDevice, captureSession.previewLayer, outputConnection);
+                    // SPECTROCRAFT PATCH: stills are turned upright for the UI's
+                    // orientation, as on iOS < 17 and on Android, instead of by
+                    // gravity (iOS 17+ rotation coordinator): the sound map maps the
+                    // phone's body frame to the picture through
+                    // Desktop::getCurrentOrientation, which is the UI's orientation.
+                    applyDeviceOrientation (captureSession.cameraDevice, captureSession.previewLayer, outputConnection);
 
-                    [photoOutput capturePhotoWithSettings: [AVCapturePhotoSettings photoSettings]
+                    auto* settings = [AVCapturePhotoSettings photoSettings];
+
+                    // SPECTROCRAFT PATCH: the largest still the active format offers
+                    // (about 4K at the same field of view as the 1080p video format)
+                    // instead of the default, the smallest; the sound map's markers
+                    // are small in the picture.
+                    if (@available (iOS 16.0, *))
+                    {
+                        CMVideoDimensions best = photoOutput.maxPhotoDimensions;
+
+                        for (NSValue* value in captureSession.cameraDevice.activeFormat.supportedMaxPhotoDimensions)
+                        {
+                            CMVideoDimensions d {};
+                            [value getValue: &d size: sizeof (d)];
+
+                            if ((int64) d.width * d.height > (int64) best.width * best.height)
+                                best = d;
+                        }
+
+                        if (best.width != photoOutput.maxPhotoDimensions.width || best.height != photoOutput.maxPhotoDimensions.height)
+                            photoOutput.maxPhotoDimensions = best;
+
+                        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions;
+                    }
+
+                    [photoOutput capturePhotoWithSettings: settings
                                                  delegate: id<AVCapturePhotoCaptureDelegate> (photoOutputDelegate.get())];
                 }
                 else
@@ -790,7 +830,9 @@ private:
                                    auto* uiImage = getImageWithCorrectOrientation ((CGImagePropertyOrientation) imageOrientation.unsignedIntValue,
                                    [capturePhoto CGImageRepresentation]);
 
-                                   auto* imageData = UIImageJPEGRepresentation (uiImage, 0.f);
+                                   // SPECTROCRAFT PATCH: best JPEG quality (was 0, the strongest
+                                   // compression, whose 8x8 blocks blur the sound map's markers)
+                                   auto* imageData = UIImageJPEGRepresentation (uiImage, 1.f);
 
                                    auto image = ImageFileFormat::loadFrom (imageData.bytes, (size_t) imageData.length);
 

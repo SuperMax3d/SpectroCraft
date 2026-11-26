@@ -38,6 +38,10 @@ struct LoopPlan
     /** Frames to rotate left at stop so the file starts with the oldest frame
         (0 when the window never wrapped). */
     int64_t rotationAtStop() const noexcept { return full() ? written % capacity : 0; }
+
+    /** Frames received before the file's first frame: what a wrapped loop
+        dropped (0 when it never wrapped, or when unlimited). */
+    int64_t droppedAtStop() const noexcept { return full() ? written - capacity : 0; }
 };
 
 /** Rotates every channel left by `k` frames (std::rotate). */

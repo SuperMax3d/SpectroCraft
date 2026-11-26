@@ -26,11 +26,14 @@ public:
     Mode mode() const noexcept { return recMode; }
     double loopSeconds() const noexcept { return loopSecs; }
 
-    /** Starts a new take in a new document. */
-    bool start (const ScaleCalibration& cal, juce::String& error);
+    /** Starts a new take in a new document, to be saved to `saveTo` (its
+        folder is created) or, when empty, to a new file of the recordings
+        folder. */
+    bool start (const ScaleCalibration& cal, juce::String& error, const juce::File& saveTo = {});
     /** Stops, rotates a wrapped loop, calls `beforeSave` (to attach metadata
         such as the video link) and saves to targetFile(); returns the saved
-        file (or {}). */
+        file (or {}). When a chosen target cannot be written, the take goes to
+        a new file of the recordings folder instead (and `error` says so). */
     juce::File stop (juce::String& error, std::function<void()> beforeSave = {});
     /** The WAV the take will be saved to (chosen at start). */
     juce::File targetFile() const { return target; }
@@ -46,6 +49,10 @@ public:
     /** Wall-clock time of the first recorded frame: lines a video up with
         the audio (CameraDevice reports its first frame the same way). */
     juce::Time firstFrameTime() const noexcept { return firstFrameWall; }
+    /** Wall-clock time of the saved file's first frame: later than
+        firstFrameTime() when a loop wrapped (the file keeps the last N
+        seconds). Valid after stop(). */
+    juce::Time fileStartTime() const noexcept;
 
     /** Moves the captured frames into the document now (the timer does it at
         30 Hz; tests call it directly). */
@@ -69,6 +76,7 @@ private:
     int64_t capFrames = 0;
     juce::Time firstFrameWall;
     juce::File target;
+    bool customTarget = false;
     std::vector<float> chunk;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Recorder)

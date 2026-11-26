@@ -21,10 +21,6 @@ FilesPane::FilesPane (AppContext& c) : ctx (c)
     list.setRowHeight (52);
     list.setColour (juce::ListBox::backgroundColourId, style::panelBackground);
     addAndMakeVisible (list);
-    privacy.setToggleState (telemetry::enabled(), juce::dontSendNotification);
-    privacy.onClick = [this] { telemetry::setEnabled (privacy.getToggleState()); };
-    privacy.setVisible (telemetry::available());
-    addChildComponent (privacy);
     ctx.document.addChangeListener (this);
     refresh();
 }
@@ -37,11 +33,25 @@ FilesPane::~FilesPane()
 
 void FilesPane::changeListenerCallback (juce::ChangeBroadcaster*)
 {
+    // A new recording or crop is not in the list yet: list the folder again,
+    // once per file. A file that stays out of the list (opened from elsewhere,
+    // deleted) must not list it on every change.
+    const auto f = ctx.document.file();
+    if (f != juce::File() && f != listedFor && ! files.contains (f))
+    {
+        listedFor = f;
+        refresh();
+        return;
+    }
+    updateStatus();
+}
+
+void FilesPane::updateStatus()
+{
     current.setText (ctx.document.displayName() + (ctx.document.hasUnsavedChanges() ? "  (not saved)" : ""),
                      juce::dontSendNotification);
     saveButton.setEnabled (ctx.document.hasAudio() && ! ctx.recorder.isRecording());
-    shareButton.setEnabled (ctx.document.file().existsAsFile());
-    if (ctx.document.file() != juce::File() && ! files.contains (ctx.document.file())) refresh();
+    shareButton.setEnabled (targetFile().existsAsFile());
 }
 
 void FilesPane::refresh()
@@ -55,7 +65,7 @@ void FilesPane::refresh()
     });
     list.updateContent();
     list.repaint();
-    changeListenerCallback (nullptr);
+    updateStatus();   // not changeListenerCallback: it can call refresh()
 }
 
 int FilesPane::getNumRows() { return files.size(); }
@@ -77,6 +87,11 @@ void FilesPane::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
     g.drawText (info, 10, 28, w - 20, 18, juce::Justification::centredLeft);
     g.setColour (style::border);
     g.drawHorizontalLine (h - 1, 0.0f, (float) w);
+}
+
+void FilesPane::selectedRowsChanged (int)
+{
+    shareButton.setEnabled (targetFile().existsAsFile());
 }
 
 void FilesPane::listBoxItemClicked (int row, const juce::MouseEvent&)
@@ -170,9 +185,16 @@ void FilesPane::saveCurrent()
     refresh();
 }
 
+juce::File FilesPane::targetFile() const
+{
+    const int row = list.getSelectedRow();
+    if (juce::isPositiveAndBelow (row, files.size())) return files[row];
+    return ctx.document.file();
+}
+
 void FilesPane::share()
 {
-    const auto f = ctx.document.file();
+    const auto f = targetFile();
     if (! f.existsAsFile()) return;
     juce::Array<juce::URL> urls { juce::URL (f) };
     const auto movie = VideoCapture::movieFileFor (f);
@@ -181,7 +203,7 @@ void FilesPane::share()
     shareBox = juce::ContentSharer::shareFilesScoped (urls, [] (bool ok, const juce::String& err)
     {
         if (! ok && err.isNotEmpty()) showMessage ("Share", err);
-    }, this);
+    }, &shareButton);   // the iPad's popover points at the button
 }
 
 void FilesPane::deleteSelected()
@@ -219,8 +241,6 @@ void FilesPane::resized()
         row.removeFromLeft (4);
     }
     r.removeFromTop (style::kGap);
-    if (privacy.isVisible())
-        privacy.setBounds (r.removeFromBottom (style::kTouch));
     list.setBounds (r);
 }
 } // namespace scm

@@ -31558,6 +31558,20 @@ static void testVideoTrackMetadata()
                "stored plots: written back by the desktop");
     }
 
+    // The mobile sound map: a take's position survives a desktop round trip.
+    {
+        sc::MetaBundle pb;
+        CHECK (sc::parseBundle (R"({"soundMapPoint":{"map":"site","point":12,"x":1.234,"y":-0.456,"z":-1.8,"unit":"m"}})", pb, nullptr)
+                   && pb.haveSoundMapPoint && pb.soundMapPoint.isObject(),
+               "sound map position: read");
+        FileDoc d5;
+        d5.applyBundle (pb);
+        sc::MetaBundle back;
+        CHECK (sc::parseBundle (juce::String (d5.buildScmdJson()), back, nullptr) && back.soundMapPoint.isObject()
+                   && std::abs ((double) back.soundMapPoint["x"] - 1.234) < 1e-9 && (int) back.soundMapPoint["point"] == 12,
+               "sound map position: written back by the desktop");
+    }
+
     // Load path (regression): videoTracks stored in the .meta.json sidecar or
     // embedded SCMD chunk must be restored when the document loads - they used
     // to be parsed but never applied, so saved tracks silently vanished.

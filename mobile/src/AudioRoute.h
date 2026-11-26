@@ -29,6 +29,28 @@ std::vector<Input> availableInputs();
 juce::String currentInputId();
 /** Prefers this input; false when the system refused it. */
 bool selectInput (const juce::String& id);
+/** The input to use by default whenever it is plugged in: Shure's MVX2U (XLR to
+    USB), found by name ("MVX2U", "Shure MVX2U", "MVX2U Gen 2"...); -1 when it
+    is not in `names`. */
+inline int preferredInputIndex (const juce::StringArray& names)
+{
+    for (int i = 0; i < names.size(); ++i)
+        if (names[i].toUpperCase().retainCharacters ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789").contains ("MVX2U"))
+            return i;
+    return -1;
+}
+
 /** Note shown next to a Bluetooth input. */
 juce::String bluetoothNote();
+
+/** iOS: true when the audio session is not in measurement mode yet. Setting
+    the mode is a synchronous call to the audio server that can block the main
+    thread for seconds, so it is made only when needed. Elsewhere: true. */
+bool measurementModeNeeded();
+
+/** Where the sound plays (speaker, AirPods, AirPlay...), e.g. "AirPods Pro". */
+juce::String currentOutputName();
+/** iOS: the system's output picker (AVRoutePickerView: speaker, AirPods,
+    AirPlay). nullptr where outputs are AudioDeviceManager devices. */
+std::unique_ptr<juce::Component> createOutputPicker();
 } // namespace scm::route

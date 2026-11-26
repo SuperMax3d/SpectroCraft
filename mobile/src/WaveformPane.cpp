@@ -20,8 +20,9 @@ WaveformPane::WaveformPane (MobileDocument& d, TimeViewport& v) : document (d), 
         document.setSelection ({});
         document.setPlayhead (view.xToTime (at.x, plotArea()));
     };
-    gestures.onDoubleTap = [this] (juce::Point<float>) { view.showAll(); ampZoom = 1.0f; repaint(); };
-    gestures.onPinchStart = [this] { pinchT0 = view.start(); pinchT1 = view.end(); pinchAmp = ampZoom; };
+    gestures.onDoubleTap = [this] (juce::Point<float>) { view.showAll(); };
+    // the amplitude is always Auto (paint): a pinch zooms the time only
+    gestures.onPinchStart = [this] { pinchT0 = view.start(); pinchT1 = view.end(); };
     gestures.onPinch = [this] (const GestureTracker::Pinch& p)
     {
         const auto plot = plotArea();
@@ -31,11 +32,6 @@ WaveformPane::WaveformPane (MobileDocument& d, TimeViewport& v) : document (d), 
         const double anchorT = pinchT0 + (p.startMid.x - plot.getX()) / std::max (1.0f, plot.getWidth()) * span0;
         const double nowRel = (p.mid.x - plot.getX()) / std::max (1.0f, plot.getWidth());
         view.setRange (anchorT - nowRel * span, anchorT - nowRel * span + span);
-        if (p.startDy > 40.0f && p.dy > 1.0f)
-        {
-            ampZoom = juce::jlimit (1.0f, 256.0f, pinchAmp * p.dy / p.startDy);
-            repaint();
-        }
     };
 }
 
@@ -126,12 +122,26 @@ void WaveformPane::paint (juce::Graphics& g)
     const auto plot = plotArea();
     const float mid = plot.getCentreY(), half = plot.getHeight() * 0.5f - 2.0f;
 
-    // grid: 0, -6, -12 dB
+    // The visible columns first: the amplitude scale is always Auto, set
+    // from their peak (no other choice).
+    auto* doc = document.doc();
+    const bool haveAudio = doc != nullptr && doc->engine.isFileLoaded();
+    ampZoom = 1.0f;
+    if (haveAudio)
+    {
+        columnRanges (doc->engine, juce::jlimit (0, doc->engine.numChannels() - 1, chan),
+                      view.start(), view.end(), (int) plot.getWidth(), lo, hi);
+        float peak = 0.0f;
+        for (size_t i = 0; i < lo.size(); ++i)
+            peak = std::max ({ peak, std::abs (lo[i]), std::abs (hi[i]) });
+        ampZoom = peak > 1e-6f ? juce::jlimit (1.0f, 1000.0f, 0.92f / peak) : 1.0f;
+    }
+
+    // grid: 0, -6, -12 ... dB
     g.setColour (style::grid);
-    for (float a : { 1.0f, 0.5f, 0.25f })
+    for (float a : tickLevels (half))
     {
         const float y = a * ampZoom;
-        if (y > 1.0f) continue;
         g.drawHorizontalLine (juce::roundToInt (mid - y * half), plot.getX(), plot.getRight());
         g.drawHorizontalLine (juce::roundToInt (mid + y * half), plot.getX(), plot.getRight());
     }
@@ -147,13 +157,11 @@ void WaveformPane::paint (juce::Graphics& g)
         g.fillRect (juce::Rectangle<float> (a, plot.getY(), b - a, plot.getHeight()).getIntersection (plot));
     }
 
-    if (auto* d = document.doc(); d != nullptr && d->engine.isFileLoaded())
+    if (haveAudio)
     {
-        const int w = (int) plot.getWidth();
-        columnRanges (d->engine, juce::jlimit (0, d->engine.numChannels() - 1, chan),
-                      view.start(), view.end(), w, lo, hi);
+        const int w = (int) lo.size();
         g.setColour (style::waveform);
-        const double endX = view.timeToX (d->engine.duration(), plot);
+        const double endX = view.timeToX (doc->engine.duration(), plot);
         for (int x = 0; x < w && plot.getX() + x < endX; ++x)
         {
             const float y0 = mid - juce::jlimit (-1.0f, 1.0f, hi[(size_t) x] * ampZoom) * half;
@@ -192,10 +200,9 @@ void WaveformPane::drawAmplitudeAxis (juce::Graphics& g, juce::Rectangle<float> 
     const bool pa = cal.isCalibratedFor (chan) && cal.unit == ScaleCalibration::Unit::Pascal;
     const float mid = plot.getCentreY(), half = plot.getHeight() * 0.5f - 2.0f;
     g.setFont (style::font (11.0f));
-    for (float a : { 1.0f, 0.5f, 0.25f })
+    for (float a : tickLevels (half))
     {
         const float y = a * ampZoom;
-        if (y > 1.0f) continue;
         juce::String text;
         if (pa)
         {
@@ -212,6 +219,23 @@ void WaveformPane::drawAmplitudeAxis (juce::Graphics& g, juce::Rectangle<float> 
     g.setFont (style::font (10.0f));
     g.drawText (pa ? "Pa" : "dBFS", juce::Rectangle<float> (2.0f, plot.getBottom() - 14.0f, (float) kAxisW - 6.0f, 12.0f),
                 juce::Justification::centredRight);
+}
+
+std::vector<float> WaveformPane::tickLevels (float halfHeight) const
+{
+    std::vector<float> levels;
+    float lastY = 1e9f;
+    for (int k = 0; k <= 30; ++k)
+    {
+        const float a = std::pow (10.0f, -6.0f * (float) k / 20.0f);
+        const float y = a * ampZoom;
+        if (y > 1.0f) continue;
+        if ((lastY - y) * halfHeight < 18.0f) continue;
+        levels.push_back (a);
+        lastY = y;
+        if (levels.size() >= 6) break;
+    }
+    return levels;
 }
 
 void WaveformPane::drawRuler (juce::Graphics& g, juce::Rectangle<float> plot)
@@ -237,22 +261,29 @@ void WaveformPane::drawRuler (juce::Graphics& g, juce::Rectangle<float> plot)
 
 void WaveformPane::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.position.x < kAxisW) return;
+    axisPress = e.position.x < kAxisW && e.position.y > (showRuler ? kRulerH : 0);
+    if (axisPress) return;
     gestures.mouseDown (e);
 }
 
-void WaveformPane::mouseDrag (const juce::MouseEvent& e) { gestures.mouseDrag (e); }
-void WaveformPane::mouseUp (const juce::MouseEvent& e) { gestures.mouseUp (e); }
+void WaveformPane::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! axisPress) gestures.mouseDrag (e);
+}
+
+void WaveformPane::mouseUp (const juce::MouseEvent& e)
+{
+    if (axisPress)   // the scale has no menu: the amplitude is always Auto
+    {
+        axisPress = false;
+        return;
+    }
+    gestures.mouseUp (e);
+}
 
 void WaveformPane::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
     const double factor = std::pow (1.25, (double) w.deltaY * 4.0);
-    if (e.mods.isShiftDown())
-    {
-        ampZoom = juce::jlimit (1.0f, 256.0f, ampZoom * (float) factor);
-        repaint();
-    }
-    else
-        view.zoom (view.xToTime (e.position.x, plotArea()), factor);
+    view.zoom (view.xToTime (e.position.x, plotArea()), factor);
 }
 } // namespace scm

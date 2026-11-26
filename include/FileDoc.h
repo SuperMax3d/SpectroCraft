@@ -165,6 +165,10 @@ public:
     /** Stored analysis plots written by the mobile app (issue #73), kept as
         JSON and carried through saves (metadata key "storedPlots"). */
     juce::var storedPlots;
+    /** Where the recording was made, written by the mobile app's sound map
+        (metadata key "soundMapPoint": map, point, x, y, z, ...), carried
+        through saves. */
+    juce::var soundMapPoint;
 
     /** Replaces the table list (and optionally the display mode) and marks
         the document metadata-dirty. */

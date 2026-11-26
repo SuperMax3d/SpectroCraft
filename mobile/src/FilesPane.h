@@ -3,6 +3,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "AppContext.h"
+#include "IconButton.h"
 
 namespace scm
 {
@@ -24,20 +25,26 @@ private:
     int getNumRows() override;
     void paintListBoxItem (int row, juce::Graphics&, int w, int h, bool selected) override;
     void listBoxItemClicked (int row, const juce::MouseEvent&) override;
+    void selectedRowsChanged (int lastRowSelected) override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void updateStatus();   // the current file's name, Save and Share
     void openFromElsewhere();
     void share();
+    /** The file Share and Delete act on: the selected recording, else the open one. */
+    juce::File targetFile() const;
     void saveCurrent();
     void deleteSelected();
     void confirmDiscard (std::function<void()> then);
 
     AppContext& ctx;
     juce::Label current;
-    juce::TextButton openButton { "Open..." }, saveButton { "Save" }, shareButton { "Share" },
-                     deleteButton { "Delete" };
+    IconButton openButton { "Open a WAV file", IconButton::Icon::Open },
+               saveButton { "Save", IconButton::Icon::Save },
+               shareButton { "Share", IconButton::Icon::Share },
+               deleteButton { "Delete", IconButton::Icon::Delete };
     juce::ListBox list;
-    juce::ToggleButton privacy { "Send anonymous crash reports and usage statistics" };
     juce::Array<juce::File> files;
+    juce::File listedFor;   // the document file the folder was last listed for
     std::unique_ptr<juce::FileChooser> chooser;
     juce::ScopedMessageBox shareBox;
 };

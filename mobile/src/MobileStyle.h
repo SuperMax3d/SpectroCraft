@@ -48,5 +48,8 @@ public:
     juce::Font getPopupMenuFont() override;
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour& background,
                                bool highlighted, bool down) override;
+    /** A track that shows where to grab, and a thumb with grip lines (panels scroll by it). */
+    void drawScrollbar (juce::Graphics&, juce::ScrollBar&, int x, int y, int width, int height, bool vertical,
+                        int thumbStart, int thumbSize, bool over, bool down) override;
 };
 } // namespace scm::style

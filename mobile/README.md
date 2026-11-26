@@ -1,7 +1,7 @@
 # SpectroCraft Mobile
 
-The iOS and Android companion app (issue #73): record, see and measure sound on a phone, with the
-desktop's spectrogram, measurements and file format.
+The iOS and Android companion app (issue #73): record, see and measure sound on a phone or a tablet,
+with the desktop's spectrogram, measurements and file format.
 
 It is a JUCE app built from the desktop's own engine sources (`../src`: `AudioEngine`,
 `SpectralEngine`, `Measures`, `FileDoc`, `FileMeta`, ...) plus a touch UI in `mobile/src`, so the
@@ -11,15 +11,19 @@ picture, the levels and the WAV metadata are the desktop's. The desktop build do
 
 | | |
 |---|---|
-| Views | Waveform, spectrogram, or both (top bar W / S / W+S). Pinch to zoom (horizontal = time, vertical = frequency on the spectrogram, amplitude on the waveform), two fingers to pan, double tap to show all. One-finger drag selects a time range; a tap sets the playhead. |
+| Views | Waveform, spectrogram, or both (top bar W / S / W+S). Pinch to zoom (horizontal = time, vertical = frequency on the spectrogram), two fingers to pan, double tap to show all. The waveform's amplitude scale is always automatic: it fits the loudest part in view. One-finger drag selects a time range; a tap sets the playhead. On the spectrogram, a finger held still shows a magnifier above it (over the views above when the spectrogram is short) with the time, frequency and level, and moves a reticle 4x slower than itself: let go to place the playhead there. Put the finger down again within 1.5 s and it carries on as if it had not been lifted, selecting from the playhead to the reticle (or, after a held selection drag, moving the same edge), as many strokes as needed. A second finger goes back to pinch / pan. A tap on the frequency scale sets its minimum or maximum, or the full range (a double tap); the range set there is kept for the next files and launches until it is set again (a pinch only zooms the file on screen). |
 | Files | Open a WAV (the recordings list, or *Open...* for the Files app / the Android file picker), save, share (with its video), delete. Recordings go to the app's Documents folder (visible in the iOS Files app). |
 | Recording | *Unlimited* (until the memory limit shown next to the time, then the take is kept) or *Loop N s* (keeps the last N seconds; the saved file starts with the oldest sample). Every take is saved when it stops. |
-| Microphone | Built-in, USB or Bluetooth (*Input* tab), mono or stereo, sample rate. The input runs in measurement mode (no automatic gain or noise suppression). |
+| Microphone | Built-in, USB or Bluetooth (*Input* tab), mono or stereo, sample rate. The input runs in measurement mode (no automatic gain or noise suppression). A Shure MVX2U (XLR to USB) is chosen by default whenever it is plugged in (at launch, or when it is connected); another input picked while it stays plugged in is kept. |
 | Calibration | Per input (*Calibrate* tab): typed (the dB-SPL a full-scale signal stands for) or with an acoustic calibrator (default 1 kHz, 94 dB-SPL; any level and frequency can be typed). The calibration goes into every new recording, so the desktop shows it in dB-SPL. |
 | Analysis | *Analyse* tab: FFT Linear, FFT Log and 1/3 octave of the selection (the visible range when nothing is selected, the last second while recording), with RMS and peak, through the desktop's `sc::measures`. *Store* keeps the curve (8 slots); stored plots are saved in the file. |
+| Typing numbers | Values (generator, gain, calibration, frequency scale) are typed on the app's own number pad, which opens beside the value instead of the system keyboard; OK sets it, a tap elsewhere cancels. Sliders in a panel do not scroll it and do not jump when tapped; a panel scrolls from its labels or its scroll bar. |
 | Generator | *Generate* tab: manual tone, linear or log sweep (repeating or one-shot), white / pink / brown / custom noise (slope in dB/octave, band edges). It plays while recording. Level = RMS dBFS. |
 | Editing | *Edit* tab: delete the selection, change its gain (or the whole file's), undo / redo; display options (log / linear frequency, dB range, channel). |
-| Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. |
+| Video | *Video* films with the recording (picture only: the WAV is the sound). The movie is saved next to the WAV with the same name and listed in the WAV's metadata with its offset, so the desktop opens it with the recording. The picture gets its own part of the screen beside the waveform and spectrogram (a column for a portrait picture, a strip on top for a landscape one; a tap on its title row hides it). With *Video* on it shows the camera; *Play* shows the take's movie in step with the sound, and *Stop* goes back to the camera. A file opened with a movie shows it. |
+| Tablets | When the screen's smaller side is at least 600 points (every iPad, Android tablets), two panel groups show at once, as in the desktop's left column: *Files \| Analyse* and *Edit \| Generate \| Calibrate \| Input*, so the analysis stays in view while the generator, the calibration or the edit tools are open. Landscape: the groups stacked left of the views, the transport along the bottom. Portrait: the groups side by side under the views. Drag the bars between them to share the room (double tap: the default). The top bar's panel button hides the groups; *Undo* / *Redo* sit next to the view buttons. Phones keep one panel at a time. |
+| Keyboard | A hardware keyboard (iPad, Android tablet) gets the desktop's shortcuts, Cmd on iPad and Ctrl on Android: Space play / pause, Cmd+. stop, Shift+F10 record, Home / End, Cmd+A select all, Esc clear the selection, Delete, Cmd+Z undo, Cmd+Y or Cmd+Shift+Z redo, Cmd+S save, Cmd+= / Cmd+- / Cmd+0 zoom in / out / all, Cmd+Shift+Return show or hide the panels. |
+| Sound map | *Map* tab (the last tab; on a tablet it is in the first group and, open, takes the screen): takes at many points of a space with the position of each (x, y, z) from printed AprilTag markers seen by the camera, and a map of the levels per band. Survey the markers, measure points (countdown, picture, take, picture), view the top or side map. Tag sheets (PDF) and a periodic pink source signal from the menu. Procedure and precision: `docs/sound-map.md`. |
 
 ## Crash reports and statistics
 
@@ -31,21 +35,21 @@ When the build has keys (see *CI and store builds*), the app sends:
 - **usage statistics** to PostHog: events such as `recording_started` (mode, loop length, channels,
   sample rate, calibrated, video), `recording_stopped` (duration), `file_opened`, `calibration` (method,
   result code), `analysis_settings`, `plot_stored`, `generator_toggled`, `input_changed` (built-in /
-  USB / Bluetooth), `edit`, `video_enabled`. Each carries a random install id, the app version, the OS
+  USB / Bluetooth, chosen by hand or not), `edit`, `video_enabled`, `screen_form` (phone, tablet landscape or
+  portrait, once per launch), `tablet_panels`. Each carries a random install id, the app version, the OS
   and its version, and the phone model. PostHog keeps no person profile (`$process_person_profile`
   false).
 
 Never sent: audio, file names or paths, device names, location, account data.
 
-Both are on by default when compiled in. A notice at first launch says so, and *Files > Send anonymous
-crash reports and usage statistics* turns them off (and back on). A build without keys (local builds,
-pull requests from forks) contains neither and shows no toggle.
+Both are always on when compiled in: the app has no switch and no notice for them. A build without keys
+(local builds, pull requests from forks) contains neither.
 
 What to declare to the stores:
 
 - **Google Play, Data safety**: *App info and performance > Crash logs and Diagnostics*, and *App
-  activity > App interactions*: collected, not shared, processed ephemerally: no, optional: yes
-  (the user can turn it off), not linked to an identity.
+  activity > App interactions*: collected, not shared, processed ephemerally: no, optional: no
+  (the app has no switch), not linked to an identity.
 - **App Store, App Privacy**: *Diagnostics > Crash Data*, *Other Diagnostic Data*; *Usage Data >
   Product Interaction*: not linked to the user, not used for tracking.
 
@@ -84,8 +88,9 @@ Options: `-DSC_MOBILE_BUNDLE_ID=` (iOS bundle id / Android application id, defau
 `-PposthogHost=`).
 
 Desktop development hooks (macOS / Linux builds only): `SC_MOBILE_RECORDINGS=<folder>`,
-`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_SIZE=<w>x<h>`,
-`SC_MOBILE_SNAPSHOT=<png>` (writes the window after 2.5 s and quits).
+`SC_MOBILE_NO_AUDIO=1`, `SC_MOBILE_OPEN=<wav>`, `SC_MOBILE_TAB=<0..5>`, `SC_MOBILE_ANALYSIS=<0..2>`, `SC_MOBILE_PRECISE=<fx>,<fy>` (precision reticle), `SC_MOBILE_SIZE=<w>x<h>` (`1180x820`: an iPad in landscape),
+`SC_MOBILE_KEYS=<key>[;<key>...]` (keyboard shortcuts after 1 s, as `juce::KeyPress` descriptions such
+as `command + shift + return`), `SC_MOBILE_SNAPSHOT=<png>` (writes the window after 2.5 s and quits).
 
 ## CI and store builds
 
@@ -126,3 +131,7 @@ the code means a fork or a pull request never reports to them.
   2 hours mono at 48 kHz on a recent phone). The limit is shown while recording.
 - The video's offset comes from the clocks of the first audio and video frames (a few tens of ms).
 - Android 10 (API 29) or later: JUCE 9's Android font code needs it. iOS 16 or later.
+- iPad: full screen only (no Split View or Slide Over, `REQUIRES_FULL_SCREEN`): in multitasking iPadOS
+  stops the camera of an app that does not ask for multitasking camera access.
+- Sound map: the camera code (iOS still patch, Android stills) is compiled in CI but not yet tried on
+  a phone; Android stills are 1080p (iOS about 4K). See `docs/sound-map.md`, section 8.

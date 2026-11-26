@@ -4,6 +4,7 @@
 #define DONT_SET_USING_JUCE_NAMESPACE 1
 #include "AudioRoute.h"
 #import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
 
 namespace scm::route
 {
@@ -51,6 +52,41 @@ bool selectInput (const juce::String& id)
             return ok && err == nil;
         }
     return false;
+}
+
+bool measurementModeNeeded()
+{
+    return ! [[[AVAudioSession sharedInstance] mode] isEqualToString: AVAudioSessionModeMeasurement];
+}
+
+juce::String currentOutputName()
+{
+    for (AVAudioSessionPortDescription* p in [[AVAudioSession sharedInstance] currentRoute].outputs)
+        return str (p.portName);
+    return {};
+}
+
+namespace
+{
+/** AVRoutePickerView in a JUCE component: tapping it opens the system's
+    list of outputs (speaker, AirPods and other Bluetooth headphones, AirPlay). */
+class OutputPicker : public juce::UIViewComponent
+{
+public:
+    OutputPicker()
+    {
+        AVRoutePickerView* picker = [[AVRoutePickerView alloc] initWithFrame: CGRectMake (0, 0, 44, 44)];
+        picker.tintColor = [UIColor colorWithWhite: 0.87 alpha: 1.0];
+        picker.activeTintColor = [UIColor colorWithRed: 0.18 green: 0.45 blue: 0.85 alpha: 1.0];
+        picker.prioritizesVideoDevices = NO;
+        setView ((__bridge void*) picker);
+    }
+};
+} // namespace
+
+std::unique_ptr<juce::Component> createOutputPicker()
+{
+    return std::make_unique<OutputPicker>();
 }
 
 juce::String bluetoothNote()

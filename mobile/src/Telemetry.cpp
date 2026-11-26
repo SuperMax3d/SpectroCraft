@@ -154,7 +154,7 @@ void initialise (juce::PropertiesFile& props)
         s.distinctId = juce::Uuid().toDashedString();
         props.setValue ("telemetryId", s.distinctId);
     }
-    s.on.store (available() && props.getBoolValue ("telemetry", true));
+    s.on.store (available());
     if (s.on.load()) start();
 }
 
@@ -172,20 +172,10 @@ void setEnabled (bool on)
 {
     auto& s = state();
     on = on && available();
-    if (s.props != nullptr) s.props->setValue ("telemetry", on);
     if (on == s.on.load()) return;
     s.on.store (on);
     if (on) start();
     else stop();
-}
-
-bool takeFirstLaunchNotice()
-{
-    auto& s = state();
-    if (! available() || s.props == nullptr || s.props->getBoolValue ("telemetryNoticeShown", false))
-        return false;
-    s.props->setValue ("telemetryNoticeShown", true);
-    return true;
 }
 
 juce::var makeEvent (const juce::String& event, const juce::var& props, const juce::String& distinctId,

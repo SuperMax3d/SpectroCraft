@@ -54,10 +54,19 @@ public:
     void setSelection (juce::Range<double> r);
     double playhead() const noexcept { return head; }
     void setPlayhead (double t);
+    /** The playhead follows playback: no seek and no change message (the
+        views only repaint their cursor). */
+    void followPlayback (double t) noexcept { head = t; }
 
     // ---- edits (undoable)
     bool deleteSelection (juce::String& error);
     bool gainSelection (float db, juce::String& error);
+    /** Keeps only the selection (one undoable step). */
+    bool cropToSelection (juce::String& error);
+    /** Writes the selection to a new WAV in the recordings folder ("<name>
+        crop.wav", with this file's calibration) and returns it ({} on error).
+        The open document does not change. */
+    juce::File cropToNewFile (juce::String& error);
     bool canUndo() const;
     bool canRedo() const;
     bool undo();
@@ -71,6 +80,8 @@ public:
     // ---- video linked to the recording
     void linkVideo (const juce::File& movie, double offsetSecs);
     juce::File linkedVideo() const;
+    /** Document time of the linked video's first frame (0 without one). */
+    double linkedVideoOffset() const;
 
     /** Call after the stored plots change: they go into the metadata. */
     void plotsChanged();

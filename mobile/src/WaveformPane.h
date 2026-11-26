@@ -37,6 +37,9 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     juce::Rectangle<float> plotArea() const;
     void drawAmplitudeAxis (juce::Graphics&, juce::Rectangle<float> plot);
+    /** Grid levels (linear amplitude): 0, -6, -12 ... dB, those inside the
+        zoomed view and at least 18 px apart. */
+    std::vector<float> tickLevels (float halfHeight) const;
     void drawRuler (juce::Graphics&, juce::Rectangle<float> plot);
 
     MobileDocument& document;
@@ -45,7 +48,8 @@ private:
     bool showRuler = true;
     int chan = 0;
     double writeHead = -1.0;
-    float ampZoom = 1.0f, pinchAmp = 1.0f;
+    float ampZoom = 1.0f;     // always Auto: set by paint() from the visible peak
+    bool axisPress = false;   // the current touch started on the scale (ignored)
     double pinchT0 = 0, pinchT1 = 0;
     std::vector<float> lo, hi;
 

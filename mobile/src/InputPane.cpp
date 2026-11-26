@@ -8,7 +8,7 @@ namespace scm
 {
 InputPane::InputPane (AppContext& c) : ctx (c)
 {
-    for (auto* l : { &title, &status, &note, &channelsLabel, &rateLabel })
+    for (auto* l : { &title, &status, &note, &channelsLabel, &rateLabel, &outputLabel, &outputName })
     {
         l->setFont (style::font (15.0f));
         addAndMakeVisible (l);
@@ -39,6 +39,22 @@ InputPane::InputPane (AppContext& c) : ctx (c)
         refresh();
     };
     addAndMakeVisible (rateBox);
+
+    outputPicker = route::createOutputPicker();
+    if (outputPicker != nullptr)
+        addAndMakeVisible (*outputPicker);
+    else
+    {
+        outputBox.onChange = [this]
+        {
+            auto setup = ctx.audio.devices().getAudioDeviceSetup();
+            setup.outputDeviceName = outputBox.getText();
+            const auto err = ctx.audio.devices().setAudioDeviceSetup (setup, true);
+            if (err.isNotEmpty()) showMessage ("Output", err);
+            refresh();
+        };
+        addAndMakeVisible (outputBox);
+    }
     refresh();
 }
 
@@ -68,6 +84,18 @@ void InputPane::refresh()
         }
         currentId = ctx.audio.devices().getAudioDeviceSetup().inputDeviceName;
     }
+    // the MVX2U by default, once the microphone is open (the audio session is set up)
+    if (const int adapter = route::preferredInputIndex (names); adapter < 0)
+        adapterSeen = false;
+    else if (! adapterSeen && ctx.audio.isOpen())
+    {
+        adapterSeen = true;
+        if (ids[adapter] != currentId)
+        {
+            choose (adapter, false);   // lists the inputs again
+            return;
+        }
+    }
     for (int i = 0; i < names.size(); ++i)
     {
         auto* b = choices.add (new juce::TextButton (names[i]));
@@ -75,6 +103,17 @@ void InputPane::refresh()
         b->setToggleState (ids[i] == currentId, juce::dontSendNotification);
         b->onClick = [this, i] { choose (i); };
         addAndMakeVisible (b);
+    }
+
+    if (outputPicker != nullptr)
+        outputName.setText (route::currentOutputName(), juce::dontSendNotification);
+    else if (auto* type = ctx.audio.devices().getCurrentDeviceTypeObject())
+    {
+        outputBox.clear (juce::dontSendNotification);
+        int id = 1;
+        for (const auto& n : type->getDeviceNames (false))
+            outputBox.addItem (n, id++);
+        outputBox.setText (ctx.audio.devices().getAudioDeviceSetup().outputDeviceName, juce::dontSendNotification);
     }
 
     rateBox.clear (juce::dontSendNotification);
@@ -94,25 +133,25 @@ void InputPane::refresh()
     resized();
 }
 
-void InputPane::choose (int index)
+void InputPane::choose (int index, bool byUser)
 {
     if (! juce::isPositiveAndBelow (index, ids.size())) return;
     // Statistics get the kind of input only, never the device's name.
-    const auto label = choices[index]->getButtonText().toLowerCase();
+    const auto label = byUser ? choices[index]->getButtonText().toLowerCase() : juce::String ("usb");
     const juce::String kind = label.contains ("bluetooth") || label.contains ("sco") ? "bluetooth"
                             : label.contains ("usb") ? "usb"
                             : label.contains ("built-in") || label.contains ("builtin") || label.contains ("microphone") ? "built-in"
                             : label.contains ("wired") || label.contains ("headset") ? "wired" : "other";
-    telemetry::capture ("input_changed", { { "kind", kind } });
+    telemetry::capture ("input_changed", { { "kind", kind }, { "auto", ! byUser } });
     if (route::platformHasRoutes())
     {
-        if (! route::selectInput (ids[index]))
+        if (! route::selectInput (ids[index]) && byUser)
             showMessage ("Microphone", "The system did not switch to this input.");
     }
     else
     {
         const auto err = ctx.audio.selectInputDevice (ids[index], channelsBox.getSelectedId());
-        if (err.isNotEmpty()) showMessage ("Microphone", err);
+        if (err.isNotEmpty() && byUser) showMessage ("Microphone", err);
     }
     refresh();
     if (onInputChanged) onInputChanged();
@@ -139,6 +178,16 @@ void InputPane::resized()
     row = r.removeFromTop (style::kTouch);
     rateLabel.setBounds (row.removeFromLeft (110));
     rateBox.setBounds (row.removeFromLeft (140).reduced (0, 4));
+    row = r.removeFromTop (style::kTouch);
+    outputLabel.setBounds (row.removeFromLeft (110));
+    if (outputPicker != nullptr)
+    {
+        outputPicker->setBounds (row.removeFromLeft (style::kTouch));
+        row.removeFromLeft (style::kGap);
+        outputName.setBounds (row);
+    }
+    else
+        outputBox.setBounds (row.removeFromLeft (std::min (260, row.getWidth())).reduced (0, 4));
     status.setBounds (r.removeFromTop (24));
     note.setBounds (r.removeFromTop (std::min (r.getHeight(), 90)));
 }

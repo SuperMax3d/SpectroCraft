@@ -20,6 +20,20 @@ EditPane::EditPane (AppContext& c) : ctx (c)
         if (! ctx.document.deleteSelection (err)) showMessage ("Delete", err);
         else telemetry::capture ("edit", { { "op", "delete" } });
     };
+    cropButton.onClick = [this]
+    {
+        juce::String err;
+        if (! ctx.document.cropToSelection (err)) showMessage ("Crop", err);
+        else telemetry::capture ("edit", { { "op", "crop" } });
+    };
+    cropNewButton.onClick = [this]
+    {
+        juce::String err;
+        const auto f = ctx.document.cropToNewFile (err);
+        if (f == juce::File()) { showMessage ("Crop", err); return; }
+        telemetry::capture ("edit", { { "op", "crop_new" } });
+        if (onOpenFile) onOpenFile (f);
+    };
     undoButton.onClick = [this] { if (ctx.document.undo()) telemetry::capture ("edit", { { "op", "undo" } }); };
     redoButton.onClick = [this] { if (ctx.document.redo()) telemetry::capture ("edit", { { "op", "redo" } }); };
     gainButton.onClick = [this]
@@ -28,12 +42,9 @@ EditPane::EditPane (AppContext& c) : ctx (c)
         if (! ctx.document.gainSelection ((float) gain.getValue(), err)) showMessage ("Gain", err);
         else telemetry::capture ("edit", { { "op", "gain" } });
     };
-    gain.setSliderStyle (juce::Slider::LinearHorizontal);
-    gain.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 30);
-    gain.setRange (-40.0, 40.0, 0.1);
+    gain.setup ("Gain", -40.0, 40.0, 0.1, " dB", 1, 80);
     gain.setValue (-6.0, juce::dontSendNotification);
-    gain.setTextValueSuffix (" dB");
-    for (auto* comp : std::initializer_list<juce::Component*> { &selectAll, &zoomSel, &deleteButton, &undoButton,
+    for (auto* comp : std::initializer_list<juce::Component*> { &selectAll, &zoomSel, &deleteButton, &cropButton, &cropNewButton, &undoButton,
                                                                 &redoButton, &gainButton, &gain })
         content.addAndMakeVisible (comp);
 
@@ -58,8 +69,7 @@ EditPane::EditPane (AppContext& c) : ctx (c)
     for (auto* b : { &axisBox, &rangeBox, &channelBox }) content.addAndMakeVisible (b);
 
     viewport.setViewedComponent (&content, false);
-    viewport.setScrollBarsShown (true, false);
-    viewport.setScrollOnDragMode (juce::Viewport::ScrollOnDragMode::all);
+    setupScrolling (viewport);
     addAndMakeVisible (viewport);
 
     ctx.document.addChangeListener (this);
@@ -86,6 +96,8 @@ void EditPane::refresh()
     selectAll.setEnabled (audio);
     zoomSel.setEnabled (audio && ! s.isEmpty());
     deleteButton.setEnabled (audio && ! s.isEmpty());
+    cropButton.setEnabled (audio && ! s.isEmpty());
+    cropNewButton.setEnabled (audio && ! s.isEmpty());
     gainButton.setEnabled (audio);
     gainButton.setButtonText (s.isEmpty() ? "Gain (whole file)" : "Apply gain");
     undoButton.setEnabled (audio && ctx.document.canUndo());
@@ -109,13 +121,16 @@ void EditPane::paint (juce::Graphics& g)
 void EditPane::resized()
 {
     viewport.setBounds (getLocalBounds());
-    const int w = getWidth() - 12, x = style::kGap;
+    const int w = getWidth() - kScrollBarW - style::kGap, x = style::kGap;
     int y = style::kGap;
     selLabel.setBounds (x, y, w, 26); y += 30;
     const int third = (w - 8) / 3;
     selectAll.setBounds (x, y, third, style::kTouch);
     zoomSel.setBounds (x + third + 4, y, third, style::kTouch);
     deleteButton.setBounds (x + 2 * (third + 4), y, third, style::kTouch);
+    y += style::kTouch + 4;
+    cropButton.setBounds (x, y, third, style::kTouch);
+    cropNewButton.setBounds (x + third + 4, y, w - third - 4, style::kTouch);
     y += style::kTouch + 4;
     gain.setBounds (x, y, w - 150, style::kTouch);
     gainButton.setBounds (x + w - 146, y, 146, style::kTouch);
@@ -128,6 +143,6 @@ void EditPane::resized()
     rangeBox.setBounds (x + w / 2 + 2, y, w / 2 - 2, 38);
     y += 42;
     if (channelBox.isVisible()) { channelBox.setBounds (x, y, w / 2 - 2, 38); y += 42; }
-    content.setSize (getWidth() - 8, y + 6);
+    content.setSize (getWidth() - kScrollBarW, y + 6);
 }
 } // namespace scm

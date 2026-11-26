@@ -8,6 +8,10 @@ std::vector<Input> availableInputs() { return {}; }
 juce::String currentInputId() { return {}; }
 bool selectInput (const juce::String&) { return false; }
 
+bool measurementModeNeeded() { return true; }
+juce::String currentOutputName() { return {}; }
+std::unique_ptr<juce::Component> createOutputPicker() { return nullptr; }
+
 juce::String bluetoothNote()
 {
     return "Bluetooth headset microphones record at 8 or 16 kHz: the spectrum stops at 4 or 8 kHz. "

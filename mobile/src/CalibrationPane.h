@@ -5,6 +5,7 @@
 #include <JuceHeader.h>
 #include "AppContext.h"
 #include "Calibration.h"
+#include "TouchControls.h"
 
 namespace scm
 {
@@ -27,10 +28,11 @@ private:
     AppContext& ctx;
     juce::Label inputLabel, stateLabel, meterLabel, resultLabel;
     juce::Label refLabel { {}, "Calibrator level (dB-SPL)" }, freqLabel { {}, "Calibrator frequency (Hz)" };
-    juce::TextEditor refLevel, refFreq;
+    NumberField refLevel { "Calibrator level", 40.0, 160.0, 1, " dB" },
+                refFreq { "Calibrator frequency", 20.0, 20000.0, 0, " Hz" };
     juce::TextButton calibrateButton { "Calibrate with the calibrator (3 s)" };
     juce::Label typedLabel { {}, "Full scale = (dB-SPL)" };
-    juce::TextEditor typedValue;
+    NumberField typedValue { "Full scale", 60.0, 200.0, 2, " dB" };
     juce::TextButton typedButton { "Set" };
     juce::TextButton clearButton { "Clear calibration" };
     juce::TextButton applyFileButton { "Apply to the open file" };
