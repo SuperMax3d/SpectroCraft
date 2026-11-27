@@ -1006,6 +1006,240 @@ public:
             }
         }
 
+        beginTest ("export: one ZIP of the map, the pictures as options, with the size of each");
+        {
+            SoundMapProject p;
+            p.folder = dir.getChildFile ("zip-map");
+            p.name = "zip-map";
+            const auto write = [this, &p] (const juce::String& rel, int bytes, char c)
+            {
+                auto f = p.file (rel);
+                f.getParentDirectory().createDirectory();
+                juce::MemoryBlock mb ((size_t) bytes);
+                mb.fillWith ((juce::uint8) c);
+                expect (f.replaceWithData (mb.getData(), mb.getSize()), rel);
+                return f;
+            };
+            write ("points/P001.wav", 1000, 'a');
+            write ("points/P001a.jpg", 300, 'b');
+            write ("points/P001b.jpg", 200, 'c');
+            write ("points/P002.wav", 500, 'd');
+            write ("points/P002.wav.meta.json", 50, 'e');   // the desktop's sidecar
+            write ("survey/S001.jpg", 700, 'f');
+            write ("export.csv", 10, 'g');                   // an old Export CSV: the ZIP gets a fresh one
+            const auto elsewhere = dir.getChildFile ("fallback").getChildFile ("take-0004.wav");   // the map folder was not writable
+            elsewhere.getParentDirectory().createDirectory();
+            expect (elsewhere.replaceWithText ("RIFF-ish"));
+
+            MapPoint a; a.number = 1; a.pending = false; a.wav = "points/P001.wav";
+            a.pictureBefore = "points/P001a.jpg"; a.pictureAfter = "points/P001b.jpg";
+            MapPoint b; b.number = 2; b.pending = false; b.wav = "points/P002.wav"; b.kind = PointKind::Background;
+            MapPoint c; c.number = 3; c.wav = "points/P003.wav"; c.pictureBefore = "points/P003a.jpg";   // lost take: no files
+            MapPoint d; d.number = 4; d.pending = false; d.wav = elsewhere.getFullPathName();
+            p.points = { a, b, c, d };
+            SurveyPicture s1; s1.image = "survey/S001.jpg";
+            SurveyPicture s2; s2.image = "survey/S002.jpg";   // gone
+            p.survey = { s1, s2 };
+            juce::String err;
+            expect (p.save (err), err);
+
+            const auto plan = p.exportPlan();
+            expectEquals (plan.root, juce::String ("zip-map"));
+            expectEquals (plan.wavCount, 3);
+            expectEquals (plan.takes.count(), 5, "project.json, three WAVs, one sidecar");
+            expectEquals (plan.pointPictures.count(), 2);
+            expectEquals (plan.pointPictures.bytes, (juce::int64) 500);
+            expectEquals (plan.surveyPictures.count(), 1, "the missing picture is left out");
+            expectEquals (plan.surveyPictures.bytes, (juce::int64) 700);
+            const auto json = p.file ("project.json").getSize();
+            const auto text = (juce::int64) (plan.readme.getNumBytesAsUTF8() + plan.csv.getNumBytesAsUTF8());
+            expectEquals (plan.takes.bytes, json + 1000 + 500 + 50 + elsewhere.getSize() + text);
+            expectEquals (plan.bytes (false, false), plan.takes.bytes);
+            expectEquals (plan.bytes (true, true), plan.takes.bytes + 1200);
+            expect (plan.readme.contains ("x toward tag 0"), plan.readme);
+
+            const auto entries = [] (const juce::File& zip)
+            {
+                juce::StringArray names;
+                juce::ZipFile z (zip);
+                for (int i = 0; i < z.getNumEntries(); ++i) names.add (z.getEntry (i)->filename);
+                names.sort (false);
+                return names;
+            };
+            const auto zipFile = dir.getChildFile ("out").getChildFile ("zip-map.zip");
+            expect (SoundMapProject::writeExportZip (plan, false, false, zipFile, err), err);
+            expectEquals (entries (zipFile).joinIntoString (" "),
+                          juce::String ("zip-map/README.txt zip-map/export.csv zip-map/points/P001.wav zip-map/points/P002.wav "
+                                        "zip-map/points/P002.wav.meta.json zip-map/points/take-0004.wav zip-map/project.json"));
+            {
+                juce::ZipFile z (zipFile);
+                const auto read = [&z] (const juce::String& name)
+                {
+                    std::unique_ptr<juce::InputStream> in (z.createStreamForEntry (z.getIndexOfFileName (name)));
+                    juce::MemoryBlock mb;
+                    if (in != nullptr) in->readIntoMemoryBlock (mb);
+                    return mb;
+                };
+                const auto wav = read ("zip-map/points/P001.wav");
+                expect (wav.getSize() == 1000 && wav[0] == 'a' && wav[999] == 'a', "the take as it is");
+                expectEquals (read ("zip-map/export.csv").toString(), p.toCsv(), "a fresh CSV, not the old file");
+                expectEquals (read ("zip-map/project.json").getSize(), (size_t) json);
+            }
+
+            expect (SoundMapProject::writeExportZip (plan, true, true, zipFile, err), err);
+            const auto all = entries (zipFile);
+            expectEquals (all.size(), 10);
+            expect (all.contains ("zip-map/points/P001a.jpg") && all.contains ("zip-map/points/P001b.jpg")
+                    && all.contains ("zip-map/survey/S001.jpg"), all.joinIntoString (" "));
+            // WAVs and pictures stored as they are (the text is deflated): the ZIP is about the size shown
+            const juce::int64 stored = 1000 + 500 + elsewhere.getSize() + 1200;
+            expect (zipFile.getSize() > stored && zipFile.getSize() < plan.bytes (true, true) + 150 * all.size(),
+                    juce::String (zipFile.getSize()) + " bytes, " + juce::String (plan.bytes (true, true)) + " shown");
+
+            expect (SoundMapProject::writeExportZip (plan, true, false, zipFile, err), err);
+            const auto some = entries (zipFile);
+            expect (some.contains ("zip-map/points/P001a.jpg") && ! some.contains ("zip-map/survey/S001.jpg"), "only the points' pictures");
+
+            const auto tooBig = dir.getChildFile ("out").getChildFile ("too-big.zip");
+            err = {};
+            expect (! SoundMapProject::writeExportZip (plan, true, true, tooBig, err, plan.bytes (true, true) - 1));
+            expect (err.contains ("leave out pictures"), err);
+            expect (! tooBig.exists(), "no half ZIP");
+
+            expectEquals (sizeText (340'000), juce::String ("340 KB"));
+            expectEquals (sizeText (4'240'000), juce::String ("4.2 MB"));
+            expectEquals (sizeText (91'600'000), juce::String ("92 MB"));
+            expectEquals (sizeText (1'340'000'000), juce::String ("1.3 GB"));
+            expectEquals (sizeText (12), juce::String ("1 KB"));
+        }
+
+        beginTest ("reverberation takes: measured from the take's sweep, kept in the project, on the map and in the export");
+        {
+            SoundMapProject p;
+            p.folder = dir.getChildFile ("reverb-map");
+            p.folder.getChildFile ("points").createDirectory();
+            p.name = "reverb-map";
+            p.settings.sweepSeconds = 2.0;
+            p.settings.sweepSilenceSeconds = 2.0;
+            expectEquals (p.settings.reverbTakeSeconds(), 9.0);
+            const double fs = 48000.0, t60 = 0.5;
+
+            // the looped file as the app writes it, heard in a room that decays by 60 dB in 0.5 s
+            const auto sweepFile = dir.getChildFile ("sweep.wav");
+            expect (writeSweepWav (sweepFile, 2.0, 2.0, fs));
+            FileDoc source;
+            expect (source.load (sweepFile));
+            expectEquals (source.engine.numSamples(), (int64_t) (4.0 * fs));
+            std::vector<float> period ((size_t) source.engine.numSamples());
+            source.engine.readSamples (0, 0, source.engine.numSamples(), period.data());
+            std::vector<float> played;
+            for (int k = 0; k < 3; ++k) played.insert (played.end(), period.begin(), period.end());
+            std::vector<float> room ((size_t) (1.0 * fs));
+            juce::Random rng (77);
+            for (size_t i = 0; i < room.size(); ++i)
+                room[i] = (float) (0.05 * (rng.nextDouble() * 2.0 - 1.0) * std::exp (-6.9078 * (double) i / fs / t60));
+            room[0] = 1.0f;
+            int order = 1;
+            while (((size_t) 1 << order) < played.size() + room.size()) ++order;
+            const size_t m = (size_t) 1 << order;
+            juce::dsp::FFT fft (order);
+            std::vector<float> a (2 * m, 0.0f), b (2 * m, 0.0f);
+            std::copy (played.begin(), played.end(), a.begin());
+            std::copy (room.begin(), room.end(), b.begin());
+            fft.performRealOnlyForwardTransform (a.data(), false);
+            fft.performRealOnlyForwardTransform (b.data(), false);
+            for (size_t k = 0; k < m; ++k)
+            {
+                const float re = a[2 * k] * b[2 * k] - a[2 * k + 1] * b[2 * k + 1], im = a[2 * k] * b[2 * k + 1] + a[2 * k + 1] * b[2 * k];
+                a[2 * k] = re;
+                a[2 * k + 1] = im;
+            }
+            fft.performRealOnlyInverseTransform (a.data());
+            // the take: 9 s, started 1.3 s into a sweep
+            std::vector<std::vector<float>> take (1, std::vector<float> (a.begin() + (int) (1.3 * fs), a.begin() + (int) (10.3 * fs)));
+            MapPoint q;
+            q.number = 1;
+            q.kind = PointKind::Reverb;
+            q.pending = false;
+            q.wav = "points/P001.wav";
+            q.located = true;
+            q.position = { 1.0, 2.0, 1.2 };
+            {
+                FileDoc d;
+                expect (d.engine.initNew (1, fs, &take));
+                p.stampDocument (d, q);
+                expect (d.engine.saveFileAs (p.file (q.wav)));
+            }
+            juce::String err;
+            q.reverb = SoundMapProject::measureReverb (p.file (q.wav), p.settings.sweep(), err);
+            expect (! q.reverb.empty(), err);
+            expectEquals ((int) q.reverb.size(), 9, "the whole response and 63 Hz to 8 kHz");
+            const auto* whole = SoundMapProject::reverbBandFor (q, 0.0);
+            const auto* k1 = SoundMapProject::reverbBandFor (q, 1250.0);   // the slider's 1/3 octave: the 1 kHz octave
+            expect (whole != nullptr && k1 != nullptr && k1->hz == 1000.0);
+            if (whole != nullptr) expectWithinAbsoluteError (whole->t20, t60, 0.04);
+            if (k1 != nullptr)
+            {
+                expectWithinAbsoluteError (k1->t20, t60, 0.06);
+                expect (k1->t20Ok && k1->edtOk);
+            }
+            expect (SoundMapProject::reverbBandFor (q, 16000.0) == nullptr, "no octave holds 16 kHz here");
+            const auto shown = SoundMapProject::reverbValue (q, ReverbValue::T20, -1.0);
+            expect (shown.has_value() && shown->second, "LAeq on the slider: the whole response");
+
+            // a take without the sweep says so
+            std::vector<std::vector<float>> quiet (1, std::vector<float> ((size_t) (9.0 * fs), 0.0f));
+            for (auto& v : quiet[0]) v = (float) (0.01 * (rng.nextDouble() * 2.0 - 1.0));
+            {
+                FileDoc d;
+                expect (d.engine.initNew (1, fs, &quiet));
+                expect (d.engine.saveFileAs (p.file ("points/P002.wav")));
+            }
+            expect (SoundMapProject::measureReverb (p.file ("points/P002.wav"), p.settings.sweep(), err).empty());
+            expect (err.contains ("No sweep"), err);
+
+            // the take's WAV says which sweep it holds
+            {
+                FileDoc e;
+                expect (e.load (p.file (q.wav)));
+                sc::room::SweepSpec spec;
+                expect (sc::room::SweepSpec::fromVar (e.soundMapPoint["sweep"], spec), "the sweep in the take's metadata");
+                expectEquals (spec.seconds, 2.0);
+                expectEquals (e.soundMapPoint["kind"].toString(), juce::String ("reverb"));
+            }
+
+            // project, CSV, ZIP
+            MapPoint plain;
+            plain.number = 2;
+            plain.pending = false;
+            p.points = { q, plain };
+            expect (p.hasReverb());
+            expect (p.save (err), err);
+            const auto back = SoundMapProject::load (p.folder, err);
+            expect (back.has_value(), err);
+            if (back)
+            {
+                expect (back->points[0].kind == PointKind::Reverb);
+                expectEquals ((int) back->points[0].reverb.size(), 9);
+                expectWithinAbsoluteError (back->points[0].reverb[5].t20, q.reverb[5].t20, 1.0e-9);
+                expect (back->points[0].reverb[5].t20Ok == q.reverb[5].t20Ok);
+                expectEquals (back->settings.sweepSeconds, 2.0);
+                expect (back->points[1].reverb.empty());
+            }
+            const auto csv = p.toReverbCsv();
+            expect (csv.startsWith ("point,x_m,y_m,z_m,located,band_hz,EDT_s,T20_s"), csv);
+            expect (csv.contains ("\n1,1.000,2.000,1.200,1,all,") && csv.contains (",1k,"), csv);
+            expectEquals (juce::StringArray::fromLines (csv.trim()).size(), 10, "a header and nine bands");
+            expect (p.toCsv().contains ("\n1,reverb,"), "the take's kind in export.csv");
+            const auto plan = p.exportPlan();
+            const auto zip = dir.getChildFile ("reverb.zip");
+            expect (SoundMapProject::writeExportZip (plan, false, false, zip, err), err);
+            juce::ZipFile z (zip);
+            expect (z.getIndexOfFileName ("reverb-map/reverb.csv") >= 0, "reverb.csv in the ZIP");
+            p.points = { plain };
+            expect (! p.hasReverb() && p.toReverbCsv().isEmpty() && p.exportPlan().reverbCsv.isEmpty());
+        }
+
         beginTest ("marker sheets: a valid PDF, one page per tag, at the exact size");
         {
             juce::MemoryBlock mb;
@@ -1272,6 +1506,24 @@ public:
             }
             q.levels.laeq = 10.0 * std::log10 (e);
             q.levels.lzeq = q.levels.laeq + 2.0;
+            if (kind == PointKind::Reverb)   // made up: longer in the low bands and away from the centre
+            {
+                q.levels = {};
+                for (double f : { 0.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0 })
+                {
+                    ReverbBand b;
+                    b.hz = f;
+                    const double base = f > 0.0 ? 0.55 + 0.5 * std::exp (-f / 400.0) : 0.7;
+                    b.t20 = base * (1.0 + 0.12 * rr) + 0.02 * gauss (rng);
+                    b.t30 = b.t20 * 1.03;
+                    b.edt = b.t20 * (0.6 + 0.12 * rr);
+                    b.c50 = 6.0 - 2.5 * rr + 0.3 * gauss (rng);
+                    b.inrDb = f == 63.0 ? 31.0 : 52.0;
+                    b.edtOk = true;
+                    b.t20Ok = b.t30Ok = f != 63.0;   // the loudspeaker gives too little at 63 Hz
+                    q.reverb.push_back (b);
+                }
+            }
             project.points.push_back (q);
         };
         addPoint (0.4, 0.0, PointKind::Reference);
@@ -1287,6 +1539,9 @@ public:
             }
         }
         addPoint (0.4, 0.0, PointKind::Reference);
+        for (int k = 0; k < 9; ++k)
+            addPoint (k == 0 ? 0.3 : (k < 5 ? 1.2 : 2.3) * std::cos (kPi * (0.25 + 0.5 * k)),
+                      k == 0 ? 0.3 : (k < 5 ? 1.2 : 2.3) * std::sin (kPi * (0.25 + 0.5 * k)), PointKind::Reverb);
         juce::String err;
         expect (project.save (err), err);
         logMessage ("demo map: " + project.folder.getFullPathName() + ", " + juce::String ((int) project.points.size()) + " takes");

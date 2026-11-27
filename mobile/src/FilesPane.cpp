@@ -2,6 +2,7 @@
 #include "MobileDocument.h"
 #include "MobileStyle.h"
 #include "Recorder.h"
+#include "ShareSheet.h"
 #include "Telemetry.h"
 #include "TimeFormat.h"
 #include "VideoCapture.h"
@@ -209,10 +210,10 @@ void FilesPane::share()
     const auto movie = VideoCapture::movieFileFor (f);
     if (movie.existsAsFile()) urls.add (juce::URL (movie));
     telemetry::capture ("file_shared", { { "with_video", movie.existsAsFile() } });
-    shareBox = juce::ContentSharer::shareFilesScoped (urls, [] (bool ok, const juce::String& err)
+    sharesheet::shareFiles (shareBox, urls, shareButton, [] (bool ok, const juce::String& err)
     {
         if (! ok && err.isNotEmpty()) showMessage ("Share", err);
-    }, &shareButton);   // the iPad's popover points at the button
+    });
 }
 
 void FilesPane::deleteSelected()

@@ -45,6 +45,11 @@ BandLevels analyseTake (const juce::File& wav, double headSeconds, double tailSe
     16-bit mono WAV, peak -1 dBFS. */
 bool writePeriodicPink (const juce::File& wav, double sampleRate = 48000.0, double seconds = 180.0);
 
+/** The reverberation takes' source: `seconds` of exponential sweep (20 Hz -
+    20 kHz) then `silenceSeconds` of silence, to play in a loop; 16-bit mono
+    WAV, peak -1 dBFS. */
+bool writeSweepWav (const juce::File& wav, double seconds, double silenceSeconds, double sampleRate = 48000.0);
+
 /** A-weighting (IEC 61672-1), dB, 0 at 1 kHz. */
 double aWeightingDb (double hz) noexcept;
 

@@ -1,6 +1,7 @@
 #include "SmLevels.h"
 #include "FileDoc.h"
 #include "Measures.h"
+#include "RoomAcoustics.h"
 
 namespace scm::smap
 {
@@ -166,5 +167,27 @@ bool writePeriodicPink (const juce::File& wav, double sampleRate, double seconds
     for (int k = 0; k < periods; ++k)
         if (! w->writeFromAudioSampleBuffer (period, 0, n)) return false;
     return true;
+}
+
+bool writeSweepWav (const juce::File& wav, double seconds, double silenceSeconds, double sampleRate)
+{
+    sc::room::SweepSpec spec;
+    spec.seconds = seconds;
+    spec.silenceSeconds = silenceSeconds;
+    spec.level = 0.891;   // -1 dBFS
+    const auto x = sc::room::makeSweep (spec, sampleRate);
+    if (x.empty()) return false;
+    const int n = (int) x.size() + (int) std::lround (silenceSeconds * sampleRate);
+    juce::AudioBuffer<float> buffer (1, n);
+    buffer.clear();
+    buffer.copyFrom (0, 0, x.data(), (int) x.size());
+
+    wav.deleteFile();
+    std::unique_ptr<juce::OutputStream> os (wav.createOutputStream());
+    if (os == nullptr) return false;
+    juce::WavAudioFormat fmt;
+    auto w = fmt.createWriterFor (os, juce::AudioFormatWriterOptions {}.withSampleRate (sampleRate)
+                                                                     .withNumChannels (1).withBitsPerSample (16));
+    return w != nullptr && w->writeFromAudioSampleBuffer (buffer, 0, n);
 }
 } // namespace scm::smap

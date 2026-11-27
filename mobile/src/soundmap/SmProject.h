@@ -13,6 +13,7 @@
 #include <JuceHeader.h>
 #include "SmLevels.h"
 #include "SmSurvey.h"
+#include "RoomAcoustics.h"
 #include <optional>
 
 class FileDoc;
@@ -28,6 +29,18 @@ struct MapSettings
     Vec3 micOffsetCm {};             // back camera -> microphone, phone body frame
     double tagCentreHeightCm = 0.0;    // the tag centres' height above the map's z = 0
     double lensFRel = 0.75;          // starting focal length / long side
+    double sweepSeconds = 8.0;       // the reverberation takes' sweep (20 Hz - 20 kHz) ...
+    double sweepSilenceSeconds = 6.0;// ... and the silence after it in the file played in a loop
+
+    sc::room::SweepSpec sweep() const
+    {
+        sc::room::SweepSpec s;
+        s.seconds = sweepSeconds;
+        s.silenceSeconds = sweepSilenceSeconds;
+        return s;
+    }
+    /** A reverberation take: two periods of the looped file hold one whole sweep, whenever it starts. */
+    double reverbTakeSeconds() const noexcept { return 2.0 * (sweepSeconds + sweepSilenceSeconds) + 1.0; }
 };
 
 struct SurveyPicture
@@ -66,7 +79,24 @@ enum class PointKind
     Point = 0,        // a map point
     Background = 1,   // the source off: the background noise per band (SNR)
     Reference = 2,    // a fixed spot measured again and again: the source's drift
+    Reverb = 3,       // the sweep playing: the reverberation at this point (not a level of the map)
 };
+
+/** "point", "background", "reference", "reverb". */
+juce::String kindText (PointKind) noexcept;
+
+/** A reverberation take's result in one band (sc::room, docs/reverberation.md). */
+struct ReverbBand
+{
+    double hz = 0.0;                  // nominal octave centre; 0: the whole response
+    double edt = 0.0, t20 = 0.0, t30 = 0.0;   // seconds (0: not measured)
+    double c50 = 0.0;                 // dB
+    double inrDb = 0.0;               // the response above the noise
+    bool edtOk = false, t20Ok = false, t30Ok = false;   // reliable (noise, range, band wide enough)
+};
+
+/** What the map can show of the reverberation takes. */
+enum class ReverbValue { T20, Edt, C50 };
 
 struct MapPoint
 {
@@ -85,6 +115,7 @@ struct MapPoint
     double movedM = 0.0;                              // distance between the two fixes
     juce::String input;                               // the input's name at the take
     BandLevels levels;
+    std::vector<ReverbBand> reverb;                   // a Reverb take's result (the whole response first)
     juce::String note;
 
     static constexpr double kMovedLimitM = 0.05;
@@ -172,9 +203,65 @@ public:
     /** One row per take: number, kind, x, y, z (m), checks, LZeq, LAeq, then every band. */
     juce::String toCsv() const;
 
+    // ---- reverberation takes
+
+    /** A Reverb take's bands from its WAV: the sweep found in it, octaves 63 Hz - 8 kHz
+        and the whole response. Empty with `error` when the sweep is not in the take. */
+    static std::vector<ReverbBand> measureReverb (const juce::File& wav, const sc::room::SweepSpec&, juce::String& error);
+    /** The band of a Reverb take for the map's band (0 or -1: the whole response;
+        a 1/3 octave: the octave that holds it), or nullptr. */
+    static const ReverbBand* reverbBandFor (const MapPoint&, double band) noexcept;
+    /** The value and whether it is reliable; nothing when the take has none for that band. */
+    static std::optional<std::pair<double, bool>> reverbValue (const MapPoint&, ReverbValue, double band) noexcept;
+    bool hasReverb() const noexcept;
+    /** One row per reverberation take and band: position, EDT, T20, T30, C50, the checks. Empty without any. */
+    juce::String toReverbCsv() const;
+
+    // ---- the map as one ZIP (Menu > Export map)
+
+    /** A part of the ZIP: its files (path in the ZIP, the file) and their bytes. */
+    struct ExportPart
+    {
+        std::vector<std::pair<juce::String, juce::File>> files;
+        juce::int64 bytes = 0;
+        int count() const noexcept { return (int) files.size(); }
+    };
+
+    /** What the ZIP holds, under one folder named after the map: the takes and
+        the data always (README.txt and export.csv written from memory,
+        project.json, every take's WAV and its .meta.json sidecar), the points'
+        pictures (before and after each take) and the survey pictures as
+        options. Files that are gone are left out; a take saved outside the map's
+        folder goes into points/. */
+    struct ExportPlan
+    {
+        juce::String root;                          // the folder inside the ZIP
+        juce::String readme, csv, reverbCsv;      // reverbCsv: empty without reverberation takes
+        ExportPart takes, pointPictures, surveyPictures;
+        int wavCount = 0;
+        juce::int64 bytes (bool withPointPictures, bool withSurveyPictures) const noexcept
+        {
+            return takes.bytes + (withPointPictures ? pointPictures.bytes : 0) + (withSurveyPictures ? surveyPictures.bytes : 0);
+        }
+    };
+    ExportPlan exportPlan() const;
+
+    /** The largest ZIP written: JUCE's ZIP has 32-bit sizes and offsets (no ZIP64). */
+    static constexpr juce::int64 kZipMaxBytes = (juce::int64) 0xF0000000;
+
+    /** Writes the plan's ZIP (WAVs and pictures stored as they are, the text
+        deflated). False with `error`, and no file, when it would pass maxBytes
+        or a file cannot be read or written. Reads only the plan and the files:
+        safe on a background thread. */
+    static bool writeExportZip (const ExportPlan&, bool withPointPictures, bool withSurveyPictures,
+                                const juce::File& zip, juce::String& error, juce::int64 maxBytes = kZipMaxBytes);
+
     juce::var toVar() const;
     static std::optional<SoundMapProject> fromVar (const juce::var& v, const juce::File& folder, juce::String& error);
 };
+
+/** A size for people: "340 KB", "4.2 MB", "92 MB", "1.3 GB" (decimal units, as the Files app). */
+juce::String sizeText (juce::int64 bytes);
 
 /** Hold from juce::Desktop's orientation (the picture is upright for it). */
 Hold holdFromDisplay (juce::Desktop::DisplayOrientation o) noexcept;

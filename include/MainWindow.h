@@ -12,6 +12,7 @@
 #include "Docking.h"   // Adobe-style docking workspace (panel groups, floating windows)
 #include "MainToolbar.h"   // the toolbar in the menu bar row (issue #43)
 #include "BlindSeparationWindow.h"   // Effects > Blind Source Separation (issue #68)
+#include "ReverbWindow.h"            // Effects > Reverberation Analysis
 #include <memory>
 #include <algorithm>
 #include <atomic>
@@ -663,6 +664,9 @@ public:
     /** Effects > Blind Source Separation... (issue #68): multi-channel files only. */
     void showBlindSeparationWindow();
     BlindSeparationWindow* blindSeparationWindow() const noexcept { return bssWin_.get(); }
+    /** Effects > Reverberation Analysis...: EDT, T20, T30, clarity per band from a recorded sweep or impulse. */
+    void showReverbWindow();
+    ReverbWindow* reverbWindow() const noexcept { return reverbWin_.get(); }
     /** Effects > Super Resolution... - opens (or brings to front) the
         non-modal window that drives the external super-resolution CLI. */
     void showSuperResolutionWindow();
@@ -829,6 +833,7 @@ public:
         ToolsGenNoise,             // Effects > Generate Noise...
         ToolsGenTone,              // Effects > Generate Tone...
         ToolsBlindSeparation = 5100,   // Effects > Blind Source Separation... (issue #68)
+        ToolsReverberation = 5101,     // Effects > Reverberation Analysis...
         ActionsRunSelected = 6800, // Actions > Run Selected Action (Ctrl+Shift+P)
         ActionsBatch = 6801,       // Actions > Batch...
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -948,6 +953,7 @@ private:
     // Effects > Stem Separation window (at most one open at a time).
     std::unique_ptr<StemSeparationWindow> stemWin_;
     std::unique_ptr<BlindSeparationWindow> bssWin_;   // Effects > Blind Source Separation (issue #68)
+    std::unique_ptr<ReverbWindow> reverbWin_;         // Effects > Reverberation Analysis
 
     // Effects > Super Resolution window (at most one open at a time).
     std::unique_ptr<SuperResolutionWindow> superResWin_;

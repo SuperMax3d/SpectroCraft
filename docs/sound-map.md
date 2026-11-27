@@ -151,6 +151,7 @@ Kinds of take:
 | Point | A map point. |
 | Background | The source off: the background per band (at a known position, like every take). Bands of the points less than 10 dB above it are drawn hollow; less than 3 dB, left off the surface. |
 | Reference | The same fixed spot again and again (a marked tripod spot): the source's drift. The View summary gives it for the 250 Hz-2 kHz bands. |
+| Reverberation | While the sweep file (Menu > Sweep signal for reverberation) plays in a loop: T20, EDT and C50 per octave at this point, shown in View with the Level / T20 / EDT / C50 button. Not a level of the map. See `docs/reverberation.md`. |
 
 The microphone is not at the camera. Settings > Microphone offset (from the
 back camera to the microphone in use, cm, phone seen from the screen: x right,
@@ -162,10 +163,26 @@ microphone in measurement mode; the app does not pin the microphone.
 
 View: the top view (x, y) with the points coloured by level over an
 interpolated surface, the tags and their circle; or the side view (distance
-from the centre, height). Choose the band (1/3 octave, LZeq, LAeq) and absolute
+from the centre, height), from the floor up (from just under the lowest point
+or tag when the height of the tag centres is not set). Choose the band on the slider under the map: the 1/3
+octaves from low to high, then LAeq (A) and LZeq (Z) a little apart. A tap or a
+drag puts it on the band under the finger, and a bubble above the finger names
+that band and its neighbours. Hold the finger still for half a second and the
+slider moves four times slower than the finger, one band at a time (the bubble
+gets a blue border). The < and > buttons move one band. Then choose absolute
 or relative levels. Tap a point for its position, uncertainty, level and
 background margin, to open its take in the main views, or to delete it. Menu >
 Export CSV writes every take for other tools.
+
+Menu > Export map (ZIP) puts the map in one ZIP and opens the share sheet
+(AirDrop, Mail, Files...). It always holds the takes and the data: README.txt
+(the files and the map's frame), export.csv, project.json and every take's WAV
+(with its .meta.json sidecar if it has one), under a folder named after the map.
+The pictures are options, each with its size in the menu: the points' pictures
+(before and after each take), the survey pictures, or both. WAVs and pictures
+are stored as they are, so the ZIP is about the size shown. It is written to
+the app's temporary folder (the previous export is deleted then) and needs that
+much free space; JUCE's ZIP writer has no ZIP64, so one ZIP stops at about 4 GB.
 
 The surface averages mean-square pressure (energy) with Gaussian weights, each
 point with its own width (the distance to its third nearest neighbour), and
@@ -257,8 +274,8 @@ The Map tab (after Edit) takes the screen below the top bar:
 
 - the map's list, View / Survey / Measure, and a menu: New map, Settings (tag
   size, number of tags, take length, countdown, microphone offset, height of
-  the tag centres), Tag sheets (PDF), Source signal (WAV), Export CSV, Locate
-  the points again, Delete this map;
+  the tag centres), Tag sheets (PDF), Source signal (WAV), Export CSV, Export
+  map (ZIP), Locate the points again, Delete this map;
 - Survey and Measure show the camera preview (Android needs it on screen to
   take a picture), keep the screen on and hold the UI in landscape; the
   regular REC never films while the Map tab uses the camera.
@@ -317,10 +334,12 @@ Headless parts (no UI, unit tested) in `mobile/src/soundmap/`:
 | `SmMarkersPdf` | printable tag sheets (PDF, exact scale) |
 
 UI: `mobile/src/SoundMapPane.*` (the tab), `mobile/src/SoundMapView.*` (the
-drawing); MainScreen owns the camera and the takes. Tests:
+drawing), `mobile/src/StepSlider.*` (the band slider; its finger logic in
+`StepDrag.h`, tested in `mobile/tests/TouchTests.cpp`); MainScreen owns the camera and the takes. Tests:
 `mobile/tests/SoundMapTests.cpp` (the study and a demo map behind
 `SC_SOUNDMAP_STUDY=1` / `SC_SOUNDMAP_DEMO=<folder>`). Desktop development hooks:
-`SC_MOBILE_SOUNDMAP=<map folder>` and `SC_MOBILE_SOUNDMAP_MODE`.
+`SC_MOBILE_SOUNDMAP=<map folder>` and `SC_MOBILE_SOUNDMAP_MODE`; `SC_MOBILE_BAND=<step>[,<ms>]` leaves
+a finger on the band slider (for screenshots of its bubble).
 
 ## 8. Not done yet
 

@@ -5500,6 +5500,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
         case ToolsBlindSeparation: showBlindSeparationWindow(); break;
+        case ToolsReverberation: showReverbWindow(); break;
         case ToolsSuperResolve: showSuperResolutionWindow(); break;
         case ToolsSplitSpectralSelCfg:
             showSplitConfigDialog ();
@@ -9027,6 +9028,20 @@ void MainWindow::showBlindSeparationWindow()
     bssWin_->onCloseRequested = [this] { bssWin_.reset(); };
 }
 
+void MainWindow::showReverbWindow()
+{
+    if (! app.audioEngine().isFileLoaded())
+        return;
+    if (reverbWin_ != nullptr)
+    {
+        reverbWin_->view().refresh();
+        reverbWin_->toFront (true);
+        return;
+    }
+    reverbWin_ = std::make_unique<ReverbWindow> (app);
+    reverbWin_->onCloseRequested = [this] { reverbWin_.reset(); };
+}
+
 // Show every channel in both views (View > All Channels, and the solo-off
 // half of the Ctrl/Shift+click / Ctrl+Shift+N toggle).
 void MainWindow::zoomSessionRows (int steps)
@@ -10597,6 +10612,9 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // where they come from (no AI model; AuxIVA, ILRMA, cACGMM, FastMNMF2).
         menu.addItem (ToolsBlindSeparation, "Blind Source Separation...",
                       app.audioEngine().isFileLoaded() && app.audioEngine().numChannels() >= 2, false);
+        // Reads the file, changes nothing: the reverberation of the place the
+        // recording was made in, from a recorded sweep or impulse.
+        menu.addItem (ToolsReverberation, "Reverberation Analysis...", app.audioEngine().isFileLoaded(), false);
         // Configure which channels the spectral selection is extracted from
         // and where each extraction goes. Closing saves the configuration
         // without performing any split.

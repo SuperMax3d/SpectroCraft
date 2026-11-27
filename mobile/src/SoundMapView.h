@@ -19,6 +19,10 @@ class SoundMapView : public juce::Component
 {
 public:
     enum class Projection { Top, Side };
+    /** What colours the points: the level of the map's takes (with its
+        surface), or a value of the reverberation takes (T20, EDT in seconds,
+        C50 in dB; the points only, hollow when the value is not reliable). */
+    enum class Quantity { Level, T20, Edt, C50 };
 
     SoundMapView();
 
@@ -28,6 +32,8 @@ public:
     void setBand (double band);
     double band() const noexcept { return currentBand; }
     void setRelative (bool r);
+    void setQuantity (Quantity q);
+    Quantity quantity() const noexcept { return shownQuantity; }
     void setProjection (Projection p);
     void setSelected (int pointNumber);
     int selected() const noexcept { return selectedPoint; }
@@ -72,6 +78,8 @@ private:
     const smap::SoundMapProject* project = nullptr;
     double currentBand = 0.0;
     bool relative = false;
+    Quantity shownQuantity = Quantity::Level;
+    double offset() const noexcept { return relative && shownQuantity == Quantity::Level ? reference : 0.0; }
     Projection projection = Projection::Top;
     int selectedPoint = -1;
 

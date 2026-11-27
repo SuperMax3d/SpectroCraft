@@ -16425,9 +16425,9 @@ static void testSplitSpectralSelectionApp()
         // Menu bar order: File Edit Selection Transport Effects View Window Help.
         const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 20, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68)
+        CHECK (fxMenu.getNumItems() == 21, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68), Reverberation Analysis
 #else
-        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 20, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
     }
     app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2 (the old F12 behaviour)
@@ -25944,9 +25944,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 20, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68)
+    CHECK (fxMenu.getNumItems() == 21, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");   // + Blind Source Separation (#68), Reverberation Analysis
 #else
-    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 20, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -31814,6 +31814,7 @@ static void testWriteDataToNewChannels()
 #include "regression/disk_changes.inc"  // files changed / deleted on disk (issue #70)
 #include "regression/file_info.inc"     // File Info panel: WAV text metadata, Markdown (issue #67)
 #include "regression/bss.inc"           // blind source separation (issue #68)
+#include "regression/reverb.inc"        // reverberation analysis: the window on a recorded sweep or impulse
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -32052,6 +32053,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("blind source separation: AuxIVA, ILRMA, cACGMM, FastMNMF2 (#68)", testBlindSeparation);
     SC_RUN_TEST ("blind source separation: the effect window (#68)", testBlindSeparationWindow);
     SC_RUN_TEST ("bench: blind source separation timings (SC_BENCH=1 only)", testBlindSeparationBench);
+    SC_RUN_TEST ("reverberation: the analysis window on a recorded sweep and an impulse", testReverbWindow);
     SC_RUN_TEST ("playhead line full height", testPlayheadLineFullHeight);
     SC_RUN_TEST ("playhead line bottom ruler", testPlayheadLineBottomRuler);
     SC_RUN_TEST ("spectral view paint", testSpectralViewPaint);
