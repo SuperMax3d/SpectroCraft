@@ -188,12 +188,16 @@ Outcome stemsCmd (Context& ctx)
              : mode == "htdemucsFt" ? sc::StemService::Mode::HtDemucsFt
              : mode == "whineHiss" ? sc::StemService::Mode::HtWhineHiss
              : mode == "whineHissClickBump" ? sc::StemService::Mode::HtWhineHissClickBump
+             : mode == "whineHissV2" ? sc::StemService::Mode::HtWhineHissV2
+             : mode == "clicksSpeech" ? sc::StemService::Mode::HtClicksSpeech
              : sc::StemService::Mode::SamAudio;
     const juce::String model = ctx.str ("model");
     req.model = req.mode == sc::StemService::Mode::SamAudio ? pickModel (sc::acpp::listModels(), model)
               : req.mode == sc::StemService::Mode::HtDemucs6 ? pickModel (sc::acpp::listDemucs6Models(), model)
               : req.mode == sc::StemService::Mode::HtWhineHiss ? pickModel (sc::acpp::listWhineHissModels(), model)
               : req.mode == sc::StemService::Mode::HtWhineHissClickBump ? pickModel (sc::acpp::listWhineHissClickBumpModels(), model)
+              : req.mode == sc::StemService::Mode::HtWhineHissV2 ? pickModel (sc::acpp::listWhineHissV2Models(), model)
+              : req.mode == sc::StemService::Mode::HtClicksSpeech ? pickModel (sc::acpp::listClicksSpeechModels(), model)
               : sc::acpp::demucsFtModelDir();
     req.backend = ctx.str ("backend", ctx.state.audiocppBackend.isNotEmpty() ? ctx.state.audiocppBackend : juce::String ("cpu"));
     req.extractFromOriginal = ctx.flag ("extractFromOriginal", true);
@@ -323,7 +327,7 @@ void registerPythonCommands (CommandRegistry& r)
 
     auto st = scope;
     st.insert (st.begin(), {
-        P ("mode", PType::String).oneOf ({ "samAudio", "htdemucs6", "htdemucsFt", "whineHiss", "whineHissClickBump" }).def ("samAudio").describe ("Separation family; whineHiss / whineHissClickBump need stereo input (mono is duplicated, >2 channels run per channel)"),
+        P ("mode", PType::String).oneOf ({ "samAudio", "htdemucs6", "htdemucsFt", "whineHiss", "whineHissClickBump", "whineHissV2", "clicksSpeech" }).def ("samAudio").describe ("Separation family; the htdemucs families need stereo input (mono is duplicated, >2 channels run per channel)"),
         P ("descriptions", PType::Array).items (PType::Object).describe ("samAudio: [{text, anchors:[{start, end, include}]}] (document seconds)"),
         P ("model", PType::String).describe ("Model file name (default: the first installed)"),
         P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan", "metal" }).describe ("Default: ai.setDevice audiocpp, else cpu"),

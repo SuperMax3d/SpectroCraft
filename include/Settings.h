@@ -193,9 +193,12 @@ struct Settings
     bool acppExtractOriginal = true;     // "Extract from original" toggle
     int stemSepMode = 1;                 // separation mode: 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
                                           // 4=htdemucs-whine-hiss_v1 5=htdemucs-whine-hiss-click-bump_v1
+                                          // 6=htdemucs-whine-hiss_v2 7=htdemucs-whine-hiss_clicks_speech_v1
     juce::String acppModel6;             // selected GGUF file name in htdemucs_6stems mode ("" = none)
     juce::String acppModelWH;            // selected GGUF file name in htdemucs-whine-hiss_v1 mode ("" = none)
     juce::String acppModelWHCB;          // selected GGUF file name in htdemucs-whine-hiss-click-bump_v1 mode ("" = none)
+    juce::String acppModelWHV2;          // selected GGUF file name in htdemucs-whine-hiss_v2 mode ("" = none)
+    juce::String acppModelCSS;           // selected GGUF file name in htdemucs-whine-hiss_clicks_speech_v1 mode ("" = none)
     int stemSepOutputMode = 1;           // result handling: 1=new file 2=overwrite current 3=append to current
     int superResMode = 1;                // super-resolution family: 1=FlashSR 2=AudioSR
     juce::String superResModel;          // selected model file name ("" = none)
@@ -271,6 +274,7 @@ struct Settings
             && exportFilenameHeader == o.exportFilenameHeader
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
             && acppModelWH == o.acppModelWH && acppModelWHCB == o.acppModelWHCB
+            && acppModelWHV2 == o.acppModelWHV2 && acppModelCSS == o.acppModelCSS
             && stemSepOutputMode == o.stemSepOutputMode
             && superResMode == o.superResMode && superResModel == o.superResModel
             && superResOutputMode == o.superResOutputMode

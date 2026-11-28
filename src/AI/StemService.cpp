@@ -129,6 +129,12 @@ juce::String StemService::validate (const Request& req, juce::String* codeOut)
             case Mode::HtWhineHissClickBump:
                 msg = "The htdemucs-whine-hiss-click-bump_v1 model is not installed - place a .gguf file in the HTDemucs-WhineHiss-ClickBump-v1-GGUF folder (or use Download...).";
                 break;
+            case Mode::HtWhineHissV2:
+                msg = "The htdemucs-whine-hiss_v2 model is not installed - place a .gguf file in the HTDemucs-WhineHiss-v2-GGUF folder (or use Download...).";
+                break;
+            case Mode::HtClicksSpeech:
+                msg = "The htdemucs-whine-hiss_clicks_speech_v1 model is not installed - place a .gguf file in the HTDemucs-ClicksSpeech-v1-GGUF folder (or use Download...).";
+                break;
             default:
                 msg = "The SAM-Audio model file is missing.";
         }

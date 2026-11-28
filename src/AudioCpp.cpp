@@ -155,6 +155,16 @@ std::vector<juce::File> listWhineHissClickBumpModels(const juce::File& d)
     return listGgufIn (d, "HTDemucs-WhineHiss-ClickBump-v1-GGUF");
 }
 
+std::vector<juce::File> listWhineHissV2Models(const juce::File& d)
+{
+    return listGgufIn (d, "HTDemucs-WhineHiss-v2-GGUF");
+}
+
+std::vector<juce::File> listClicksSpeechModels(const juce::File& d)
+{
+    return listGgufIn (d, "HTDemucs-ClicksSpeech-v1-GGUF");
+}
+
 juce::File flashSrModelFile(const juce::File& d)
 {
     const juce::File f = (d.getFullPathName().isEmpty() ? dir() : d)
@@ -253,13 +263,22 @@ std::vector<ModelOption> modelOptions(const juce::String& family, const juce::Fi
         for (const auto& m : modelChoices())
             addCatalogue (m.file, modelUrl (m.file), m.sizeBytes);
     }
-    else if (family == "whinehiss" || family == "whinehissclickbump")
+    else if (family == "whinehiss" || family == "whinehissclickbump"
+             || family == "whinehissv2" || family == "clicksspeech")
     {
-        const bool wh = family == "whinehiss";
-        installed = wh ? listWhineHissModels (root) : listWhineHissClickBumpModels (root);
-        const juce::String folder = wh ? "HTDemucs-WhineHiss-v1-GGUF" : "HTDemucs-WhineHiss-ClickBump-v1-GGUF";
+        const int mode = family == "whinehiss" ? 4
+                         : family == "whinehissclickbump" ? 5
+                         : family == "whinehissv2" ? 6 : 7;
+        installed = mode == 4 ? listWhineHissModels (root)
+                  : mode == 5 ? listWhineHissClickBumpModels (root)
+                  : mode == 6 ? listWhineHissV2Models (root)
+                              : listClicksSpeechModels (root);
+        const juce::String folder = mode == 4 ? "HTDemucs-WhineHiss-v1-GGUF"
+                                 : mode == 5 ? "HTDemucs-WhineHiss-ClickBump-v1-GGUF"
+                                 : mode == 6 ? "HTDemucs-WhineHiss-v2-GGUF"
+                                             : "HTDemucs-ClicksSpeech-v1-GGUF";
         for (const auto& m : demucsEngineChoices())
-            if (m.mode == (wh ? 4 : 5))
+            if (m.mode == mode)
                 addCatalogue (folder + "/" + juce::String (m.file), demucsEngineUrl (m.file), m.sizeBytes);
     }
     else if (family == "flashsr")
@@ -446,7 +465,7 @@ juce::String modelUrl(const juce::String& fileName)
 std::vector<DemucsEngineSpec> demucsEngineChoices()
 {
     // Super3dMax htdemucs engine models on Hugging Face. SHA-256 = the Git LFS
-    // object id published by Hugging Face (queried 2026-11-24).
+    // object id published by Hugging Face (queried 2026-11-27).
     std::vector<DemucsEngineSpec> v;
     DemucsEngineSpec m1 { 4, "htdemucs-whine-hiss_v1_f16.gguf", 84049984,
                           "af739e14eecf0903a684d95fe5e868d3bbd3d774ec9f26dbeaa8ad8210eedfa4" };
@@ -456,17 +475,31 @@ std::vector<DemucsEngineSpec> demucsEngineChoices()
                           "b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388" };
     DemucsEngineSpec m4 { 5, "htdemucs-whine-hiss-click-bump_v1_f16.gguf", 84059264,
                           "773560cfafd273fcb5590626e2220f521bb0fc1cbd0d18b5296061de21bdfcae" };
+    DemucsEngineSpec m5 { 6, "htdemucs-whine-hiss_v2_f16.gguf", 220318496,
+                          "9de33649ebda15cbc0f17c6a37a5d1332a070e4b2681f27586ad9d5f4c8b6ca2" };
+    DemucsEngineSpec m6 { 6, "htdemucs-whine-hiss_v2_q8_0.gguf", 222177440,
+                          "5f35830faf5426fdcca12a23172d680b00751a7160a1e1b9b2193ba65cc11191" };
+    DemucsEngineSpec m7 { 7, "htdemucs-whine-hiss_clicks_speech_v1_f16.gguf", 84059328,
+                          "89c73a4fee954a032a81c03618f751df9382384256f99af6d379e7f9d5a643a7" };
+    DemucsEngineSpec m8 { 7, "htdemucs-whine-hiss_clicks_speech_v1_q8_0.gguf", 98674272,
+                          "b8b347a25cd7bdfb81c9326c4b5f5e3bdb63b38d03b86d871c4abd61b0ed5a52" };
     v.push_back (m1); v.push_back (m2);
     v.push_back (m3); v.push_back (m4);
+    v.push_back (m5); v.push_back (m6);
+    v.push_back (m7); v.push_back (m8);
     return v;
 }
 
 juce::String demucsEngineUrl(const juce::String& fileName)
 {
-    // The two families live in their own repos, named after the model.
+    // Each family lives in its own repo, named after the model.
     const juce::String repo = fileName.startsWith ("htdemucs-whine-hiss_v1")
                                   ? "htdemucs-whine-hiss_v1"
-                                  : "htdemucs-whine-hiss-click-bump_v1";
+                                  : fileName.startsWith ("htdemucs-whine-hiss_v2")
+                                    ? "htdemucs-whine-hiss_v2"
+                                    : fileName.startsWith ("htdemucs-whine-hiss_clicks_speech_v1")
+                                      ? "htdemucs-whine-hiss_clicks_speech_v1"
+                                      : "htdemucs-whine-hiss-click-bump_v1";
     return "https://huggingface.co/Super3dMax/" + repo + "/resolve/main/" + fileName;
 }
 

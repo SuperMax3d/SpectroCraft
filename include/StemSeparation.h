@@ -58,7 +58,7 @@ public:
     const std::vector<sc::acpp::ModelOption>& modelOptionsForTest() const { return modelOptions_; }
     juce::String statusTextForTest() const { return statusLabel_.getText (); }
     void refreshModelListForTest() { refreshModelList (); }
-    int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2-5=htdemucs
+    int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2-7=htdemucs
     bool demucsMode() const { return modeCombo_.getSelectedItemIndex () >= 1; }
 
     // Called by the DescRow buttons (a separate class), so these are public.
@@ -101,7 +101,7 @@ private:
     juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
     juce::Label modeLbl_;
-    juce::ComboBox modeCombo_;           // 1=Sam Audio 2-5=htdemucs families
+    juce::ComboBox modeCombo_;           // 1=Sam Audio 2-7=htdemucs families
     juce::Label modelLbl_, backendLbl_, descLbl_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;

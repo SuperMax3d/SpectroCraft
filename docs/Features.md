@@ -1946,9 +1946,12 @@ folder and every file becomes a track. These families require a 44.1 kHz input,
 so the extracted range is resampled to 44.1 kHz first when the source rate differs
 (the stems are resampled back afterwards). In these modes the description area of
 the dialog is hidden entirely.
-- **htdemucs-whine-hiss_v1** / **htdemucs-whine-hiss-click-bump_v1** — plain
+- **htdemucs-whine-hiss_v1** / **htdemucs-whine-hiss-click-bump_v1** /
+  **htdemucs-whine-hiss_v2** / **htdemucs-whine-hiss_clicks_speech_v1** — plain
 separation with a single `.gguf` model from the Super3dMax HuggingFace repos,
-aimed at whine + hiss (and click + bump) artifacts. Like the other htdemucs
+aimed at engine artifacts: whine + hiss (v1), whine/hiss/click/bump
+(click-bump_v1), whine + hiss again in a high-capacity variant trained on
+dynamic whines (v2) and speech/whines/hiss/click_bump (clicks_speech_v1). Like the other htdemucs
 families they need 44.1 kHz stereo input: a mono range is duplicated to L=R and
 every stem comes back downmixed to mono; a file with more than two channels is
 processed channel by channel, each source channel as its own duplicated-stereo run
@@ -1996,10 +1999,16 @@ and cancel) and runs:
   The whine-hiss modes are offered by the downloader: **htdemucs-whine-hiss_v1**
   takes any `.gguf` from `<models>/audiocpp/HTDemucs-WhineHiss-v1-GGUF/` (fetched
   from [Super3dMax/htdemucs-whine-hiss_v1](https://huggingface.co/Super3dMax/htdemucs-whine-hiss_v1),
-  ~84 MB f16 or ~99 MB q8_0) and **htdemucs-whine-hiss-click-bump_v1** takes any
+  ~84 MB f16 or ~99 MB q8_0), **htdemucs-whine-hiss-click-bump_v1** takes any
   `.gguf` from `<models>/audiocpp/HTDemucs-WhineHiss-ClickBump-v1-GGUF/` (fetched
   from [Super3dMax/htdemucs-whine-hiss-click-bump_v1](https://huggingface.co/Super3dMax/htdemucs-whine-hiss-click-bump_v1),
-  ~62 MB q8_0 or ~84 MB f16). The model dropdown lists every `.gguf` found in the
+  ~62 MB q8_0 or ~84 MB f16), **htdemucs-whine-hiss_v2** takes any `.gguf` from
+  `<models>/audiocpp/HTDemucs-WhineHiss-v2-GGUF/` (fetched from
+  [Super3dMax/htdemucs-whine-hiss_v2](https://huggingface.co/Super3dMax/htdemucs-whine-hiss_v2),
+  ~220 MB f16 or ~222 MB q8_0) and **htdemucs-whine-hiss_clicks_speech_v1** takes
+  any `.gguf` from `<models>/audiocpp/HTDemucs-ClicksSpeech-v1-GGUF/` (fetched from
+  [Super3dMax/htdemucs-whine-hiss_clicks_speech_v1](https://huggingface.co/Super3dMax/htdemucs-whine-hiss_clicks_speech_v1),
+  ~84 MB f16 or ~99 MB q8_0). The model dropdown lists every `.gguf` found in the
   folder, so you can install more manually and they appear automatically.
 
 Everything lives in `<models>/audiocpp/`, where `<models>` is

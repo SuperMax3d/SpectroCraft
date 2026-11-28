@@ -32,8 +32,13 @@ struct StemService
                            // all need stereo input (mono duplicated to L=R)
         HtWhineHiss          = 4,  // htdemucs-whine-hiss_v1: whine + hiss stems
                                    // (single .gguf file, Super3dMax HF repo)
-        HtWhineHissClickBump = 5   // htdemucs-whine-hiss-click-bump_v1:
+        HtWhineHissClickBump = 5,  // htdemucs-whine-hiss-click-bump_v1:
                                    // whine/hiss/click/bump stems (single .gguf file)
+        HtWhineHissV2        = 6,  // htdemucs-whine-hiss_v2: whine + hiss stems,
+                                   // high-capacity variant (single .gguf file)
+        HtClicksSpeech       = 7   // htdemucs-whine-hiss_clicks_speech_v1:
+                                   // speech/whines/hiss/click_bump stems
+                                   // (single .gguf file)
     };
 
     /** One SAM-Audio description. Anchor times are DOCUMENT seconds; run()

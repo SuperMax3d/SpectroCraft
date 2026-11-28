@@ -932,7 +932,11 @@ public:
         // the command-line files to a running instance and quit this one.
         // --control skips it: the instance launched by the AI adapter must be
         // a controllable one (it writes its own discovery file).
-        if (!controlFlag)
+        // --finish-update skips it too (#92): spectrocraft-updater relaunched
+        // this process precisely so that it becomes the running app; handing
+        // off to an older still-open instance would end the update sequence
+        // with no window at all.
+        if (!controlFlag && !finishUpdateFlag)
         {
             juce::StringArray names;
             for (const auto& f : cliFiles) names.add (f.getFullPathName());
