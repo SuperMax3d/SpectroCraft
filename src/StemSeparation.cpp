@@ -155,7 +155,7 @@ struct StemSeparationWindow::RunJob
     double extStopSecs = 0.0;
     double rate = 48000.0;
     juce::String resultName;          // suggested name for the new document
-    int mode = 1;                     // 1=Sam Audio 2-5=htdemucs families
+    int mode = 1;                     // 1=Sam Audio 2-7=htdemucs families
     int outputMode = 1;               // 1=new file 2=overwrite current 3=append to current
     FileDoc* docAtStart = nullptr;    // the active document when Run was clicked
 };
@@ -255,7 +255,9 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     modeCombo_.addItem ("htdemucs_ft", 3);
     modeCombo_.addItem ("htdemucs-whine-hiss_v1", 4);
     modeCombo_.addItem ("htdemucs-whine-hiss-click-bump_v1", 5);
-    modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 5) - 1,
+    modeCombo_.addItem ("htdemucs-whine-hiss_v2", 6);
+    modeCombo_.addItem ("htdemucs-whine-hiss_clicks_speech_v1", 7);
+    modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 7) - 1,
                                      juce::dontSendNotification);
     modeCombo_.setTooltip ("Sam Audio extracts what you describe in words; the htdemucs "
                            "modes split the sound into fixed stems.");
@@ -430,6 +432,8 @@ juce::String StemSeparationWindow::familyForMode() const
         case 3:  return "demucsft";
         case 4:  return "whinehiss";
         case 5:  return "whinehissclickbump";
+        case 6:  return "whinehissv2";
+        case 7:  return "clicksspeech";
         default: return "sam";
     }
 }
@@ -441,6 +445,8 @@ juce::String& StemSeparationWindow::savedModelName()
         case 2:  return app_.settings.acppModel6;
         case 4:  return app_.settings.acppModelWH;
         case 5:  return app_.settings.acppModelWHCB;
+        case 6:  return app_.settings.acppModelWHV2;
+        case 7:  return app_.settings.acppModelCSS;
         case 3:  { static juce::String none; none.clear (); return none; }   // one folder, nothing to remember
         default: return app_.settings.acppModel;
     }
@@ -803,7 +809,7 @@ void StemSeparationWindow::startRun()
     if (!eng.isFileLoaded())
     { statusLabel_.setText ("Load a file first.", juce::dontSendNotification); return; }
 
-    const int modeId = selectedModeId ();   // 1=Sam Audio, 2-5=htdemucs families
+    const int modeId = selectedModeId ();   // 1=Sam Audio, 2-7=htdemucs families
     const bool demucs = modeId >= 2;
 
     // Collect the descriptions to run (Sam Audio only - the htdemucs modes
@@ -933,6 +939,8 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                     : j.mode == 3 ? sc::StemService::Mode::HtDemucsFt
                     : j.mode == 4 ? sc::StemService::Mode::HtWhineHiss
                                   : j.mode == 5 ? sc::StemService::Mode::HtWhineHissClickBump
+                                  : j.mode == 6 ? sc::StemService::Mode::HtWhineHissV2
+                                  : j.mode == 7 ? sc::StemService::Mode::HtClicksSpeech
                                                 : sc::StemService::Mode::SamAudio);
         for (const auto& d : j.descs)
             req.descriptions.push_back ({ d.text, d.anchors });

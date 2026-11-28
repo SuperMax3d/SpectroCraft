@@ -248,10 +248,12 @@ void Application::loadSettings ()
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1,
                                               (int) sc::acpp::backendChoices ().size ());
     settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
-    settings.stemSepMode        = std::clamp ((int) recentStore->getIntValue ("stem_sep_mode", 1), 1, 5);
+    settings.stemSepMode        = std::clamp ((int) recentStore->getIntValue ("stem_sep_mode", 1), 1, 7);
     settings.acppModel6         = recentStore->getValue ("acpp_model_6", juce::String ());
     settings.acppModelWH        = recentStore->getValue ("acpp_model_wh", juce::String ());
     settings.acppModelWHCB      = recentStore->getValue ("acpp_model_whcb", juce::String ());
+    settings.acppModelWHV2      = recentStore->getValue ("acpp_model_whv2", juce::String ());
+    settings.acppModelCSS       = recentStore->getValue ("acpp_model_css", juce::String ());
     settings.stemSepOutputMode  = std::clamp ((int) recentStore->getIntValue ("stem_sep_output", 1), 1, 3);
     // Super Resolution (Effects menu).
     settings.superResMode       = std::clamp ((int) recentStore->getIntValue ("super_res_mode", 1), 1, 2);
@@ -363,6 +365,8 @@ void Application::saveSettings ()
     recentStore->setValue ("acpp_model_6", settings.acppModel6);
     recentStore->setValue ("acpp_model_wh", settings.acppModelWH);
     recentStore->setValue ("acpp_model_whcb", settings.acppModelWHCB);
+    recentStore->setValue ("acpp_model_whv2", settings.acppModelWHV2);
+    recentStore->setValue ("acpp_model_css", settings.acppModelCSS);
     recentStore->setValue ("stem_sep_output", settings.stemSepOutputMode);
     recentStore->setValue ("super_res_mode", settings.superResMode);
     recentStore->setValue ("super_res_model", settings.superResModel);

@@ -65,6 +65,12 @@ std::vector<juce::File> listWhineHissModels(const juce::File& d = {});
 /** All *.gguf model files in d/HTDemucs-WhineHiss-ClickBump-v1-GGUF (the htdemucs-whine-hiss-click-bump_v1 family), sorted by name. */
 std::vector<juce::File> listWhineHissClickBumpModels(const juce::File& d = {});
 
+/** All *.gguf model files in d/HTDemucs-WhineHiss-v2-GGUF (the htdemucs-whine-hiss_v2 family), sorted by name. */
+std::vector<juce::File> listWhineHissV2Models(const juce::File& d = {});
+
+/** All *.gguf model files in d/HTDemucs-ClicksSpeech-v1-GGUF (the htdemucs-whine-hiss_clicks_speech_v1 family), sorted by name. */
+std::vector<juce::File> listClicksSpeechModels(const juce::File& d = {});
+
 // ---------------------------------------------------------------------------
 // Super Resolution (FlashSR / AudioSR) support.
 // ---------------------------------------------------------------------------
@@ -161,10 +167,11 @@ std::vector<ModelSpec> modelChoices();
 juce::String modelUrl(const juce::String& fileName);
 
 /** One downloadable htdemucs engine model from the Super3dMax Hugging Face
-    repos (htdemucs-whine-hiss_v1 and htdemucs-whine-hiss-click-bump_v1). */
+    repos (htdemucs-whine-hiss_v1, -click-bump_v1, _v2 and
+    _clicks_speech_v1). */
 struct DemucsEngineSpec
 {
-    int mode = 0;          // StemService::Mode id: 4 or 5
+    int mode = 0;          // StemService::Mode id: 4 to 7
     std::string file;      // gguf file name inside the family folder
     int64_t sizeBytes = 0; // exact download size
     std::string sha256;    // 64 lowercase hex chars of the file ("" = unknown)
@@ -202,7 +209,9 @@ struct ModelOption
 
 /** Families: "sam" (Sam Audio), "demucs6" (htdemucs_6stems), "demucsft"
     (htdemucs_ft), "whinehiss" (htdemucs-whine-hiss_v1), "whinehissclickbump"
-    (htdemucs-whine-hiss-click-bump_v1), "flashsr", "audiosr". The download
+    (htdemucs-whine-hiss-click-bump_v1), "whinehissv2" (htdemucs-whine-hiss_v2),
+    "clicksspeech" (htdemucs-whine-hiss_clicks_speech_v1), "flashsr", "audiosr".
+    The download
     catalogue's versions first, in its order (installed or not), then the
     installed files the catalogue does not know. The manual families
     (demucs6, demucsft) list only what is installed. */

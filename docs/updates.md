@@ -225,7 +225,9 @@ mix of two versions.
 | `update_skipped_version` | The version the user answered *[Later]* to |
 
 Command-line: `SpectroCraft --finish-update` (used by the updater; the app reports the result and
-removes the leftovers). `spectrocraft-updater --help` lists its modes (`--sign`, `--verify`,
+removes the leftovers). Such a start never hands itself to another running instance, even with
+*Allow multiple instances* off (#92): the updater relaunched it precisely so that it becomes the
+running app. `spectrocraft-updater --help` lists its modes (`--sign`, `--verify`,
 `--public` besides the swap).
 
 ## Platforms

@@ -7353,15 +7353,17 @@ static void testStemSepModeOutputCombos()
     CHECK (dlg != nullptr, "stem separation window opened for mode test");
     if (dlg == nullptr) return;
 
-    // Mode combo: five families with Sam Audio as the default.
+    // Mode combo: seven families with Sam Audio as the default.
     juce::ComboBox* mode = dlg->modeComboForTest ();
-    CHECK (mode != nullptr && mode->getNumItems () == 5, "mode combo has five items");
+    CHECK (mode != nullptr && mode->getNumItems () == 7, "mode combo has seven items");
     if (mode == nullptr) return;
     CHECK (mode->getItemText (0) == "Sam Audio", "mode item 1 is Sam Audio");
     CHECK (mode->getItemText (1) == "htdemucs_6stems", "mode item 2 is htdemucs_6stems");
     CHECK (mode->getItemText (2) == "htdemucs_ft", "mode item 3 is htdemucs_ft");
     CHECK (mode->getItemText (3) == "htdemucs-whine-hiss_v1", "mode item 4 is htdemucs-whine-hiss_v1");
     CHECK (mode->getItemText (4) == "htdemucs-whine-hiss-click-bump_v1", "mode item 5 is htdemucs-whine-hiss-click-bump_v1");
+    CHECK (mode->getItemText (5) == "htdemucs-whine-hiss_v2", "mode item 6 is htdemucs-whine-hiss_v2");
+    CHECK (mode->getItemText (6) == "htdemucs-whine-hiss_clicks_speech_v1", "mode item 7 is htdemucs-whine-hiss_clicks_speech_v1");
     CHECK (dlg->selectedModeId () == 1, "Sam Audio mode by default");
 
     // Output combo: three destinations with copy-to-new-file as the default.
@@ -7395,7 +7397,7 @@ static void testStemSepModeOutputCombos()
     // + settings write) has run before the checks: an async notification
     // followed by a 5 ms pump was not reliably delivered.
     const int heightSam = dlg->getHeight();
-    for (int m = 2; m <= 5; ++m)
+    for (int m = 2; m <= 7; ++m)
     {
         mode->setSelectedItemIndex (m - 1, juce::sendNotificationSync);
         CHECK (dlg->selectedModeId () == m, "mode switch to " + juce::String (m));
@@ -7406,7 +7408,7 @@ static void testStemSepModeOutputCombos()
     }
     {
         Application reread (store);
-        CHECK (reread.settings.stemSepMode == 5, "mode 5 persisted to the settings file");
+        CHECK (reread.settings.stemSepMode == 7, "mode 7 persisted to the settings file");
     }
 
     // Back to Sam Audio: the description area is back and nothing overlaps.
@@ -8141,6 +8143,10 @@ static void testAiDownloadRequiredLists()
         CHECK (labels, "ai downloads: Stem Separation tags exactly the versions not installed");
         st->modeComboForTest ()->setSelectedItemIndex (3, juce::sendNotificationSync);   // htdemucs-whine-hiss_v1
         CHECK (st->modelOptionsForTest ().size () >= 2, "ai downloads: the htdemucs engines list their versions too");
+        st->modeComboForTest ()->setSelectedItemIndex (5, juce::sendNotificationSync);   // htdemucs-whine-hiss_v2
+        CHECK (st->modelOptionsForTest ().size () >= 2, "ai downloads: the whine-hiss v2 engine lists its versions too");
+        st->modeComboForTest ()->setSelectedItemIndex (6, juce::sendNotificationSync);   // htdemucs-whine-hiss_clicks_speech_v1
+        CHECK (st->modelOptionsForTest ().size () >= 2, "ai downloads: the clicks-speech engine lists its versions too");
         CHECK (! hasDownloadButton (*st), "ai downloads: no Download... button in Stem Separation");
         st->userTriedToCloseWindow ();
     }
